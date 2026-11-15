@@ -1,5 +1,6 @@
 // Materials: standard, toon and extended (their colours in colors.ts, the extensions in extensions.tsx).
 import { isValidElement, memo, useContext, type ReactElement } from "react";
+import { sameProps } from "../same";
 import type { TrackSpec } from "@raea/math/animate";
 import { InModel } from "../3d/all";
 import { LinearRgba, MADE_FROM, baseOf, emissiveOf, GridExtension, PaintExtension, WearExtension, ShaderExtension, ToonExtension, wearOf, type Affine2, type Srgba, type Only, type GridExtensionProps, type PaintExtensionProps, type WearExtensionProps, type ShaderExtensionProps, type ToonExtensionProps } from "./all";
@@ -240,7 +241,7 @@ function uvOf(t: Affine2 | undefined): { repeat?: [number, number]; uvTransform?
  * @bevy bevy_pbr::pbr_material::StandardMaterial */
 export const StandardMaterial = memo(function StandardMaterial<A>(p: StandardMaterialProps & { animate?: Only<A, StandardMaterialAnimate> }) {
   return standard(p, {});
-}) as unknown as <A>(p: StandardMaterialProps & { animate?: Only<A, StandardMaterialAnimate> }) => ReactElement;
+}, sameProps) as unknown as <A>(p: StandardMaterialProps & { animate?: Only<A, StandardMaterialAnimate> }) => ReactElement;
 
 // raea's extensions an ExtendedMaterial puts on its StandardMaterial, as the old material's props
 type Extended = { grid?: GridExtensionProps; paint?: PaintExtensionProps; wear?: MeshStandardMaterialProps["wear"]; procedural?: ReturnType<typeof proceduralOf>; shader?: Record<string, unknown> };

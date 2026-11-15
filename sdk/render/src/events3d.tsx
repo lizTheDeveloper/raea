@@ -12,6 +12,7 @@
 // handlers for that frame are called. Frames go in order (a play, a render of a run of frames), as a page's own
 // events do: a render of one frame on its own has no frame before it to press in.
 import { createContext, useContext, useEffect } from "react";
+export { sameProps, sameValue } from "./same";
 import { useCurrentFrame, useVideoConfig } from "@raea/app/clock";
 import { useInput } from "@raea/app/games";
 import { hasNative, native } from "@raea/app/native";
