@@ -292,9 +292,10 @@ line), so none fell back.
 
 ### Current build and pin
 
-- **Latest:** `0.1.4-pc210` (commit 847f761; release with sha256 on the fork). pc209 plus a faster engine open
-  and close, and the models' load-race determinism fix (below). Handed to the queue agent to pin, rollback pc209.
-  Ch5 cached 188 -> 245 frames/min, Ch2 185 -> 241 (medians of 3 interleaved, quiet host).
+- **Latest and pinned:** `0.1.4-pc211` (commit d0cec75; release with sha256 on the fork; rollback pc210). JSC on
+  the system malloc (the members' map exhaustion), bare <Entity> placement per frame (Ch1's batch-boundary zoom pops),
+  near/far keyed, threads sized to the process's share and never fatal, no file watcher in render runtimes, 3D text
+  following its atlas, `raea render-serve`.
 - **Pin:** pc203 was pinned for new reels. pc204–pc207 were each marked "ready to pin" in the project's
   design/render-perf.md status lines, and the queue agent pins with rollback.
 - **Install:** `tools/render-vast-setup.sh 0.1.4-pcN` (project). It installs raea 0.1.4, swaps in the fork binary
@@ -341,6 +342,17 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **pc211 shipped and pinned (rq pin, rollback pc210).** Validation: Ch5 identical to live; Ch2 62.5 dB; Ch5 8400 86.7
+  and Ch1 22800 75.0 dB to live; coverage >=74 dB vs pc210; split batch vs one 57.7 dB (was 25.7).
+- **Next, in order:**
+  1. rq: run batches through `raea render-serve` (one server per lane slot; request = JSON args; `SERVED` line per
+     request). Gain ~1.5 s a batch (process start). No engine reuse until 2.
+  2. Engine reuse across served shots (RAEA_KEEP_ENGINE=1): fails sticky-check (Ch5 repeated 28.9 dB; Ch3, Ch5 @3300).
+     The text atlas is not the only carried state; find the rest (rows dump on a repeated shot, served vs fresh).
+  3. Ch3 @900 shadow-banding flicker (visible, run to run, both paths).
+  4. The second ~115-thread compute pool, most likely libraea_bundle.so's own Bevy statics.
+  5. Upstream PRs (feedback: only after production validation): Entity per-frame sync, JSC Malloc=1, the load race,
+     text atlas follow, par helper.
 - **Ch1 zoom pops at batch boundaries = bare <Entity> placements not synced per frame** (fixed d0cec75, live and
   native). sync_meshes only takes Mesh3d/Model3d/Instanced, so an <Entity>'s keyed placement applied at spawn only:
   Ch1's pocket-world window cameras (worlds-kit <Entity>s following the main view) froze per batch. Found by rendering
