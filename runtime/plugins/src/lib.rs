@@ -257,6 +257,18 @@ pub fn arm(world: &mut World) {
     } else {
         Duration::ZERO
     };
+    // a jump (a still started at frame f: Time brought there at once) is one fixed step of its own length, then the
+    // step is the frame's again. Bevy's fixed loop otherwise caught up the jump a frame's step at a time: a batch from
+    // Ch5's frame 2400 ran FixedMain 2,400 times on its first draw (avian's schedule and the transforms over ~10k
+    // entities, 2.5 ms each: about 6 s), Ch2's from 14189 about 14,000 (21 s). Only a scene with nothing to carry
+    // jumps (Engine::catch_up replays the others frame by frame), so one long step is the same frame
+    let jump = dt > frame_dt + frame_dt / 2;
+    if let Some(mut fixed) = world.get_resource_mut::<Time<Fixed>>() {
+        let want = if jump { dt } else { frame_dt };
+        if !want.is_zero() && fixed.timestep() != want {
+            fixed.set_timestep(want);
+        }
+    }
     world.insert_resource(TimeUpdateStrategy::ManualDuration(dt));
 }
 
