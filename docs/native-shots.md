@@ -274,3 +274,14 @@ line), so none fell back.
   - Ch2's engine open (19 s: glTF loads, `model_setup`, pipelines);
   - the per-frame render schedule (about 34 ms) and Update (about 29 ms);
   - the slot round trip.
+- **GPU-composited draw** (pc206): the native draw makes each frame as a fed render does (`bevy_fed_gpu`: the page
+  drawn with the 3D's target in its layered slot into one frame buffer) and reads that buffer back a frame behind.
+  - Ch5 cached: 0.170 → 0.109 s/frame, identical to live. Ch2: 0.184 → 0.117 s/frame, 57.1 dB as before.
+  - `RAEA_NATIVE_GPU=0` keeps the old path; `--alpha`, `--aov` and `RAEA_PAGE_DUMP` take it too.
+- **Parallel fold** (pc207): the fold walks each frame's 3D once, across the cores. Ch5 3.9 → 1.8 s, Ch2 4.4 → 1.8 s.
+- **Measured and not kept:**
+  - building the page while the bake runs, or while its cache is read: cold frame one 19.5 → 18.4 s, cached no
+    better, and steady frames 20–30% slower in alternating runs;
+  - the kept bake written on a thread.
+- **A binary's first render on a host** pays its bundle (about 7 s) and the GPU's per-binary shader caches (engine
+  open 13–19 s against 6.5–10 s later).
