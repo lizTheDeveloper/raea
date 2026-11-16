@@ -85,7 +85,9 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
     }
     let threads: Vec<std::thread::JoinHandle<R<(Map<String, Value>, Piece)>>> = pieces
         .iter()
-        .map(|&(a, b)| {
+        .enumerate()
+        .map(|(k, &(a, b))| {
+            let off = (k as u64 + 1) << 36;
             let (js, dir) = (js.to_path_buf(), dir.to_path_buf());
             std::thread::Builder::new()
                 .name("raea shot bake".into())
@@ -104,8 +106,19 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                         let scene = scene_of(world);
                         let clear = scene_clear(world);
                         let tapped = std::mem::take(&mut world.resource_mut::<raea_runtime_react::CommitTap>().0);
+                        // RAEA_NATIVE_SCENES=DIR: each stepped frame's 3D parts in order (kind, identity, place), by the
+                        // frame and the piece it was stepped in, to compare runtimes
+                        if let Some(d) = std::env::var_os("RAEA_NATIVE_SCENES").map(PathBuf::from) {
+                            let _ = std::fs::create_dir_all(&d);
+                            let parts: Vec<Value> = raea_runtime_scene::items_of(&scene).iter().map(|it| { let t = it.world.w_axis; json!([it.kind, raea_core_scene::base_ident(it), [t.x, t.y, t.z]]) }).collect();
+                            let _ = std::fs::write(d.join(format!("{f}-{a}.json")), Value::Array(parts).to_string());
+                        }
                         // a piece's first frame: what's there goes, then this runtime's whole tree (its node ids are its own)
                         let ops = if f == a { vec![raea_runtime_bake::RESET.to_string(), Value::Array(raea_runtime_react::snapshot_ops(world)).to_string()] } else { tapped };
+                        // each piece's node ids in a range of their own: another runtime numbers its tree its own way,
+                        // and the page kept what it knew of an id across the RESET (Ch2 @14230: the layered 3D's
+                        // holder painted over it from the piece that renumbered it on)
+                        let ops = ops.into_iter().map(|j| if j == raea_runtime_bake::RESET { j } else { ids_moved(&j, off) }).collect();
                         out.push((f, ops, scene, clear));
                         Ok(())
                     };
@@ -145,6 +158,19 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
         return Ok(None);
     }
     Ok(conf.map(|c| (c, all)))
+}
+
+/// A commit's node ids moved up by `off` (the root's, 0, stays): a piece's ids kept apart from every other piece's.
+fn ids_moved(json: &str, off: u64) -> String {
+    let Ok(mut ops) = serde_json::from_str::<Vec<Value>>(json) else { return json.to_string() };
+    for op in ops.iter_mut().filter_map(Value::as_object_mut) {
+        for k in ["id", "parent", "child", "before"] {
+            if let Some(n) = op.get(k).and_then(Value::as_u64).filter(|n| *n != raea_runtime_react::ROOT_ID) {
+                op.insert(k.into(), json!(n + off));
+            }
+        }
+    }
+    Value::Array(ops).to_string()
 }
 
 /// The shot's 3D as a Program over its own frames: folded over `lo..` (the stepped frames, a gap held at the frame
