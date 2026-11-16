@@ -70,6 +70,16 @@ pub fn render(args: &[String]) -> R<String> {
     // (--native brings it too, unless --no-jit: a shot's bake is the one place its JavaScript runs)
     let native_jit = args.iter().any(|a| a == "--native") && !args.iter().any(|a| a == "--no-jit");
     if args.iter().any(|a| a == "--jit") || native_jit {
+        // JavaScriptCore on the system's malloc (WebKit's `Malloc=1`), unless the environment says otherwise: its own
+        // heap (libpas) maps small 16 KB regions it doesn't coalesce, and a bake's runtimes (up to 32 VMs) took Ch1's
+        // 22800-22950 past vm.max_map_count (65530) in 30 s: mmap then failed everywhere ("failed to allocate an
+        // alternative stack", the frames' allocations), and the process aborted or hung (exit 134 and the 600 s
+        // hang refusal across Ch1 and Ch5 batches, 2026-11-16). On the system's malloc that batch peaks at 6.7k maps;
+        // Ch5 @2400 at 2.1k against 7-14k, frames identical. vast containers can't raise max_map_count.
+        if std::env::var_os("Malloc").is_none() {
+            // SAFETY: before any thread of the render starts (React's runtimes start below)
+            unsafe { std::env::set_var("Malloc", "1") };
+        }
         if raea_runtime_react::jsengine_jsc_available() {
             // SAFETY: before any thread of the render starts (React's runtimes start below)
             unsafe { std::env::set_var("BEVY_TSX_ENGINE", "jsc") };

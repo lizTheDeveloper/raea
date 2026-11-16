@@ -341,6 +341,19 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **Root cause of the members' aborts and hangs: JavaScriptCore's heap exhausts vm.max_map_count.** Reproduced on Ch1
+  22800-22949 (pc208, native): maps 95 -> 65,531 in ~30 s during the bake, then "memory allocation failed" and abort
+  (exit 134). The maps are tens of thousands of small anonymous rw regions (16/12/32 KB): libpas, JSC's allocator,
+  across the bake's up-to-32 VMs. QuickJS: 2.3k maps, done in 255 s; JSC on the system malloc (WebKit's `Malloc=1`):
+  6.7k, done in 184 s. Ch5 @2400: 7-14k -> 2.1k, frames identical, bake +0.5-1.3 s. The "stack overflow" (ENOMEM on a
+  thread's alternative stack), the 600 s hang refusals and the thread-spawn EAGAINs are this. vast containers can't
+  raise max_map_count (read-only /proc/sys), so raea now sets `Malloc=1` when it picks JSC (unless set).
+- **rq (tools/rq.py, renamed over):** a RESOURCE class (hangs, std's stack-overflow handler, thread spawn, ENOMEM,
+  EAGAIN, map count) retried on another member with no blame, failing a job only after 5 members (a "hangs" refusal
+  failed ch01v72-p21300 outright as a job fault); HOST_HARD now catches "Unable to find a GPU" / a panic in
+  bevy_render's renderer (60953699 at 11:38 went unblamed). Dispatcher restarted on it (SIGTERM saves; resume).
+- **Dev box moved** to 60968602 (400 GB; EPYC 7B13 / 4090, 141.195.21.87:43316) after 60922640's 160 GB disk filled
+  with build caches (no deleting: a bigger box instead). Destroy both when done.
 - **"Stack overflow" on Ch5 8400-8550 (and many Ch1/Ch5 batches in rq.log, exit 134) is thread exhaustion, not
   recursion.** The member's log: "failed to allocate an alternative stack: Cannot allocate memory", then the main
   thread's `thread::scope` "failed to spawn thread: Resource temporarily unavailable" -> abort. It didn't reproduce on
