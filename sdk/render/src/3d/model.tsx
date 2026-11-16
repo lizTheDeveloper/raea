@@ -1,5 +1,6 @@
 // Bevy's parts, groups and <Model>: glTF scenes, clips and their events.
-import { createContext, useId, type ReactNode } from "react";
+import { createContext, memo, useId, type ReactNode } from "react";
+import { samePropsDeep } from "../same";
 import { useCurrentFrame, useVideoConfig } from "@raea/app/clock";
 import { checkGrid } from "../overlays";
 import { modelScreens, type ModelScreens } from "../screen";
@@ -76,7 +77,7 @@ export interface EntityProps {
  * ("shape:box(1, 1, 1)"); an Entity field takes another part's name or row id, or entity bits. So Mesh3d,
  * MeshMaterial3d<StandardMaterial>, Sprite, ChildOf and the rest of Bevy's components are reachable without a
  * hand-written element. */
-export function Entity({ children, ...rest }: EntityProps) {
+function EntityPart({ children, ...rest }: EntityProps) {
   if (rest.transform !== undefined) {
     const { transform: t, pass, ...own } = rest;
     if (own.position !== undefined || own.rotation !== undefined || own.scale !== undefined) throw new TypeError("Entity: transform, or position, rotation and scale, not both");
@@ -95,6 +96,8 @@ export function Entity({ children, ...rest }: EntityProps) {
   const m = usePlace3d(rest.position ?? [0, 0, 0], rest.rotation ?? [0, 0, 0], rest.scale ?? 1);
   return node3d("Entity", rest, <Place3d.Provider value={m}>{pageLayers("Entity", rest.name ?? `layer${id}`, children)}</Place3d.Provider>);
 }
+/** Skipped while its props, children included, are the same values (same.ts): a still subtree re-renders nothing. */
+export const Entity = memo(EntityPart, samePropsDeep) as unknown as typeof EntityPart;
 
 export interface GroupProps {
   position?: Vec3;

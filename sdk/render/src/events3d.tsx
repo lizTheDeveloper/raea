@@ -11,8 +11,9 @@
 // frame renders, the camera its view; once the frame commits, the pointer is picked against them once and each part's
 // handlers for that frame are called. Frames go in order (a play, a render of a run of frames), as a page's own
 // events do: a render of one frame on its own has no frame before it to press in.
-import { createContext, useContext, useEffect } from "react";
-export { sameProps, sameValue } from "./same";
+import { createContext, useContext, useEffect, useRef } from "react";
+import { sameNumbers } from "./same";
+export { sameProps, samePropsDeep, sameValue } from "./same";
 import { useCurrentFrame, useVideoConfig } from "@raea/app/clock";
 import { useInput } from "@raea/app/games";
 import { hasNative, native } from "@raea/app/native";
@@ -343,7 +344,15 @@ export function pickIn(pointer: { x: number; y: number }, camera: PickCamera, pa
 
 /** Place3d's value inside a part at `m` (its parent's world matrix times its own). */
 export function usePlace3d(position: Vec3, rotation: Vec3, scale: number | Vec3, q?: [number, number, number, number]): Mat4 {
-  return under(useContext(Place3d), local(position, rotation, scale, q));
+  // the same matrix while the parent's and its own place are the same numbers: a new one each frame is a new Place3d,
+  // which re-renders every part under it however it's memoised
+  const parent = useContext(Place3d);
+  const kept = useRef<{ parent: Mat4; position: Vec3; rotation: Vec3; scale: number | Vec3; q?: number[]; m: Mat4 } | null>(null);
+  const k = kept.current;
+  if (k && k.parent === parent && sameNumbers(k.position, position) && sameNumbers(k.rotation, rotation) && sameNumbers(k.scale, scale) && sameNumbers(k.q, q)) return k.m;
+  const m = under(parent, local(position, rotation, scale, q));
+  kept.current = { parent, position: [...position], rotation: [...rotation], scale: typeof scale === "number" ? scale : [...scale], q: q && [...q], m };
+  return m;
 }
 
 /** A part's pointer handlers, as a page element's. */

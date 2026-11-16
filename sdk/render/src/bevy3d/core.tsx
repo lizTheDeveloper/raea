@@ -1,5 +1,6 @@
 // Quat, Transform, Mesh3d and Camera3d.
-import { Children, cloneElement, isValidElement, useId, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, memo, useId, type ReactNode } from "react";
+import { samePropsDeep } from "../same";
 import { meshLayers } from "../layers";
 import { BevyComponent, DepthOfField, Fog, dofOf, eulerOf, type DepthOfFieldProps, type FogProps, type Vec3 } from "../3d";
 import { AmbientLight as AmbientLight3, Mesh, OrthographicCamera, PerspectiveCamera, type MeshProps } from "../three";
@@ -194,7 +195,7 @@ export interface Mesh3dProps extends Omit<MeshProps, "position" | "rotation" | "
  * `layers` is its RenderLayers (a light's and a camera's too): @bevy bevy_camera::visibility::render_layers::RenderLayers
  * shadow="only" draws it with the shadow-only material (engine/render shadow_only.rs):
  * @bevy bevy_pbr::mesh_material::MeshMaterial3d<raea_render::engine::shadow_only::ShadowOnlyMaterial> */
-export function Mesh3d({ transform, visibility, children, ...rest }: Mesh3dProps) {
+function Mesh3dPart({ transform, visibility, children, ...rest }: Mesh3dProps) {
   const id = useId();
   if (visibility === "Hidden") return null;
   const layers = meshLayers("Mesh3d", rest.name ?? `layer${id}`, children, true);
@@ -207,6 +208,8 @@ export function Mesh3d({ transform, visibility, children, ...rest }: Mesh3dProps
     </>
   );
 }
+/** Skipped while its props, children included, are the same values (same.ts): a still part re-renders nothing. */
+export const Mesh3d = memo(Mesh3dPart, samePropsDeep) as unknown as typeof Mesh3dPart;
 
 /** Bevy's Projection enum, as it reflects: fov in radians (Bevy's default PI/4). */
 export type Projection =
