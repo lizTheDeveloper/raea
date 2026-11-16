@@ -215,6 +215,20 @@ impl Engine {
             app.world_mut().resource_mut::<bevy::light::cluster::GlobalClusterSettings>().gpu_clustering = None;
         }
         app.cleanup();
+        // every camera's draws (and its shadow views') built on the CPU in a fixed order, not culled and compacted on the
+        // GPU: GPU culling packs a batch's instances with atomics, so their draw order, and so which of two surfaces at
+        // the same depth wins, changed from run to run (Ch3 @900's sloped wall, two coplanar slabs: lit or dark by run,
+        // 32 dB apart; identical on every run without it). RAEA_GPU_CULLING=1 brings Bevy's back
+        if std::env::var("RAEA_GPU_CULLING").as_deref() != Ok("1") {
+            app.add_observer(|add: On<Add<Camera>>, mut commands: Commands| {
+                commands.entity(add.entity).insert(bevy::render::view::NoIndirectDrawing);
+            });
+            let world = app.world_mut();
+            let cams: Vec<Entity> = world.query_filtered::<Entity, With<Camera>>().iter(world).collect();
+            for e in cams {
+                world.entity_mut(e).insert(bevy::render::view::NoIndirectDrawing);
+            }
+        }
         mem_mark("engine: plugins cleaned up");
         // supersampled, the UI (the page's nodes, the frame tag) laid out at the edit's size and scaled up with the frame
         app.insert_resource(bevy::ui::UiScale(ss as f32));
