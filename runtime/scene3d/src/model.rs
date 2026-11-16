@@ -52,6 +52,13 @@ pub fn model_setup(
     targets: Query<(Option<&Name>, Option<&bevy::animation::AnimationTargetId>)>,
     spawned: Query<(), With<SceneSpawned>>,
 ) {
+    // the textures of every glTF that's ready to spawn this update, mipped together across the cores (mip_gltfs_textures)
+    {
+        let ready: Vec<&Gltf> = models.iter().filter(|(_, m)| matches!(m.state, ModelState::Loading) && server.is_loaded_with_dependencies(&m.gltf)).filter_map(|(_, m)| gltfs.get(&m.gltf)).collect();
+        if !ready.is_empty() {
+            raea_sys_material::maps::mip_gltfs_textures(&ready, &mats, &mut images);
+        }
+    }
     for (e, mut m) in &mut models {
         let was = m.ready();
         // every way out of a step (a model failed, still loading, or ready) comes to ModelReady below

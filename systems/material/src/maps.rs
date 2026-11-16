@@ -95,31 +95,65 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
 /// memory only (compressed and float ones keep what they have); sampled trilinearly, 16x anisotropic, keeping the
 /// file's address modes. An image two models share is done once.
 pub fn mip_gltf_textures(g: &Gltf, mats: &Assets<bevy::gltf::GltfMaterial>, images: &mut Assets<Image>) {
-    for mh in &g.materials {
-        let Some(m) = mats.get(mh) else { continue };
-        let texs = [&m.base_color_texture, &m.normal_map_texture, &m.metallic_roughness_texture, &m.occlusion_texture, &m.emissive_texture];
-        for t in texs.into_iter().flatten() {
-            let Some(img) = images.get(t) else { continue };
-            let fmt = img.texture_descriptor.format;
-            let srgb = fmt == TextureFormat::Rgba8UnormSrgb;
-            if img.texture_descriptor.mip_level_count > 1 || !(srgb || fmt == TextureFormat::Rgba8Unorm) || img.data.is_none() || img.texture_descriptor.size.depth_or_array_layers != 1 {
-                continue;
+    mip_gltfs_textures(&[g], mats, images);
+}
+
+/// mip_gltf_textures over several glTFs at once, the textures' chains made across the cores: a scene's first models
+/// ready together had theirs made one after another on one thread (Ch5's 290 models: 1.77 s of model_setup). Each
+/// texture's chain is the same arithmetic as before, so the images are bit-identical.
+pub fn mip_gltfs_textures(gs: &[&Gltf], mats: &Assets<bevy::gltf::GltfMaterial>, images: &mut Assets<Image>) {
+    let mut todo: Vec<(Handle<Image>, Vec<u8>, u32, u32, bool)> = Vec::new();
+    for g in gs {
+        for mh in &g.materials {
+            let Some(m) = mats.get(mh) else { continue };
+            let texs = [&m.base_color_texture, &m.normal_map_texture, &m.metallic_roughness_texture, &m.occlusion_texture, &m.emissive_texture];
+            for t in texs.into_iter().flatten() {
+                let Some(img) = images.get(t) else { continue };
+                let fmt = img.texture_descriptor.format;
+                let srgb = fmt == TextureFormat::Rgba8UnormSrgb;
+                if img.texture_descriptor.mip_level_count > 1 || !(srgb || fmt == TextureFormat::Rgba8Unorm) || img.data.is_none() || img.texture_descriptor.size.depth_or_array_layers != 1 || todo.iter().any(|d| d.0.id() == t.id()) {
+                    continue;
+                }
+                let Some(mut img) = images.get_mut(t) else { continue };
+                let (w, h) = (img.texture_descriptor.size.width, img.texture_descriptor.size.height);
+                let data = img.data.take().unwrap_or_default();
+                todo.push((t.clone(), data, w, h, srgb));
             }
-            let Some(mut img) = images.get_mut(t) else { continue };
-            let (w, h) = (img.texture_descriptor.size.width, img.texture_descriptor.size.height);
-            let (data, levels) = mips_rgba8(img.data.take().unwrap_or_default(), w, h, srgb);
-            img.data = Some(data);
-            img.texture_descriptor.mip_level_count = levels;
-            let mut d = match &img.sampler {
-                bevy::image::ImageSampler::Descriptor(d) => d.clone(),
-                _ => bevy::image::ImageSamplerDescriptor::default(),
-            };
-            d.mag_filter = bevy::image::ImageFilterMode::Linear;
-            d.min_filter = bevy::image::ImageFilterMode::Linear;
-            d.mipmap_filter = bevy::image::ImageFilterMode::Linear;
-            d.anisotropy_clamp = 16;
-            img.sampler = bevy::image::ImageSampler::Descriptor(d);
         }
+    }
+    if todo.is_empty() {
+        return;
+    }
+    // the largest first, each thread taking the next one left
+    todo.sort_by_key(|d| std::cmp::Reverse(d.2 as u64 * d.3 as u64));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let jobs: Vec<std::sync::Mutex<Option<(Vec<u8>, u32)>>> = todo.iter_mut().map(|d| std::sync::Mutex::new(Some((std::mem::take(&mut d.1), 0)))).collect();
+    let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(todo.len()).min(32);
+    std::thread::scope(|s| {
+        for _ in 0..lanes {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(d) = todo.get(i) else { break };
+                let mut slot = jobs[i].lock().unwrap();
+                let (data, _) = slot.take().unwrap_or_default();
+                *slot = Some(mips_rgba8(data, d.2, d.3, d.4));
+            });
+        }
+    });
+    for (d, j) in todo.iter().zip(jobs) {
+        let Some((data, levels)) = j.into_inner().unwrap() else { continue };
+        let Some(mut img) = images.get_mut(&d.0) else { continue };
+        img.data = Some(data);
+        img.texture_descriptor.mip_level_count = levels;
+        let mut sd = match &img.sampler {
+            bevy::image::ImageSampler::Descriptor(sd) => sd.clone(),
+            _ => bevy::image::ImageSamplerDescriptor::default(),
+        };
+        sd.mag_filter = bevy::image::ImageFilterMode::Linear;
+        sd.min_filter = bevy::image::ImageFilterMode::Linear;
+        sd.mipmap_filter = bevy::image::ImageFilterMode::Linear;
+        sd.anisotropy_clamp = 16;
+        img.sampler = bevy::image::ImageSampler::Descriptor(sd);
     }
 }
 
