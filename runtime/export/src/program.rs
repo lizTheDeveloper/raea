@@ -34,7 +34,9 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
     }
     // where it is and looks, frame by frame; its lens, ambient light and post-processing (raea-runtime-scene); a second
     // camera's row after it, drawn over it
-    let more = if has3d { raea_runtime_scene::camera(&scene::all_items(frames), &mut p, &mut cam) } else { Vec::new() };
+    // each frame's parts, walked once for the camera and the rows (it was walked for each)
+    let all = if has3d { scene::all_items_par(frames) } else { Vec::new() };
+    let more = if has3d { raea_runtime_scene::camera(&all, &mut p, &mut cam) } else { Vec::new() };
     p.spawns.push(("camera".into(), std::iter::once(cam).chain(more).collect()));
     // the pages: each distinct page shown for the frames in a row it's the same
     let mut runs: Vec<(String, usize, usize)> = Vec::new();
@@ -120,7 +122,7 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
     }
     if has3d {
         // lights, meshes, models and pictures in space, matched across frames by identity (raea-runtime-scene)
-        raea_runtime_scene::rows(&scene::all_items(frames), &mut p);
+        raea_runtime_scene::rows(&all, &mut p);
     }
     p
 }

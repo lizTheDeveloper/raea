@@ -16,6 +16,18 @@ pub(crate) fn all_items(frames: &[(i64, Frame)]) -> Vec<Vec<raea_core_scene::Ite
     frames.iter().map(|(_, f)| items(f)).collect()
 }
 
+/// `all_items` across the cores: each frame's walk is its own (a native shot's fold walked 62 frames of ~10k parts
+/// on one thread, twice)
+pub(crate) fn all_items_par(frames: &[(i64, Frame)]) -> Vec<Vec<raea_core_scene::Item>> {
+    let scenes: Vec<&[raea_core_scene::Node3]> = frames.iter().map(|(_, f)| f.scene.as_slice()).collect();
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(scenes.len().max(1));
+    let per = scenes.len().div_ceil(n.max(1)).max(1);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = scenes.chunks(per).map(|c| s.spawn(move || c.iter().map(|sc| raea_runtime_scene::items_of(sc)).collect::<Vec<_>>())).collect();
+        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
+}
+
 /// raea_sys_contact::told on a render's frames: the parts that clip where the camera sees them, said on stderr
 /// (RAEA_CLIP_CHECK=0 skips it).
 pub(crate) fn told(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> Vec<raea_core_facts::Finding> {
