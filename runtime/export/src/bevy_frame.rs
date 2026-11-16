@@ -55,6 +55,36 @@ pub(crate) fn scene_straight(px: &mut [u8]) {
 }
 
 pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::BevyPage, cx: &mut Ctx, fps: f64) -> R<Vec<u8>> {
+    match over_3d(world, page, cx, fps, false)? {
+        Over::Done(px) => Ok(px),
+        Over::Reading { page, read } => Ok(page_over(cx.scene3d.as_ref().ok_or("no 3D")?.finish_read(read)?, &page)),
+    }
+}
+
+/// A frame from `over_3d`: drawn, or (the page over the 3D, nothing else) its 3D's readback in flight with the page's
+/// pixels, to be laid together (`page_over`) once the next frame's work is under way (a native shot's pipelined draw).
+pub(crate) enum Over {
+    Done(Vec<u8>),
+    Reading { page: Vec<u8>, read: raea_render::engine::ReadBack },
+}
+
+/// The page over the 3D's straight-from-the-GPU picture, opaque (`bevy_over_3d`'s last step without --alpha).
+pub(crate) fn page_over(three: Vec<u8>, px: &[u8]) -> Vec<u8> {
+    let mut out = three;
+    for (d, s) in out.chunks_exact_mut(4).zip(px.chunks_exact(4)) {
+        let k = 256 - s[3] as u32;
+        for c in 0..3 {
+            let t = d[c] as u32;
+            d[c] = (s[c] as u32 + ((t * k) >> 8)).min(255) as u8;
+        }
+        d[3] = 255;
+    }
+    out
+}
+
+/// bevy_over_3d, its readback left in flight when `split` and the frame is the page over the 3D alone (no layered
+/// slot, no camera in a page box, no UI materials, no --alpha).
+pub(crate) fn over_3d(world: &mut World, page: &mut raea_runtime_page::BevyPage, cx: &mut Ctx, fps: f64, split: bool) -> R<Over> {
     // a game's: this frame's 3D, just stepped, set on its engine (opened at the first frame with any), as the Blitz
     // fed render's snapshot_retained does
     if let Some(ls) = cx.live3d.as_mut() {
@@ -73,7 +103,7 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
     };
     let Some(e) = cx.scene3d.as_mut() else {
         // no 3D yet: the page alone, over black as the fed render's page buffer starts
-        return Ok(opaque(px));
+        return Ok(Over::Done(opaque(px)));
     };
     for (name, w, h, rgba) in pics {
         e.set_screen_picture(&name, w, h, rgba);
@@ -89,6 +119,9 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
     raea_sys_frame::gpu::said(e.world_mut(), cx.now)?;
     crate::native::part(1, t_3d);
     let px = if mats { page.read_ui_materials(e.world()).and_then(|_| page.frame())? } else { px };
+    if split && !alpha && !mats && !page.has_slot() && view.is_none() && !page.in_box {
+        return Ok(Over::Reading { page: px, read: e.start_read()? });
+    }
     let t_read = std::time::Instant::now();
     let three = e.read_target()?;
     crate::native::part(2, t_read);
@@ -101,7 +134,7 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
         let mut three = three;
         scene_straight(&mut three);
         page.set_scene(tw, th, three);
-        return Ok(opaque(page.frame()?));
+        return Ok(Over::Done(opaque(page.frame()?)));
     }
     // the camera's view as its element's picture, cropped from the frame where it was drawn; the page alone around it
     if view.is_some() != page.in_box {
@@ -117,7 +150,7 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
         }
         scene_straight(&mut crop);
         page.set_view(w, h, crop);
-        return Ok(opaque(page.frame()?));
+        return Ok(Over::Done(opaque(page.frame()?)));
     }
     // else the page over the 3D, the 3D over black (the fed render's page buffer): the 3D is premultiplied (Bevy blends
     // into it), so over black it's its own colour, as a window shows it whatever alpha an opaque, masked or
@@ -136,7 +169,7 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
         d[3] = if alpha { (s[3] as u32 + ((d[3] as u32 * k) >> 8)).min(255) as u8 } else { 255 };
     }
     if alpha { scene_straight(&mut out); }
-    Ok(out)
+    Ok(Over::Done(out))
 }
 
 /// A fed render's frame buffer for the bevy_ui page (what Blitz's quads::page_buffer is for its page): w x h RGBA8 on

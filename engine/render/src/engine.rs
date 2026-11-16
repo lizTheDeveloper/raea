@@ -211,6 +211,16 @@ fn render_creation() -> bevy::render::settings::RenderCreation {
     default()
 }
 
+/// A readback of the 3D's target in flight (Engine::start_read).
+pub struct ReadBack {
+    buf: wgpu::Buffer,
+    rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    device: wgpu::Device,
+    w: u32,
+    h: u32,
+    row: u32,
+}
+
 impl Engine {
     pub fn new(prog: &Program, inserted: &[Tup], dir: &Path) -> Result<Engine, String> {
         Engine::new_shared(prog, inserted, dir, None)
@@ -453,6 +463,13 @@ impl Engine {
     }
 
     pub fn read_target(&self) -> Result<Vec<u8>, String> {
+        let r = self.start_read()?;
+        self.finish_read(r)
+    }
+
+    /// The target's copy for reading back, queued after the frame just drawn and not waited for: `finish_read` takes
+    /// it, after the next frame's work is under way (a native shot's draw overlaps its readback this way).
+    pub fn start_read(&self) -> Result<ReadBack, String> {
         let rw = self.app.get_sub_app(bevy::render::RenderApp).ok_or("no render app")?.world();
         let gi = rw.resource::<RenderAssets<bevy::render::texture::GpuImage>>().get(&self.target).ok_or("the 3D drew no target")?;
         let device = rw.resource::<bevy::render::renderer::RenderDevice>().wgpu_device().clone();
@@ -471,8 +488,21 @@ impl Engine {
         buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).map_err(|e| format!("the 3D's readback: {e}"))?;
-        rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("the 3D's readback: {e}"))?;
+        Ok(ReadBack { buf, rx, device, w, h, row })
+    }
+
+    /// A readback `start_read` queued: waited for, its rows copied out.
+    pub fn finish_read(&self, r: ReadBack) -> Result<Vec<u8>, String> {
+        let ReadBack { buf, rx, device, w, h, row } = r;
+        // done already (a later submit's poll ran its callback), else waited for
+        let mapped = match rx.try_recv() {
+            Ok(m) => m,
+            Err(_) => {
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).map_err(|e| format!("the 3D's readback: {e}"))?;
+                rx.recv().map_err(|e| e.to_string())?
+            }
+        };
+        mapped.map_err(|e| format!("the 3D's readback: {e}"))?;
         let data = buf.slice(..).get_mapped_range().map_err(|e| format!("the 3D's readback: {e:?}"))?;
         let mut out = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h as usize {

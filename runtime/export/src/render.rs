@@ -68,7 +68,9 @@ pub fn render(args: &[String]) -> R<String> {
     // --native: stills from a shot baked once across every core, drawn with no JavaScript (docs/native-shots.md)
     // --jit: the composition's React on JavaScriptCore (WebKitGTK's on Linux, a JIT) instead of QuickJS, where it's
     // installed; a native shot's bake is where all its JavaScript runs (docs/native-shots.md)
-    if args.iter().any(|a| a == "--jit") {
+    // (--native brings it too, unless --no-jit: a shot's bake is the one place its JavaScript runs)
+    let native_jit = args.iter().any(|a| a == "--native") && !args.iter().any(|a| a == "--no-jit");
+    if args.iter().any(|a| a == "--jit") || native_jit {
         if raea_runtime_react::jsengine_jsc_available() {
             // SAFETY: before any thread of the render starts (React's runtimes start below)
             unsafe { std::env::set_var("BEVY_TSX_ENGINE", "jsc") };

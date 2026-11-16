@@ -93,15 +93,23 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
             s = e;
         }
     }
-    let threads: Vec<std::thread::JoinHandle<R<(Map<String, Value>, Piece)>>> = pieces
+    // each runtime's piece comes back on a channel; RAEA_NATIVE_PARK=1 keeps the runtimes, parked, for the rest of the
+    // process (measured: the engine's opening is the same either way, 6.3-6.9 s on Ch5; a slow one, 13-15 s, is a
+    // new binary's first run on a host, not the runtimes going)
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<R<(Map<String, Value>, Piece)>>();
+    let park = std::env::var("RAEA_NATIVE_PARK").as_deref() == Ok("1");
+    let threads: Vec<std::thread::JoinHandle<()>> = pieces
         .iter()
         .enumerate()
         .map(|(k, &(a, b))| {
             let off = (k as u64 + 1) << 36;
             let (js, dir) = (js.to_path_buf(), dir.to_path_buf());
+            let done_tx = done_tx.clone();
             std::thread::Builder::new()
                 .name("raea shot bake".into())
                 .spawn(move || {
+                    let mut kept: Option<App> = None;
+                    let r = (|| -> R<(Map<String, Value>, Piece)> {
                     edit_dir(&dir);
                     let t = std::time::Instant::now();
                     let mut app = App::new();
@@ -148,17 +156,33 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     if trace() {
                         eprintln!("raea native: piece {a}..{b}: runtime open {opened:.0} ms, {} frames stepped in {:.0} ms (flush waits {:.0} ms, {} timed out, every runtime)", b - a, t_ms(t) - opened, (ld(&raea_runtime_react::FLUSH_WAIT_NS) - w0) as f64 / 1e6, ld(&raea_runtime_react::FLUSH_TIMEOUTS) - to0);
                     }
+                    kept = Some(app);
                     Ok((conf, out))
+                    })();
+                    let ok = r.is_ok();
+                    let _ = done_tx.send(r);
+                    if ok && park {
+                        let _keep = kept;
+                        loop {
+                            std::thread::park();
+                        }
+                    }
                 })
                 .map_err(|e| e.to_string())
         })
         .collect::<Result<_, _>>()?;
+    drop(done_tx);
     let mut conf = None;
     let mut all: Piece = Vec::with_capacity(stepped.len());
-    for t in threads {
-        let (c, p) = t.join().map_err(|_| "a shot bake runtime panicked".to_string())??;
+    for _ in 0..threads.len() {
+        let (c, p) = done_rx.recv().map_err(|_| "a shot bake runtime panicked".to_string())??;
         conf.get_or_insert(c);
         all.extend(p);
+    }
+    if !park {
+        for t in threads {
+            let _ = t.join();
+        }
     }
     all.sort_by_key(|p| p.0);
     if trace() {
@@ -469,6 +493,25 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
             })
         })
         .collect();
+    // the draw pipelined (RAEA_NATIVE_PIPE=0: not): a frame that's the page over its 3D alone leaves its readback in
+    // flight, and it's taken after the next frame is drawn, so the GPU's work and the copy overlap the next frame's
+    // replay, page and draw. A frame of another kind (a layered slot, a camera in a page box) is drawn whole
+    let pipe = folder && !AOV.load(std::sync::atomic::Ordering::Relaxed) && std::env::var("RAEA_NATIVE_PIPE").as_deref() != Ok("0");
+    let mut pending: Option<(usize, i64, Vec<u8>, raea_render::engine::ReadBack)> = None;
+    let send = |i: usize, px: Vec<u8>| -> R<()> {
+        let dest = if folder { out.join(format!("frame-{i:05}.png")) } else { out.to_path_buf() };
+        tx.send((dest, px)).map_err(|_| "a frame writer stopped".to_string())
+    };
+    // a readback finished and laid under its page; one all black is the scene's own black if the GPUs still pass
+    // their canaries (as black_twice keeps one), else the render stops there, the frames before it written
+    let finish = |cx: &mut Ctx, pg: &mut raea_runtime_page::BevyPage, i: usize, f: i64, page: Vec<u8>, read: raea_render::engine::ReadBack| -> R<Vec<u8>> {
+        let e = cx.scene3d.as_ref().ok_or("no 3D")?;
+        let px = page_over(e.finish_read(read)?, &page);
+        if px.chunks_exact(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0) {
+            raea_gpu_device::check::black_twice(f, pg.canary().and_then(|()| e.canary())).map_err(|err| format!("{err}; the {i} frames before it are in {}", out.display()))?;
+        }
+        Ok(px)
+    };
     // the next stepped frame to feed; a frame before the last one fed goes back to its piece's start (a RESET)
     let mut next = 0usize;
     let (mut t_replay, mut t_draw, mut t_png) = (0f64, 0f64, 0f64);
@@ -486,29 +529,43 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
         next = at + 1;
         t_replay += t_ms(t);
         let t = std::time::Instant::now();
-        let px = raea_gpu_device::check::frame_caught(f, || {
+        let step = raea_gpu_device::check::frame_caught(f, || {
             cx.now = f;
             pg.at_frame(f, fps);
+            if pipe {
+                return over_3d(app.world_mut(), pg, &mut cx, fps, true);
+            }
             let px = bevy_over_3d(app.world_mut(), pg, &mut cx, fps)?;
             let (px, twice) = raea_gpu_device::check::black_checked(f, px, raea_sys_page::redraw_full, || bevy_over_3d(app.world_mut(), pg, &mut cx, fps))?;
             if twice {
                 raea_gpu_device::check::black_twice(f, pg.canary().and_then(|()| cx.scene3d.as_ref().map_or(Ok(()), |e| e.canary())))?;
                 lost(f, pg.visible_paint());
             }
-            Ok(px)
+            Ok(Over::Done(px))
         })
         .map_err(|e| if i == 0 { format!("{e}; no frame was written") } else { format!("{e}; the {i} frames before it are in {}", out.display()) })?;
+        // the frame before's readback, waited for now that this frame's work is queued behind it
+        if let Some((pi, pf, page, read)) = pending.take() {
+            let px = finish(&mut cx, pg, pi, pf, page, read)?;
+            send(pi, px)?;
+        }
+        match step {
+            Over::Done(px) => send(i, px)?,
+            Over::Reading { page, read } => pending = Some((i, f, page, read)),
+        }
         t_draw += t_ms(t);
         let t = std::time::Instant::now();
-        let dest = if folder { out.join(format!("frame-{i:05}.png")) } else { out.to_path_buf() };
-        tx.send((dest, px)).map_err(|_| "a frame writer stopped".to_string())?;
         if folder {
             write_aov(out, i, cx.scene3d.as_mut())?;
         }
         t_png += t_ms(t);
         if i == 0 {
-            raea_runtime_react::startup_mark("native: the first frame written");
+            raea_runtime_react::startup_mark("native: the first frame drawn");
         }
+    }
+    if let Some((pi, pf, page, read)) = pending.take() {
+        let px = finish(&mut cx, pg, pi, pf, page, read)?;
+        send(pi, px)?;
     }
     drop(tx);
     for t in writers {
