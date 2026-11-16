@@ -341,6 +341,16 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **Ch1 zoom pops at batch boundaries = bare <Entity> placements not synced per frame** (fixed d0cec75, live and
+  native). sync_meshes only takes Mesh3d/Model3d/Instanced, so an <Entity>'s keyed placement applied at spawn only:
+  Ch1's pocket-world window cameras (worlds-kit <Entity>s following the main view) froze per batch. Found by rendering
+  Ch1 4790-4809 as one batch and split at 4800 (fov.sh on the box): 25.7 dB -> 57.7 after sync_entities; the camera's
+  fov was per frame all along. Also keyed now: near/far (fold, sync_camera for both projections, live cam_keyed).
+  Batch-boundary check: /root/fov.sh BIN TAG CH A B native|live (one batch against two, frames and camera rows).
+- **pc211 gate (coordinator): peak maps under 32,765 on the worst batches.** Ch1 22800-22949: 6,632; Ch5 8400-8549:
+  4,003 (both all 150 frames). At peak glibc holds ~150 64 MB arenas (bounded); the small rwx regions are JSC's JIT.
+  MALLOC_ARENA_MAX / JSC_* thread knobs not needed for the gate; available if a member needs them.
+- **No file watcher in a render's React runtimes** (bevy-plugins needs.rs AssetPlugin; RAEA_BEVY_WATCH=1 restores).
 - **Root cause of the members' aborts and hangs: JavaScriptCore's heap exhausts vm.max_map_count.** Reproduced on Ch1
   22800-22949 (pc208, native): maps 95 -> 65,531 in ~30 s during the bake, then "memory allocation failed" and abort
   (exit 134). The maps are tens of thousands of small anonymous rw regions (16/12/32 KB): libpas, JSC's allocator,
