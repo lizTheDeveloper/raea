@@ -497,6 +497,17 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     // flight, and it's taken after the next frame is drawn, so the GPU's work and the copy overlap the next frame's
     // replay, page and draw. A frame of another kind (a layered slot, a camera in a page box) is drawn whole
     let pipe = folder && !AOV.load(std::sync::atomic::Ordering::Relaxed) && std::env::var("RAEA_NATIVE_PIPE").as_deref() != Ok("0");
+    // the frame made on the GPU (RAEA_NATIVE_GPU=0: not), as a fed video render makes it (bevy_fed_gpu): the page
+    // drawn with the 3D's target in its layered slot, or laid over it, into one frame buffer, which alone is read
+    // back, pipelined a frame behind. The whole path read the 3D back, sent it up into the page, drew the page and
+    // read that back: two full-frame round trips a frame
+    let gpu = pipe && !ALPHA.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("RAEA_PAGE_DUMP").is_none() && std::env::var("RAEA_NATIVE_GPU").as_deref() != Ok("0");
+    let dev = if gpu { raea_runtime_view::gpuview::paint_device() } else { None };
+    let fbuf = match &dev {
+        Some(_) => Some(bevy_fed_buffer(w, h)?),
+        None => None,
+    };
+    let mut copying: Option<(usize, i64, Copy)> = None;
     let mut pending: Option<(usize, i64, Vec<u8>, raea_render::engine::ReadBack)> = None;
     let send = |i: usize, px: Vec<u8>| -> R<()> {
         let dest = if folder { out.join(format!("frame-{i:05}.png")) } else { out.to_path_buf() };
@@ -504,12 +515,16 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     };
     // a readback finished and laid under its page; one all black is the scene's own black if the GPUs still pass
     // their canaries (as black_twice keeps one), else the render stops there, the frames before it written
-    let finish = |cx: &mut Ctx, pg: &mut raea_runtime_page::BevyPage, i: usize, f: i64, page: Vec<u8>, read: raea_render::engine::ReadBack| -> R<Vec<u8>> {
-        let e = cx.scene3d.as_ref().ok_or("no 3D")?;
-        let px = page_over(e.finish_read(read)?, &page);
+    let check_black = |cx: &mut Ctx, pg: &mut raea_runtime_page::BevyPage, i: usize, f: i64, px: &[u8]| -> R<()> {
         if px.chunks_exact(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0) {
+            let e = cx.scene3d.as_ref().ok_or("no 3D")?;
             raea_gpu_device::check::black_twice(f, pg.canary().and_then(|()| e.canary())).map_err(|err| format!("{err}; the {i} frames before it are in {}", out.display()))?;
         }
+        Ok(())
+    };
+    let finish = |cx: &mut Ctx, pg: &mut raea_runtime_page::BevyPage, i: usize, f: i64, page: Vec<u8>, read: raea_render::engine::ReadBack| -> R<Vec<u8>> {
+        let px = page_over(cx.scene3d.as_ref().ok_or("no 3D")?.finish_read(read)?, &page);
+        check_black(cx, pg, i, f, &px)?;
         Ok(px)
     };
     // the next stepped frame to feed; a frame before the last one fed goes back to its piece's start (a RESET)
@@ -529,6 +544,25 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
         next = at + 1;
         t_replay += t_ms(t);
         let t = std::time::Instant::now();
+        if let (Some(g), Some(buf)) = (&dev, &fbuf) {
+            let c = raea_gpu_device::check::frame_caught(f, || {
+                cx.now = f;
+                pg.at_frame(f, fps);
+                bevy_fed_gpu(app.world_mut(), pg, &mut cx, buf, fps, &g.device, &g.queue)?;
+                Ok(start_copy(&g.device, &g.queue, buf))
+            })
+            .map_err(|e| if i == 0 { format!("{e}; no frame was written") } else { format!("{e}; the {i} frames before it are in {}", out.display()) })?;
+            if let Some((pi, pf, prev)) = copying.replace((i, f, c)) {
+                let px = finish_copy(&g.device, prev)?;
+                check_black(&mut cx, pg, pi, pf, &px)?;
+                send(pi, px)?;
+            }
+            t_draw += t_ms(t);
+            if i == 0 {
+                raea_runtime_react::startup_mark("native: the first frame drawn");
+            }
+            continue;
+        }
         let step = raea_gpu_device::check::frame_caught(f, || {
             cx.now = f;
             pg.at_frame(f, fps);
@@ -567,6 +601,11 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
         let px = finish(&mut cx, pg, pi, pf, page, read)?;
         send(pi, px)?;
     }
+    if let (Some(g), Some((pi, pf, prev))) = (&dev, copying.take()) {
+        let px = finish_copy(&g.device, prev)?;
+        check_black(&mut cx, pg, pi, pf, &px)?;
+        send(pi, px)?;
+    }
     drop(tx);
     for t in writers {
         t.join().map_err(|_| "a frame writer panicked".to_string())??;
@@ -583,6 +622,38 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     } else {
         format!("APPLIED  frame {} rendered to {} (native)", wanted.last().copied().unwrap_or(0), out.display())
     }))
+}
+
+/// A frame buffer's copy for reading back, queued and not waited for (the native draw's GPU path).
+struct Copy {
+    staging: wgpu::Buffer,
+    rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+}
+
+fn start_copy(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> Copy {
+    let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("native frame readback"), size: src.size(), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("native frame readback") });
+    enc.copy_buffer_to_buffer(src, 0, &staging, 0, src.size());
+    queue.submit([enc.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    Copy { staging, rx }
+}
+
+fn finish_copy(device: &wgpu::Device, c: Copy) -> R<Vec<u8>> {
+    let mapped = match c.rx.try_recv() {
+        Ok(m) => m,
+        Err(_) => {
+            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).map_err(|e| format!("the frame's readback: {e}"))?;
+            c.rx.recv().map_err(|e| e.to_string())?
+        }
+    };
+    mapped.map_err(|e| format!("the frame's readback: {e}"))?;
+    let px = c.staging.slice(..).get_mapped_range().map_err(|e| format!("the frame's readback: {e:?}"))?.to_vec();
+    c.staging.unmap();
+    Ok(px)
 }
 
 /// RAEA_ROWS_DUMP=DIR: each drawn frame's 3D as the engine holds it, DIR/FRAME.json: every row's entity and the
