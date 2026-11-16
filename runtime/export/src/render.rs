@@ -66,6 +66,16 @@ pub fn render(args: &[String]) -> R<String> {
     TEN_BIT.store(args.iter().any(|a| a == "--10bit"), std::sync::atomic::Ordering::Relaxed);
     AOV.store(args.iter().any(|a| a == "--aov"), std::sync::atomic::Ordering::Relaxed);
     // --native: stills from a shot baked once across every core, drawn with no JavaScript (docs/native-shots.md)
+    // --jit: the composition's React on JavaScriptCore (WebKitGTK's on Linux, a JIT) instead of QuickJS, where it's
+    // installed; a native shot's bake is where all its JavaScript runs (docs/native-shots.md)
+    if args.iter().any(|a| a == "--jit") {
+        if raea_runtime_react::jsengine_jsc_available() {
+            // SAFETY: before any thread of the render starts (React's runtimes start below)
+            unsafe { std::env::set_var("BEVY_TSX_ENGINE", "jsc") };
+        } else {
+            eprintln!("WARN  --jit: JavaScriptCore isn't installed here (libjavascriptcoregtk-4.1-0); the render runs on QuickJS");
+        }
+    }
     crate::native::NATIVE.store(args.iter().any(|a| a == "--native") || std::env::var("RAEA_NATIVE").as_deref() == Ok("1"), std::sync::atomic::Ordering::Relaxed);
     if AOV.load(std::sync::atomic::Ordering::Relaxed) && !out_ext(&out).is_empty() {
         return Err("--aov writes frames: -o names a folder (DIR/frame-NNNNN.png, DIR/motion, DIR/depth)".into());

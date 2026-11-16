@@ -38,6 +38,11 @@ const PRELUDE: &str = include_str!("../../../sdk/react/js/src/prelude.js");
 /// The id React gives the root container (bevy-react's ROOT_ID).
 pub const ROOT_ID: u64 = 0;
 
+/// Whether JavaScriptCore can run React here (raea-runtime-jsengine's jsc_available): `render --jit` asks.
+pub fn jsengine_jsc_available() -> bool {
+    raea_runtime_jsengine::jsc_available()
+}
+
 /// A React host element (or text node): its id on the wire.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReactNode(pub u64);
@@ -173,6 +178,8 @@ impl Plugin for ReactPlugin {
         let js_ask = ask.0.clone();
         std::thread::Builder::new()
             .name("raea-runtime-react js".into())
+            // JavaScriptCore (--jit on Linux) takes more stack a call than QuickJS; React renders deep trees recursively
+            .stack_size(64 << 20)
             .spawn(move || {
                 layout::ASK.with(|a| *a.borrow_mut() = Some(js_ask));
                 // JavaScriptCore on Apple (the system's engine, the JIT on with the entitlement tools/link-jit.sh signs in),

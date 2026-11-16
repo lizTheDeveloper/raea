@@ -11,7 +11,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[cfg(target_vendor = "apple")]
+// JavaScriptCore: Apple's own, or WebKitGTK's on Linux where it's installed (jsc::available)
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 pub mod jsc;
 #[cfg(any(feature = "portable", not(target_vendor = "apple")))]
 mod quickjs;
@@ -113,6 +114,14 @@ pub fn watch(js: &mut dyn JsEngine, global: &str) -> Result<Watch, String> {
     Ok(cell)
 }
 
+/// Whether JavaScriptCore can start here: always on Apple; on Linux when WebKitGTK's library is installed.
+pub fn jsc_available() -> bool {
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    return jsc::available();
+    #[allow(unreachable_code)]
+    false
+}
+
 /// The engines this build has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -141,6 +150,10 @@ impl Engine {
         match self {
             #[cfg(target_vendor = "apple")]
             Engine::Jsc => Ok(Box::new(jsc::Jsc::new())),
+            #[cfg(target_os = "linux")]
+            Engine::Jsc if jsc::available() => Ok(Box::new(jsc::Jsc::new())),
+            #[cfg(target_os = "linux")]
+            Engine::Jsc => Err("JavaScriptCore isn't installed here (apt install libjavascriptcoregtk-4.1-0)".into()),
             #[cfg(any(feature = "portable", not(target_vendor = "apple")))]
             Engine::QuickJs => Ok(Box::new(quickjs::Quick::new()?)),
             #[allow(unreachable_patterns)]

@@ -15,11 +15,56 @@ type Str = *mut c_void;
 /// A global function's body: (the context, its arguments, where to put an exception) -> its value.
 pub type Callback = unsafe extern "C" fn(ctx: Ctx, function: Obj, this: Obj, argc: usize, argv: *const Val, exception: *mut Val) -> Val;
 
+#[cfg(target_vendor = "apple")]
+macro_rules! jsc_api {
+    ($( fn $name:ident($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)?; )*) => {
+        #[link(name = "JavaScriptCore", kind = "framework")]
+        unsafe extern "C" { $( fn $name($($a: $t),*) $(-> $r)?; )* }
+        /// The system's: always there.
+        pub fn available() -> bool { true }
+    };
+}
+
+#[cfg(not(target_vendor = "apple"))]
+macro_rules! jsc_api {
+    ($( fn $name:ident($($a:ident: $t:ty),* $(,)?) $(-> $r:ty)?; )*) => {
+        unsafe extern "C" {
+            fn dlopen(file: *const c_char, mode: i32) -> *mut c_void;
+        }
+        #[allow(non_snake_case)]
+        struct Api { $( $name: unsafe extern "C" fn($($t),*) $(-> $r)?, )* }
+        static API: std::sync::OnceLock<Option<Api>> = std::sync::OnceLock::new();
+        fn api() -> Option<&'static Api> {
+            API.get_or_init(|| unsafe {
+                // RTLD_NOW | RTLD_GLOBAL: its debugging entry points found by dlsym(RTLD_DEFAULT) as on Apple
+                let h = [c"libjavascriptcoregtk-4.1.so.0", c"libjavascriptcoregtk-6.0.so.1", c"libjavascriptcoregtk-4.0.so.18"].iter().map(|n| dlopen(n.as_ptr(), 2 | 0x100)).find(|h| !h.is_null())?;
+                Some(Api { $( $name: {
+                    let p = dlsym(h, concat!(stringify!($name), "\0").as_ptr() as *const c_char);
+                    if p.is_null() { return None }
+                    std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($t),*) $(-> $r)?>(p)
+                }, )* })
+            }).as_ref()
+        }
+        /// WebKitGTK's JavaScriptCore is installed (libjavascriptcoregtk-4.1, -6.0 or -4.0) and has the whole API.
+        pub fn available() -> bool { api().is_some() }
+        $(
+            #[allow(non_snake_case)]
+            unsafe fn $name($($a: $t),*) $(-> $r)? {
+                unsafe { (api().expect("JavaScriptCore isn't installed (libjavascriptcoregtk-4.1)").$name)($($a),*) }
+            }
+        )*
+    };
+}
+
 unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
+#[cfg(target_vendor = "apple")]
 const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+#[cfg(not(target_vendor = "apple"))]
+const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
 
+#[cfg(target_vendor = "apple")]
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFRunLoopDefaultMode: *const c_void;
@@ -35,6 +80,11 @@ unsafe extern "C" {
 /// thread's loop calls this between events. Not from inside a run of the loop (JS on the main thread, under winit's
 /// event handler: a Blitz page's step): that loop fires the timers itself, and running it again re-entered winit,
 /// which panics ("tried to handle event while another event is currently being handled").
+#[cfg(not(target_vendor = "apple"))]
+pub fn pump() {}
+
+/// (Apple's: its run loop, as above.)
+#[cfg(target_vendor = "apple")]
 pub fn pump() {
     unsafe {
         let running = CFRunLoopCopyCurrentMode(CFRunLoopGetCurrent());
@@ -46,8 +96,9 @@ pub fn pump() {
     }
 }
 
-#[link(name = "JavaScriptCore", kind = "framework")]
-unsafe extern "C" {
+// JavaScriptCore's C API: the system framework on Apple; on Linux, WebKitGTK's libjavascriptcoregtk-4.1 (the same API,
+// with the JIT), opened when first asked for (dlopen), so a raea without it installed still runs, on QuickJS
+jsc_api! {
     fn JSGlobalContextCreate(global_class: *mut c_void) -> GCtx;
     fn JSGlobalContextRelease(ctx: GCtx);
     fn JSContextGetGlobalObject(ctx: Ctx) -> Obj;
@@ -461,6 +512,7 @@ impl Drop for Context {
 /// asks `fetch` for the source at the absolute URL, once per URL (its registry keeps the rest: cycles, live bindings,
 /// top-level await all as the spec has them). Bare names never reach `fetch`: the host rewrites them to URLs first
 /// (raea-modules' rewrite_specifiers).
+#[cfg(target_vendor = "apple")]
 pub mod modules;
 
 mod host;

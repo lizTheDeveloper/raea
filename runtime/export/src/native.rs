@@ -281,11 +281,26 @@ fn prog_of(j: &Value) -> Option<Program> {
     Some(p)
 }
 
-/// This binary (its size and modification time): a bake from another build may fold differently.
+/// This binary, by its contents: a hash of its bytes, made once a process (about 0.3 s for a 490 MB raea). Its size
+/// and modification time were the key before, and the same release installed at two moments on two members made two
+/// keys, so a pool's members never reused each other's bakes (rq stamped every binary's mtime to work round it).
 fn build_id() -> u64 {
-    let m = std::env::current_exe().ok().and_then(|e| e.metadata().ok());
-    let t = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-    t ^ m.map(|m| m.len()).unwrap_or(0).rotate_left(32)
+    static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        use std::hash::Hasher;
+        use std::io::Read;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(env!("CARGO_PKG_VERSION").as_bytes());
+        let Some(mut f) = std::env::current_exe().ok().and_then(|e| std::fs::File::open(e).ok()) else { return h.finish() };
+        let mut buf = vec![0u8; 8 << 20];
+        while let Ok(n) = f.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            h.write(&buf[..n]);
+        }
+        h.finish()
+    })
 }
 
 /// Where shot bakes are kept: RAEA_SHOT_CACHE ("0" keeps none), else raea's caches' shots/.
@@ -439,6 +454,21 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     if folder {
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     }
+    // frames written on two threads of their own, a few queued, so the next frame draws while the last one encodes
+    // (a PNG was 7.5 ms of a 0.2 s frame on the draw's thread)
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(PathBuf, Vec<u8>)>(4);
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    let writers: Vec<std::thread::JoinHandle<R<()>>> = (0..2)
+        .map(|_| {
+            let rx = rx.clone();
+            std::thread::spawn(move || -> R<()> {
+                loop {
+                    let Ok((dest, px)) = rx.lock().unwrap().recv() else { return Ok(()) };
+                    image::save_buffer(&dest, &px, w, h, image::ColorType::Rgba8).map_err(|e| format!("{}: {e}", dest.display()))?;
+                }
+            })
+        })
+        .collect();
     // the next stepped frame to feed; a frame before the last one fed goes back to its piece's start (a RESET)
     let mut next = 0usize;
     let (mut t_replay, mut t_draw, mut t_png) = (0f64, 0f64, 0f64);
@@ -471,7 +501,7 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
         t_draw += t_ms(t);
         let t = std::time::Instant::now();
         let dest = if folder { out.join(format!("frame-{i:05}.png")) } else { out.to_path_buf() };
-        image::save_buffer(&dest, &px, w, h, image::ColorType::Rgba8).map_err(|e| format!("{}: {e}", dest.display()))?;
+        tx.send((dest, px)).map_err(|_| "a frame writer stopped".to_string())?;
         if folder {
             write_aov(out, i, cx.scene3d.as_mut())?;
         }
@@ -479,6 +509,10 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
         if i == 0 {
             raea_runtime_react::startup_mark("native: the first frame written");
         }
+    }
+    drop(tx);
+    for t in writers {
+        t.join().map_err(|_| "a frame writer panicked".to_string())??;
     }
     if trace() {
         let n = wanted.len().max(1) as f64;
