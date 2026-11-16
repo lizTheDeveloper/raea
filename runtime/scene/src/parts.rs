@@ -58,7 +58,13 @@ pub(crate) fn lights_rows(all: &[Vec<Item>], tr: &Tracks, p: &mut Program) {
             let w = i.world.transform_point3(Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32));
             [w.x as f64, w.y as f64, w.z as f64]
         }).collect();
-        let target: Vec<[f64; 3]> = its.iter().map(|i| vec3(&i.props, "target", [0.0; 3])).collect();
+        // the target placed by the light's groups as its position is: a sun in a turned or moved group aimed where its
+        // target would be with no group (its position the group's, its target not), so it ignored the group's turn
+        let target: Vec<[f64; 3]> = its.iter().map(|i| {
+            let v = vec3(&i.props, "target", [0.0; 3]);
+            let w = i.world.transform_point3(Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32));
+            [w.x as f64, w.y as f64, w.z as f64]
+        }).collect();
         if kind != "directional" {
             for (k, name) in ["x", "y", "z"].iter().enumerate() {
                 column(p, &mut row, &id, name, &pos.iter().map(|v| v[k]).collect::<Vec<_>>());
@@ -410,6 +416,17 @@ mod light_rotation_tests {
 
     fn sun(props: serde_json::Value, world: Mat4) -> Item {
         Item { kind: "directional", props: std::sync::Arc::new(props.as_object().unwrap().clone()), shape: None, material: None, at: None, world }
+    }
+
+    #[test]
+    fn a_sun_in_a_turned_group_aims_with_the_group() {
+        // aimed straight down (position over its target), in a group turned a quarter about z: it now aims along +x
+        let it = sun(serde_json::json!({ "position": [0, 1, 0], "target": [0, 0, 0] }), Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        let mut p = Program::default();
+        crate::rows(&[vec![it]], &mut p);
+        let row = p.spawns.iter().flat_map(|(_, r)| r).find(|r| r.get("id") == Some(&V::S("sun0".into()))).expect("a sun row");
+        let n = |k: &str| match row.get(k) { Some(V::N(x)) => *x, _ => f64::NAN };
+        assert!((n("dir_x") - 1.0).abs() < 1e-5 && n("dir_y").abs() < 1e-5 && n("dir_z").abs() < 1e-5, "{row:?}");
     }
 
     #[test]

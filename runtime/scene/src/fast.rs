@@ -119,7 +119,10 @@ impl LiveScene {
                     let v = vec3(&it.props, "position", if dir { [0.0, 1.0, 0.0] } else { [0.0; 3] });
                     let w = it.world.transform_point3(Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32));
                     let pos = [w.x as f64, w.y as f64, w.z as f64];
-                    let target = vec3(&it.props, "target", [0.0; 3]);
+                    // placed by its groups, as its position is (parts.rs lights_rows)
+                    let t = vec3(&it.props, "target", [0.0; 3]);
+                    let t = it.world.transform_point3(Vec3::new(t[0] as f32, t[1] as f32, t[2] as f32));
+                    let target = [t.x as f64, t.y as f64, t.z as f64];
                     if !dir {
                         // to 6 decimals, as parts.rs keys a light's place (it isn't a Transform's column there): the
                         // World's f32 moved every bulb a hair on the second frame (#26)
