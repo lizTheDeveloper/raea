@@ -247,3 +247,30 @@ line), so none fell back.
 3. An async readback ring and pipelined draw: about 0.2 → 0.15 s/frame.
 4. Component rows as data rather than entities.
 5. rq: `--native` by default for chapter renders, and the shared bake cache (milestone 4).
+
+## After milestone 3: engine upgrades (pc204, pc205)
+
+- **Bake key** (pc204): `build_id` is a hash of the binary's bytes, made once a process (about 0.3 s). The mtime and
+  size it used before made two keys for one release installed on two members.
+- **JIT for the bake** (pc204, and the default with `--native` from pc205): `runtime/jsengine` runs JavaScriptCore on
+  Linux by dlopen of WebKitGTK's `libjavascriptcoregtk-4.1` (the same C API as Apple's framework).
+  - ES modules stay Apple's, so a host needing them uses QuickJS.
+  - Ch5, one runtime: 17.8 → 3.4 s for 22 frames (5.3×), and a runtime opens in 2.3 s against 4.5.
+  - Native on JSC is identical to live on QuickJS (Ch5); Ch2 is unchanged at 57.5 dB.
+- **Warm bake runtimes** (measured, not adopted): keeping the runtimes parked (`RAEA_NATIVE_PARK=1`) changes nothing;
+  the engine opens in 6.3–6.9 s either way. A 13–15 s open is a new binary's first run on a host. With JSC and lane
+  sizing, a production batch opens about 2 runtimes at about 2.5 s, so a cross-process warm pool would save about
+  0.03 s a frame.
+- **Pipelined readback** (pc205): `Engine::start_read`/`finish_read`, and `over_3d` leaves a frame's readback in
+  flight when it's the page over the 3D alone.
+  - The film's chapters draw through a layered Canvas3D slot (the page paints with the 3D in place), so they take the
+    whole path. Next: hand the slot the 3D's texture on the GPU, as the fed render does, instead of 3D → CPU → page →
+    CPU.
+- **Fixed-step catch-up** (pc205; found with a chrome trace, `--features raea-render/trace`, `RUST_LOG=info`): see the
+  pc205 commit. A shot's first frame now comes 0.7–1 s after its engine opens.
+- **Ch2's 57–58 dB residual:** not the mesh entities' spawn order (moving later component rows to the end changed
+  nothing). No cheap fix found.
+- **Next, by the trace:**
+  - Ch2's engine open (19 s: glTF loads, `model_setup`, pipelines);
+  - the per-frame render schedule (about 34 ms) and Update (about 29 ms);
+  - the slot round trip.
