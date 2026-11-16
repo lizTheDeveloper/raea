@@ -233,14 +233,41 @@ pub fn arm(world: &mut World) {
     if std::env::var_os("RAEA_PLUGIN_TRACE").is_some() {
         eprintln!("plugin clock: frame {f}, stepped {}, {}", c.stepped, if step { "step" } else { "hold" });
     }
-    let dt = if step {
+    let frame_dt = c.dt;
+    if step {
         c.stepped = f;
         c.steps += 1;
-        c.dt
+    }
+    drop(c);
+    // a step brings Time to the frame's own moment, f steps of dt (#162): one step from the frame before as ever, or
+    // the whole way at once when a still jumped there (a scene with nothing to carry isn't replayed, see
+    // Engine::catch_up), so globals.time reads the same at frame f however it was reached. Virtual time would cap the
+    // jump at its max_delta, so that's lifted.
+    let dt = if step {
+        let target = frame_dt * u32::try_from(f.max(0)).unwrap_or(u32::MAX);
+        match world.get_resource_mut::<Time<Virtual>>() {
+            Some(mut v) => {
+                if v.max_delta() < Duration::from_secs(1 << 20) {
+                    v.set_max_delta(Duration::from_secs(1 << 20));
+                }
+                target.saturating_sub(v.elapsed())
+            }
+            None => frame_dt,
+        }
     } else {
         Duration::ZERO
     };
     world.insert_resource(TimeUpdateStrategy::ManualDuration(dt));
+}
+
+/// A still at frame f in a scene with nothing for a plugin to carry: the clock is put just before f, so this frame's
+/// update steps to it (its keyed rows land, Time reads f / fps) without stepping the frames before it (#162).
+pub fn jump_to(world: &mut World, f: i64) {
+    if let Some(mut c) = world.get_resource_mut::<PluginClock>() {
+        if c.stepped + 1 != f && c.stepped != f {
+            c.stepped = f - 1;
+        }
+    }
 }
 
 /// Keyed rows whose frame has come, set on the update that draws it (so a plugin's steps after it see them): with a

@@ -331,7 +331,14 @@ impl Engine {
     /// dropped), from a new App made from the load when f is before the last frame stepped. Nothing without plugins, or
     /// when the load's rows give them nothing to step (plugins::steps: a frame-pure edit's still draws only its frame).
     fn catch_up(&mut self, f: i64) -> Result<(), String> {
-        if !plugins::active(self.app.world()) || self.replay.is_none() {
+        if !plugins::active(self.app.world()) {
+            return Ok(());
+        }
+        if self.replay.is_none() {
+            // nothing carries state from frame to frame, so the frames before f aren't stepped (#77), but the clock still
+            // moves to f: without that it held at 0 for good, and every Material's uniform rows and globals.time froze
+            // at a batch's first frame (#162)
+            plugins::jump_to(self.app.world_mut(), f);
             return Ok(());
         }
         if f < self.app.world().resource::<plugins::PluginClock>().stepped {
