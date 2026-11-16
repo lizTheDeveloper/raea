@@ -292,9 +292,9 @@ line), so none fell back.
 
 ### Current build and pin
 
-- **Latest:** `0.1.4-pc209` (commit e08c756; release with sha256 on the fork). pc208 plus portable bakes (project
-  root marked, project files hashed: a pruned rq snapshot no longer breaks reuse), DROP3D on by default, and the bake
-  kept on a thread beside the engine's opening. Handed to the queue agent to pin, rollback pc208.
+- **Latest:** `0.1.4-pc210` (commit 847f761; release with sha256 on the fork). pc209 plus a faster engine open
+  and close, and the models' load-race determinism fix (below). Handed to the queue agent to pin, rollback pc209.
+  Ch5 cached 188 -> 245 frames/min, Ch2 185 -> 241 (medians of 3 interleaved, quiet host).
 - **Pin:** pc203 was pinned for new reels. pc204–pc207 were each marked "ready to pin" in the project's
   design/render-perf.md status lines, and the queue agent pins with rollback.
 - **Install:** `tools/render-vast-setup.sh 0.1.4-pcN` (project). It installs raea 0.1.4, swaps in the fork binary
@@ -341,6 +341,13 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **pc210 shipped** (847f761). Parity: Ch5 identical to live; Ch2 56.1 dB; coverage samples identical or >=74 dB
+  against pc209, except Ch1 @9000/@12500, where pc210 matches live (109 dB+) and pc209 was 58-60 dB off.
+  The dev box exited once mid-run (vast host); `vastai start instance` brought it back with its disk.
+- **In progress: item 4, a long-lived process per lane** (uncommitted in the worktree): `raea render-serve` (stdin: a JSON
+  array of render args per line; stdout: `SERVED {...}`), Engine::reload (load_shared and the 8 warm-up updates),
+  and a kept engine reused across served native shots of the same size (RAEA_KEEP_ENGINE=0 turns it off). Next:
+  build, then sticky-check Ch5, Ch2 @6000 and Ch3 @900 (each shot served after others must match it rendered fresh).
 - **Determinism found and fixed (847f761).** Once the map prefetch made the 3D spawn ~3 s faster, Ch5 @2400 came out
   one of two ways run to run (2-3 of 5 identical to live; an old woman's silhouette 60 dB apart). The engine rows were
   identical; the cause was glTF files finishing partly before and partly after the World's first update. Live has
