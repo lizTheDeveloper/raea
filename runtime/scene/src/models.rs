@@ -95,6 +95,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         node_columns(p, &mut row, &id, &its);
         if let Some(s) = first.get("surfaces") {
             row.insert("surfaces".into(), V::S(s.to_string()));
+            surface_columns(p, &mut row, &id, &its);
         }
         if let Some(sm) = first.get("sampler").filter(|v| v.is_object()) {
             row.insert("sampler".into(), V::S(sm.to_string()));
@@ -305,6 +306,38 @@ fn node_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, its: &
                 let at = |it: &Item| it.props.get("nodes").and_then(|n| n.get(name)).and_then(|n| n.get(field)).and_then(|v| v.get(k)).and_then(Value::as_f64).unwrap_or(f64::NAN);
                 exact(p, row, id, &format!("node{i}_{c}"), &its.iter().map(at).collect::<Vec<_>>());
             }
+        }
+    }
+}
+
+/// A model's surface specs' values that can move (<Model>'s <MeshStandardMaterial> children: colour, glow, opacity,
+/// roughness, metalness), as sf{i}_* columns keyed by the frame (raea-sys-material's sync_surfaces sets them on the
+/// materials the spec re-covered). The `surfaces` column, read once at load, held the first frame's for good (the
+/// chorometer strings' glow). A spec missing from a frame holds the first frame's.
+fn surface_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, its: &[Item]) {
+    let Some(Value::Array(first)) = its[0].props.get("surfaces") else { return };
+    for (i, s0) in first.iter().enumerate() {
+        let spec = |it: &Item| it.props.get("surfaces").and_then(|v| v.get(i)).cloned().unwrap_or_else(|| s0.clone());
+        let specs: Vec<Value> = its.iter().map(spec).collect();
+        let hexes = |k: &str| specs.iter().map(|s| s.get(k).and_then(Value::as_str).and_then(|c| hex_of(c))).collect::<Vec<Option<String>>>();
+        for (k, cols) in [("color", ["col_r", "col_g", "col_b"]), ("emissive", ["em_r", "em_g", "em_b"])] {
+            let hs = hexes(k);
+            let Some(h0) = hs.iter().flatten().next().cloned() else { continue };
+            let c: Vec<[f64; 3]> = hs.iter().map(|h| rgb(h.as_deref().unwrap_or(&h0))).collect();
+            for (j, name) in cols.iter().enumerate() {
+                let vals: Vec<f64> = c.iter().map(|v| v[j]).collect();
+                exact(p, row, id, &format!("sf{i}_{name}"), &vals);
+            }
+        }
+        for (k, d) in [("emissive_k", 1.0), ("opacity", 1.0), ("rough", f64::NAN), ("metal", f64::NAN)] {
+            if specs.iter().all(|s| s.get(k).is_none()) && !(k == "emissive_k" && specs.iter().any(|s| s.get("emissive").is_some())) {
+                continue;
+            }
+            let vals: Vec<f64> = specs.iter().map(|s| s.get(k).and_then(Value::as_f64).unwrap_or(d)).collect();
+            if vals.iter().any(|v| v.is_nan()) {
+                continue;
+            }
+            column(p, row, id, &format!("sf{i}_{k}"), &vals);
         }
     }
 }

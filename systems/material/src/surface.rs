@@ -138,6 +138,74 @@ fn over(base: &StandardMaterial, s: &Surface) -> StandardMaterial {
     m
 }
 
+/// A mesh a model's surface spec re-covered: the model's row entity and the spec's index, so the frame's keyed surface
+/// columns (sf{i}_*: the fold's and a live scene's, models.rs surface_columns) reach its material each frame.
+#[derive(Component, Clone, Copy)]
+pub struct SurfaceOf {
+    pub root: Entity,
+    pub spec: usize,
+}
+
+/// The frame's surface values onto each re-covered mesh's material (standard, or the toon one laid over it): colour,
+/// opacity, glow (sf{i}_em_r.. times sf{i}_emissive_k, as maps.rs makes it), roughness and metalness. A <Model>'s
+/// <MeshStandardMaterial> children were applied once, at load, and held their first frame's values for good.
+pub fn sync_surfaces(frame: Res<FrameRows>, mut std_mats: ResMut<Assets<StandardMaterial>>, mut toon_mats: ResMut<Assets<super::toon::ToonMaterial>>, parts: Query<(&SurfaceOf, Option<&MeshMaterial3d<StandardMaterial>>, Option<&MeshMaterial3d<super::toon::ToonMaterial>>)>) {
+    for (of, std, toon) in &parts {
+        let Some(v) = frame.vals(of.root) else { continue };
+        let p = format!("sf{}_", of.spec);
+        let get = |k: &str| v.get(&format!("{p}{k}"));
+        if get("col_r").is_none() && get("emissive_k").is_none() && get("opacity").is_none() && get("rough").is_none() && get("metal").is_none() {
+            continue;
+        }
+        let num = |k: &str| match get(k) {
+            Some(V::N(x)) => Some(*x as f32),
+            _ => None,
+        };
+        // (a toon surface's own colour, laid over the spec's, stays: toon.rs apply_to_model)
+        let set = |m: &mut StandardMaterial, colour: bool| {
+            if let (true, Some(r), Some(g), Some(b)) = (colour, num("col_r"), num("col_g"), num("col_b")) {
+                m.base_color = Color::srgba(r, g, b, m.base_color.alpha());
+            }
+            if let Some(o) = num("opacity") {
+                m.base_color.set_alpha(o.clamp(0.0, 1.0));
+            }
+            if let Some(k) = num("emissive_k") {
+                let c = Color::srgb(num("em_r").unwrap_or(0.0), num("em_g").unwrap_or(0.0), num("em_b").unwrap_or(0.0)).to_linear() * k;
+                m.emissive = LinearRgba::rgb(c.red, c.green, c.blue);
+            }
+            if let Some(r) = num("rough") {
+                m.perceptual_roughness = r;
+            }
+            if let Some(x) = num("metal") {
+                m.metallic = x;
+            }
+        };
+        // each material once a frame (a spec's material is shared by the meshes it re-covered)
+        if let Some(h) = std {
+            if let Some(cur) = std_mats.get(&h.0) {
+                let mut want = cur.clone();
+                set(&mut want, true);
+                if want.base_color != cur.base_color || want.emissive != cur.emissive || want.perceptual_roughness != cur.perceptual_roughness || want.metallic != cur.metallic {
+                    if let Some(mut m) = std_mats.get_mut(&h.0) {
+                        set(&mut m, true);
+                    }
+                }
+            }
+        }
+        if let Some(h) = toon {
+            if let Some(cur) = toon_mats.get(&h.0) {
+                let mut want = cur.base.clone();
+                set(&mut want, false);
+                if want.base_color != cur.base.base_color || want.emissive != cur.base.emissive || want.perceptual_roughness != cur.base.perceptual_roughness || want.metallic != cur.base.metallic {
+                    if let Some(mut m) = toon_mats.get_mut(&h.0) {
+                        set(&mut m.base, false);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A model's meshes re-covered once its scene is spawned, each shared glTF material swapped once per spec. Returns
 /// whether it found the meshes.
 pub fn apply_to_model(world: &mut World, root: Entity, specs: &[Surface]) -> bool {
@@ -172,7 +240,7 @@ pub fn apply_to_model(world: &mut World, root: Entity, specs: &[Surface]) -> boo
                 h
             }
         };
-        world.entity_mut(x).insert(MeshMaterial3d(h));
+        world.entity_mut(x).insert((MeshMaterial3d(h), SurfaceOf { root, spec: k }));
     }
     true
 }

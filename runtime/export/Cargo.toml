@@ -31,6 +31,8 @@ raea-core-scene = { path = "../../core/scene" }
 raea-runtime-scene = { path = "../scene" }
 # native shots: a fold from the shot's own first frame (KEY_BASE)
 raea-runtime-look = { path = "../look" }
+# native shots: the kept bake compressed (a chapter's JSON bakes ran to tens of GB)
+zstd = "0.13"
 raea-sys-contact = { path = "../../systems/contact" }
 # a render's findings, in one shape (docs/direction.feature DR3)
 raea-core-facts = { path = "../../core/facts" }

@@ -81,7 +81,7 @@ pub(crate) fn cam_keyed(k: &str) -> bool {
 
 /// A model's posed-node column (models.rs node_columns): node{i}_x, _q_w, _s_z...
 pub(crate) fn node_column(k: &str) -> bool {
-    k.strip_prefix("node").and_then(|r| r.split_once('_')).is_some_and(|(i, _)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+    ["node", "sf"].iter().any(|p| k.strip_prefix(p).and_then(|r| r.split_once('_')).is_some_and(|(i, _)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())))
 }
 
 impl LiveScene {
@@ -307,7 +307,7 @@ impl LiveScene {
                     want.insert(k.to_string(), v.clone());
                 }
             }
-            // a model's posed nodes (<Model nodes>, node{i}_x.._s_z: a rig's IK, a foot planted), which a render keys
+            // a model's posed nodes (<Model nodes>, node{i}_x.._s_z: a rig's IK, a foot planted) and its surfaces' values (sf{i}_*), which a render keys
             // every frame: sent when they change. They went at open only, so a live render held a batch's first pose
             if kind == "model" {
                 for (k, v) in row.iter().filter(|(k, _)| node_column(k)) {

@@ -52,9 +52,19 @@ fn mem_available_gb() -> Option<f64> {
 /// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and one per 1 GB of free
 /// memory (a chapter's runtime held about 0.45 GB: Ch5 @2400, 11 runtimes, 7.7 GB peak against 2.7 drawing), each
 /// with at least RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
+/// raea processes running on this machine now, this one included (a member's lanes, which start together): the
+/// cores and memory a bake takes are its share.
+fn raea_processes() -> usize {
+    let Ok(d) = std::fs::read_dir("/proc") else { return 1 };
+    d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).filter(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim().starts_with("raea"))).count().max(1)
+}
+
 fn workers_for(frames: usize) -> usize {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / 1.0).floor().max(1.0) as usize);
+    // its share of the cores and the free memory, beside the other lanes rendering here (three lanes on a 12-core
+    // member each opened 12 runtimes, a runtime's 3.5 s opening paid three times over)
+    let lanes = raea_processes();
+    let cores = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) / lanes).max(1);
+    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / lanes as f64).floor().max(1.0) as usize);
     let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(cores.min(32).min(by_mem)).clamp(1, 64);
     let min = std::env::var("RAEA_BAKE_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).max(1);
     want.min(frames.div_ceil(min)).max(1)
@@ -312,11 +322,11 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     }
     let t0 = std::time::Instant::now();
     let path = match cache_dir() {
-        Some(d) => Some(d.join(format!("{:016x}.json", key_of(js, &stepped)?))),
+        Some(d) => Some(d.join(format!("{:016x}.json.zst", key_of(js, &stepped)?))),
         None => None,
     };
     if let Some(p) = path.as_ref().filter(|p| p.exists()) {
-        let read = std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string()));
+        let read = std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string())).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string()));
         match read {
             Ok(v) => {
                 let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
@@ -364,8 +374,9 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         let doc = json!({"w": shot.w, "h": shot.h, "fps": shot.fps, "total": shot.total, "ops": shot.ops, "prog": shot.prog.as_ref().map(prog_json)});
         if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
             let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-            if std::fs::write(&tmp, serde_json::to_vec(&doc).unwrap_or_default()).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
-                prune_cache(d, "json", 64);
+            let packed = zstd::encode_all(&serde_json::to_vec(&doc).unwrap_or_default()[..], 3).unwrap_or_default();
+            if !packed.is_empty() && std::fs::write(&tmp, packed).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
+                prune_cache(d, "zst", 64);
             } else {
                 let _ = std::fs::remove_file(&tmp);
             }
