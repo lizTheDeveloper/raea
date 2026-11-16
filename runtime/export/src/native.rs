@@ -119,6 +119,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     let opened = t_ms(t);
                     std::mem::take(&mut app.world_mut().resource_mut::<raea_runtime_react::CommitTap>().0);
                     let mut out: Piece = Vec::with_capacity((b - a) as usize);
+                    let mut inner = Inner3d::default();
                     let mut record = |app: &mut App, f: i64| -> R<()> {
                         let world = app.world_mut();
                         let scene = scene_of(world);
@@ -136,7 +137,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                         // each piece's node ids in a range of their own: another runtime numbers its tree its own way,
                         // and the page kept what it knew of an id across the RESET (Ch2 @14230: the layered 3D's
                         // holder painted over it from the piece that renumbered it on)
-                        let ops = ops.into_iter().map(|j| if j == raea_runtime_bake::RESET { j } else { ids_moved(&j, off) }).collect();
+                        let ops = ops.into_iter().map(|j| if j == raea_runtime_bake::RESET { j } else { inner.kept(&j, off) }).collect();
                         out.push((f, ops, scene, clear));
                         Ok(())
                     };
@@ -192,6 +193,59 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
         return Ok(None);
     }
     Ok(conf.map(|c| (c, all)))
+}
+
+/// What a piece's commits say of the 3D's place in React's tree: each node's parent, and the 3D's elements (data-3d).
+/// A 3D element inside another is the 3D's alone (a native shot draws its 3D from the Program), so its ops are left
+/// out of the page's commits: they were all but 0.1 MB of Ch5's 87.6 MB, replayed every frame (22 ms) into a page
+/// world of ~12k entities its sync then walked. The 3D's outermost elements stay, as the page finds its holders by them.
+#[derive(Default)]
+struct Inner3d {
+    parent: HashMap<u64, u64>,
+    d3: std::collections::HashSet<u64>,
+}
+
+impl Inner3d {
+    fn inside(&self, mut id: u64) -> bool {
+        for _ in 0..4096 {
+            let Some(&p) = self.parent.get(&id) else { return false };
+            if self.d3.contains(&p) {
+                return true;
+            }
+            id = p;
+        }
+        false
+    }
+
+    /// `json`'s ops without those for the 3D's interior, the rest's ids moved up by `off` (ids_moved).
+    fn kept(&mut self, json: &str, off: u64) -> String {
+        // opt in (RAEA_NATIVE_DROP3D=1) until it's clean: replay fell to 0.2 ms a frame, Ch5 identical, Ch2 at its
+        // noise, but Ch3 @900 had one frame at 33.7 dB and Ch1 @12500 came out 60 dB where it was identical
+        if std::env::var("RAEA_NATIVE_DROP3D").as_deref() != Ok("1") {
+            return ids_moved(json, off);
+        }
+        let Ok(ops) = serde_json::from_str::<Vec<Value>>(json) else { return ids_moved(json, off) };
+        for o in &ops {
+            let n = |k: &str| o.get(k).and_then(Value::as_u64);
+            match o.get("op").and_then(Value::as_str) {
+                Some("create") if o.get("props").is_some_and(|p| p.get("data-3d").is_some()) => {
+                    if let Some(i) = n("id") {
+                        self.d3.insert(i);
+                    }
+                }
+                Some("append") | Some("insert") => {
+                    if let (Some(p), Some(c)) = (n("parent"), n("child")) {
+                        self.parent.insert(c, p);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // a 3D element (data-3d) inside another: a page element there (a layered Canvas3D's slot, its <img
+        // data-raea-scene>, sits right under the 3D's root) stays, as do the roots
+        let keep: Vec<Value> = ops.into_iter().filter(|o| o.get("id").or_else(|| o.get("child")).and_then(Value::as_u64).is_none_or(|i| !(self.d3.contains(&i) && self.inside(i)))).collect();
+        ids_moved(&Value::Array(keep).to_string(), off)
+    }
 }
 
 /// A commit's node ids moved up by `off` (the root's, 0, stays): a piece's ids kept apart from every other piece's.
