@@ -42,7 +42,13 @@ impl Engine {
         // MSAA (4x targets at full size were most of the start-up memory); a 2D one's shares the 2D camera's (sprite)
         let has_3d = has_3d(inserted) || raea_sys_sprite::has_2d(inserted);
         // cameras first, so UI can target them; otherwise insertion order
+        // the rows' map files decoded and mipped across the cores before the spawn takes them one by one
+        raea_sys_material::maps::prefetch_maps(inserted, &self.dir);
+        mem_mark("load: maps prefetched");
         let mut order: Vec<(&Tup, Entity)> = inserted.iter().zip(ents.iter().copied()).collect();
+        // RAEA_MEM_MARKS: each 3D kind's spawn time, summed
+        let marks = std::env::var_os("RAEA_MEM_MARKS").is_some();
+        let mut by_kind: std::collections::BTreeMap<String, (usize, f64)> = Default::default();
         order.sort_by_key(|(t, _)| t.kind != "camera");
         for (t, e) in order {
             let vals = &t.vals;
@@ -52,7 +58,13 @@ impl Engine {
                     camera.get_or_insert(e); // (the first camera: a second draws over it, two_passes)
                 }
                 k if is_3d_spawn(k) => {
+                    let t0 = std::time::Instant::now();
                     spawn_3d(world, e, t, inserted, &self.dir)?;
+                    if marks {
+                        let x = by_kind.entry(k.to_string()).or_insert((0, 0.0));
+                        x.0 += 1;
+                        x.1 += t0.elapsed().as_secs_f64() * 1e3;
+                    }
                 }
                 // without native a clip or a 2D row is a row only (a browser's page draws its own video and text)
                 #[cfg(feature = "native")]
@@ -87,7 +99,15 @@ impl Engine {
                 _ => {} // data kinds (face, cut, ...): rows only, read by rules
             }
         }
+        raea_sys_material::maps::prefetch_done();
         mem_mark("load: cameras and 3D spawned");
+        if marks {
+            let mut v: Vec<_> = by_kind.into_iter().collect();
+            v.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
+            for (k, (n, ms)) in v.iter().take(8) {
+                eprintln!("mem_mark   spawn {k}: {n} rows, {ms:.0} ms");
+            }
+        }
         // MotionBlur's previous poses: a pre-step before every update (motion_blur.rs)
         self.prestep = inserted.iter().any(|t| t.kind == "camera" && t.vals.contains_key("mb_on"));
         // plugin component and resource rows through the TypeRegistry, and the frame clock back at 0 (plugins.rs)

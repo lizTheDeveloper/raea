@@ -11,7 +11,15 @@ pub fn model(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], dir: &Path
     let gltf: Handle<Gltf> = world.resource::<AssetServer>().load(path.to_string_lossy().to_string());
     let anim = t.vals.get("anim").cloned().filter(|v| v.truthy() || matches!(v, V::N(_)));
     let toon = super::toon::ToonSpec::of(&t.vals);
+    let t_s = std::time::Instant::now();
     let surfaces = super::surface::of(world, t, inserted, dir)?;
+    if std::env::var_os("RAEA_MEM_MARKS").is_some() {
+        let ms = t_s.elapsed().as_secs_f64() * 1e3;
+        if ms > 20.0 {
+            let spec = match t.vals.get("surfaces") { Some(V::S(s)) => s.chars().take(300).collect::<String>(), _ => String::new() };
+            eprintln!("mem_mark   model {} surfaces {ms:.0} ms: {spec}", t.id);
+        }
+    }
     let shaders = super::model_shaders(t)?;
     let sampler = raea_sys_sampler::Sampling::col(&t.vals, "sampler").map_err(|e| format!("model {}: {e}", t.id))?;
     let inst = model_placements(t)?;

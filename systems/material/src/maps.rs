@@ -25,8 +25,13 @@ pub enum MapKind {
 /// material tiles its maps, else clamped (a label's edge doesn't bleed into the other side).
 pub fn map_image(pic: image::RgbaImage, kind: MapKind, repeat: bool, sampling: Option<&raea_sys_sampler::Sampling>) -> Image {
     let (w, h) = pic.dimensions();
+    let (data, levels) = mips_rgba8(pic.into_raw(), w, h, kind == MapKind::Colour);
+    mipped_image(data, w, h, levels, kind, repeat, sampling)
+}
+
+/// map_image from a picture whose mip chain is made (mips_rgba8's data and level count).
+fn mipped_image(data: Vec<u8>, w: u32, h: u32, levels: u32, kind: MapKind, repeat: bool, sampling: Option<&raea_sys_sampler::Sampling>) -> Image {
     let srgb = kind == MapKind::Colour;
-    let (data, levels) = mips_rgba8(pic.into_raw(), w, h, srgb);
     let mut img = Image::new(
         bevy::render::render_resource::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         bevy::render::render_resource::TextureDimension::D2,
@@ -166,14 +171,116 @@ pub fn map_picture(t: &Tup, inserted: &[Tup], dir: &Path, col: &str, src: &str) 
     Ok(image::open(&path).map_err(|e| format!("mesh {}: {col}: {}: {e}", t.id, path.display()))?.to_rgba8())
 }
 
+/// Map files decoded and mipped ahead of a load's spawn, across the cores (prefetch_maps): by source and colour (sRGB)
+/// or data, for cached_map to take instead of decoding them one by one on the load's thread (Ch2's four HD character
+/// maps: 680 ms each). Cleared once the load is spawned (prefetch_done).
+#[allow(clippy::type_complexity)]
+static PREFETCHED: std::sync::Mutex<Option<HashMap<(String, bool), std::sync::Arc<(Vec<u8>, u32, u32, u32)>>>> = std::sync::Mutex::new(None);
+
+/// Every file map the rows name (a mesh row's map columns, a model's `surfaces` specs) decoded and mipped across the
+/// cores, as map_picture and mips_rgba8 make them, so the images are the same. A source that doesn't decode is left
+/// for the load to report as it always has.
+pub fn prefetch_maps(inserted: &[Tup], dir: &Path) {
+    // started early (prefetch_start) for these rows: wait for it
+    if let Some(h) = STARTED.lock().unwrap().take() {
+        let _ = h.join();
+        if PREFETCHED.lock().unwrap().is_some() {
+            return;
+        }
+    }
+    prefetch_maps_now(inserted, dir);
+}
+
+fn prefetch_maps_now(inserted: &[Tup], dir: &Path) {
+    const KEYS: [(&str, bool); 5] = [("map", true), ("emissive_map", true), ("normal_map", false), ("mr_map", false), ("ao_map", false)];
+    let mut want: Vec<(String, bool)> = Vec::new();
+    let mut add = |s: &str, srgb: bool| {
+        if !s.is_empty() && !s.starts_with("data:") && !s.starts_with("raea-screen:") && !want.iter().any(|w| w.0 == s && w.1 == srgb) {
+            want.push((s.to_string(), srgb));
+        }
+    };
+    for t in inserted {
+        if t.kind == "model" {
+            if let Some(V::S(js)) = t.vals.get("surfaces") {
+                for spec in serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(js).unwrap_or_default() {
+                    for (k, srgb) in KEYS {
+                        if let Some(s) = spec.get(k).and_then(serde_json::Value::as_str) {
+                            add(s, srgb);
+                        }
+                    }
+                }
+            }
+        } else if matches!(t.kind.as_str(), "mesh" | "cube" | "sphere" | "plane" | "panel") {
+            for (k, srgb) in KEYS {
+                if let Some(V::S(s)) = t.vals.get(k) {
+                    add(s, srgb);
+                }
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    if !want.is_empty() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::Mutex::new(Vec::new());
+        let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(want.len()).min(32);
+        std::thread::scope(|sc| {
+            for _ in 0..lanes {
+                sc.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((src, srgb)) = want.get(i) else { break };
+                    let Ok(path) = resolve_src(inserted, src, dir) else { continue };
+                    let Ok(pic) = image::open(&path).map(|p| p.to_rgba8()) else { continue };
+                    let (w, h) = pic.dimensions();
+                    let (data, levels) = mips_rgba8(pic.into_raw(), w, h, *srgb);
+                    done.lock().unwrap().push(((src.clone(), *srgb), std::sync::Arc::new((data, w, h, levels))));
+                });
+            }
+        });
+        out.extend(done.into_inner().unwrap());
+    }
+    if std::env::var_os("RAEA_MEM_MARKS").is_some() {
+        eprintln!("mem_mark   maps prefetched: {} of {} named", out.len(), want.len());
+        for (k, _) in want.iter().filter(|w| !out.contains_key(*w)).take(5) {
+            eprintln!("mem_mark   map not prefetched: {k}");
+        }
+    }
+    *PREFETCHED.lock().unwrap() = Some(out);
+}
+
+static STARTED: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
+
+/// prefetch_maps begun on a thread of its own, as soon as the rows are known (a native shot's, once its bake is read),
+/// so it runs beside the page's and the engine's opening; the load's prefetch_maps then waits for it. The rows must be
+/// the ones the load is given.
+pub fn prefetch_start(inserted: Vec<Tup>, dir: std::path::PathBuf) {
+    *PREFETCHED.lock().unwrap() = None;
+    let h = std::thread::Builder::new().name("raea map prefetch".into()).spawn(move || {
+        prefetch_maps_now(&inserted, &dir);
+    });
+    *STARTED.lock().unwrap() = h.ok();
+}
+
+/// The prefetched maps let go (the load's materials hold their own images now).
+pub fn prefetch_done() {
+    *PREFETCHED.lock().unwrap() = None;
+}
+
 /// A map's texture from the load's cache, or made: `make` builds the picture (one file, or two packed into one).
 pub fn cached_map(world: &mut World, key: String, kind: MapKind, repeat: bool, sampling: Option<&raea_sys_sampler::Sampling>, make: impl FnOnce() -> Result<image::RgbaImage, String>) -> Result<Handle<Image>, String> {
     // one image per sampler: Bevy keeps the sampler on the Image
+    let src = key.clone();
     let key = format!("{key}|{}|{}|{}", kind == MapKind::Colour, repeat, sampling.map_or("", |s| s.key.as_str()));
     if let Some(h) = world.get_resource::<Maps>().and_then(|m| m.0.get(&key)) {
         return Ok(h.clone());
     }
-    let img = map_image(make()?, kind, repeat, sampling);
+    let ahead = PREFETCHED.lock().unwrap().as_ref().and_then(|p| p.get(&(src, kind == MapKind::Colour)).cloned());
+    if std::env::var_os("RAEA_MEM_MARKS").is_some() {
+        eprintln!("mem_mark   map {key} ({}): {}", if kind == MapKind::Colour { "colour" } else { "data" }, if ahead.is_some() { "prefetched" } else { "made here" });
+    }
+    let img = match ahead {
+        Some(m) => mipped_image(m.0.clone(), m.1, m.2, m.3, kind, repeat, sampling),
+        None => map_image(make()?, kind, repeat, sampling),
+    };
     let h = world.resource_mut::<Assets<Image>>().add(img);
     world.get_resource_or_insert_with(Maps::default).0.insert(key, h.clone());
     Ok(h)

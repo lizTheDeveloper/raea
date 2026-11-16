@@ -724,10 +724,13 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     app.add_plugins(MinimalPlugins).add_plugins(raea_runtime_react::ReplayPlugin);
     one_thread(&mut app);
     raea_gpu_device::check::mem_fits(w, h, None)?;
+    // the 3D's rows, and their map files decoded and mipped beside the page's and the engine's opening
+    let inserted = raea_render::inserted_of(prog);
+    raea_sys_material::maps::prefetch_start(inserted.clone(), dir.to_path_buf());
     let mut page = raea_runtime_page::BevyPage::new(w, h, dir)?;
     let mut cx = Ctx { dir, work: &work, sounds: Vec::new(), scene: Vec::new(), clear: None, marker: None, mix: None, audible: HashMap::new(), brand: page_css(dir, w, js), manifest: MANIFEST.lock().unwrap().as_ref().map(|_| Vec::new()), now: 0, said: Default::default(), made: HashMap::new(), scene3d: None, live3d: None };
     let t_open = std::time::Instant::now();
-    cx.scene3d = Some(aov_on(raea_render::engine::Engine::new_live(prog, &raea_render::inserted_of(prog), dir)?));
+    cx.scene3d = Some(aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?));
     raea_runtime_react::startup_mark(&format!("native: the 3D's engine open ({:.0} ms)", t_ms(t_open)));
     // its first frame warmed up as a live engine's is (Engine::warm)
     if let Some(e) = cx.scene3d.as_mut() {

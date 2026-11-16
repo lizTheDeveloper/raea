@@ -35,6 +35,8 @@ raea-runtime-look = { path = "../look" }
 zstd = "0.13"
 # native shots: the kept bake's project files by their content (a changed model is a stale bake)
 blake3 = "1.8"
+# native shots: the 3D's map files prefetched beside the engine's opening
+raea-sys-material = { path = "../../systems/material" }
 raea-sys-contact = { path = "../../systems/contact" }
 # a render's findings, in one shape (docs/direction.feature DR3)
 raea-core-facts = { path = "../../core/facts" }
