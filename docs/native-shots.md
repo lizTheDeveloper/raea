@@ -341,6 +341,18 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **Determinism found and fixed (847f761).** Once the map prefetch made the 3D spawn ~3 s faster, Ch5 @2400 came out
+  one of two ways run to run (2-3 of 5 identical to live; an old woman's silhouette 60 dB apart). The engine rows were
+  identical; the cause was glTF files finishing partly before and partly after the World's first update. Live has
+  the same race on a busy host. await_models now drains the asset server's events (no World update) until every
+  model's files are loaded: 6/6 identical. Bisected with temporary RAEA_BISECT_* switches (removed). A first theory,
+  skin weights normalised after upload, was wrong (every Ch5 mesh is in range); normalise_new_skins stays, harmless.
+- **Held-frame skip (coordinator's item 2): not worth it.** Of 150 sampled pool bakes (15,301 drawn frames), 0 have
+  both 3D keys and page unchanged from the frame before; by 3D keys alone 2.8% (165 frames, nearly all one 150-frame
+  shot), and 87 of 150 shots have time-driven content. Script: /tmp/held.py on Hetzner (also in the dev scratchpad).
+- **Mip cache (item 3):** done in memory instead of on disk. mips_rgba8 runs its rows across threads, bit-identical
+  (unit test), so a 4K chain is no longer the open's critical path. A blake3-keyed disk cache would save only the
+  remaining ~0.1-0.2 s.
 - **Toward pc210 (committed on native-shots: c966ee3, 7fa6beb; in the tree: the rest):**
   - glTF texture mips across the cores (mip_gltfs_textures): model_setup's 1.77 s call gone.
   - Map files prefetched (decoded and mipped across the cores) from the bake's rows, beside the page's and engine's
