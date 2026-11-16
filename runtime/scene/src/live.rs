@@ -79,6 +79,11 @@ pub(crate) fn cam_keyed(k: &str) -> bool {
         || matches!(k, "x" | "y" | "z" | "look_x" | "look_y" | "look_z" | "fov" | "focus" | "ortho" | "ambient" | "skybox_k" | "env_srcs" | "env_i" | "env_k" | "env_rot" | "sky_k" | "aberration" | "dof_aperture" | "paint_bands" | "paint_grain" | "paint_rag" | "paint_seed")
 }
 
+/// A model's posed-node column (models.rs node_columns): node{i}_x, _q_w, _s_z...
+pub(crate) fn node_column(k: &str) -> bool {
+    k.strip_prefix("node").and_then(|r| r.split_once('_')).is_some_and(|(i, _)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl LiveScene {
     /// Start again (the engine was dropped: a new size).
     pub fn reset(&mut self) {
@@ -300,6 +305,13 @@ impl LiveScene {
             for k in live_dynamic(&kind) {
                 if let Some(v) = row.get(*k) {
                     want.insert(k.to_string(), v.clone());
+                }
+            }
+            // a model's posed nodes (<Model nodes>, node{i}_x.._s_z: a rig's IK, a foot planted), which a render keys
+            // every frame: sent when they change. They went at open only, so a live render held a batch's first pose
+            if kind == "model" {
+                for (k, v) in row.iter().filter(|(k, _)| node_column(k)) {
+                    want.insert(k.clone(), v.clone());
                 }
             }
             if kind == "mesh" {

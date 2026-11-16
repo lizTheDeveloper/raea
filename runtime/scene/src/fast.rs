@@ -57,6 +57,10 @@ impl LiveScene {
                 if it.kind == "mesh" && it.shape.is_none() {
                     continue;
                 }
+                // a model with posed nodes (<Model nodes>): the full path, which sends them (node_column)
+                if it.kind == "model" && it.props.contains_key("nodes") {
+                    return None;
+                }
                 if !self.rows.contains_key(id) {
                     return None;
                 }

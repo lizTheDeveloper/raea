@@ -467,6 +467,10 @@ pub fn resources(p: &mut Program, all: &[Vec<Item>]) {
     keyed(p, "resource", None, "c", each.iter().map(|(f, v)| (*f, v)));
 }
 
+/// The frame a fold's first frame is (a native shot's frames are folded from its own first frame, not from 0): the
+/// `from` a component or resource row takes from its position is that position plus this.
+pub static KEY_BASE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 /// `kind` rows of each type's value from the frame it's first seen, and again from each frame it changes
 fn keyed<'a>(p: &mut Program, kind: &str, target: Option<&str>, tag: &str, each: impl Iterator<Item = (usize, &'a Value)>) {
     let mut last: BTreeMap<String, String> = BTreeMap::new();
@@ -478,7 +482,7 @@ fn keyed<'a>(p: &mut Program, kind: &str, target: Option<&str>, tag: &str, each:
             continue;
         }
         last.insert(ty.to_string(), value.clone());
-        let from = c.get("from").and_then(Value::as_f64).unwrap_or(f as f64);
+        let from = c.get("from").and_then(Value::as_f64).unwrap_or((f as i64 + KEY_BASE.load(std::sync::atomic::Ordering::Relaxed)) as f64);
         let mut row = BTreeMap::new();
         row.insert("id".into(), V::S(match target { Some(id) => format!("{id}-{tag}{n}"), None => format!("res{n}") }));
         if let Some(id) = target {

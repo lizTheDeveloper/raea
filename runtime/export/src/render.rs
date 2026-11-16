@@ -65,6 +65,8 @@ pub fn render(args: &[String]) -> R<String> {
     *MANIFEST.lock().unwrap() = Some(flag(args, "--manifest").map_or_else(|| raea_sys_layers::manifest_for(&out, &tsx), PathBuf::from));
     TEN_BIT.store(args.iter().any(|a| a == "--10bit"), std::sync::atomic::Ordering::Relaxed);
     AOV.store(args.iter().any(|a| a == "--aov"), std::sync::atomic::Ordering::Relaxed);
+    // --native: stills from a shot baked once across every core, drawn with no JavaScript (docs/native-shots.md)
+    crate::native::NATIVE.store(args.iter().any(|a| a == "--native") || std::env::var("RAEA_NATIVE").as_deref() == Ok("1"), std::sync::atomic::Ordering::Relaxed);
     if AOV.load(std::sync::atomic::Ordering::Relaxed) && !out_ext(&out).is_empty() {
         return Err("--aov writes frames: -o names a folder (DIR/frame-NNNNN.png, DIR/motion, DIR/depth)".into());
     }
@@ -174,6 +176,14 @@ pub fn render_bundle(js: &Path, dir: &Path, out: &Path, wanted: Option<Vec<i64>>
     // frame's 3D and each <Screen> painted from the page's own picture of it
     let ext = out_ext(out);
     let stills = (ext == "png" && wanted.as_ref().is_some_and(|w| w.len() == 1)) || ext.is_empty();
+    // a shot drawn natively: its bake (cached), then its frames with no JavaScript; else the usual way below
+    if stills && crate::native::NATIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(w) = wanted.as_deref().filter(|w| !w.is_empty()) {
+            if let Some(said) = crate::native::render_native(js, dir, out, w)? {
+                return Ok(said);
+            }
+        }
+    }
     let how = std::env::var_os("RAEA_3D").and_then(|v| v.into_string().ok()).unwrap_or_default();
     // a game: its 3D made frame by frame as it's stepped (rows made beforehand hold every frame's scene: a 10-minute
     // game took 24 GB before its first frame); RAEA_3D=live or =program chooses
@@ -400,7 +410,7 @@ pub(crate) fn aov_on(mut e: raea_render::engine::Engine) -> raea_render::engine:
 
 /// Frame i's guide data (RT1) as mlxdlss run-sequence reads it: DIR/motion/frame-NNNNN.f32 (H x W x 2 float32) and
 /// DIR/depth/frame-NNNNN.f32 (H x W float32), little-endian, rows top to bottom.
-fn write_aov(out: &Path, i: usize, e: Option<&mut raea_render::engine::Engine>) -> R<()> {
+pub(crate) fn write_aov(out: &Path, i: usize, e: Option<&mut raea_render::engine::Engine>) -> R<()> {
     if !AOV.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(());
     }

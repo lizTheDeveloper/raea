@@ -29,6 +29,8 @@ raea-io-alpha = { path = "../../io/alpha" }
 raea-core-program = { path = "../../core/program" }
 raea-core-scene = { path = "../../core/scene" }
 raea-runtime-scene = { path = "../scene" }
+# native shots: a fold from the shot's own first frame (KEY_BASE)
+raea-runtime-look = { path = "../look" }
 raea-sys-contact = { path = "../../systems/contact" }
 # a render's findings, in one shape (docs/direction.feature DR3)
 raea-core-facts = { path = "../../core/facts" }

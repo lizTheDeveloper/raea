@@ -60,7 +60,9 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
     if let Some(ls) = cx.live3d.as_mut() {
         live_scene(world, ls, &mut cx.scene3d, (page.w, page.h), fps, cx.dir)?;
     }
+    let t_page = std::time::Instant::now();
     let (px, pics) = bevy_page_frame(world, page, cx)?;
+    crate::native::part(0, t_page);
     // with --alpha (#114) what the page and its 3D leave empty stays transparent, as a page alone does; else over black
     let alpha = crate::ALPHA.load(std::sync::atomic::Ordering::Relaxed);
     let opaque = |mut px: Vec<u8>| {
@@ -81,10 +83,15 @@ pub(crate) fn bevy_over_3d(world: &mut World, page: &mut raea_runtime_page::Bevy
     e.set_view_box(view);
     let mats = page.set_ui_materials(e.world_mut())?;
     // one draw a frame, as the fed render draws it (drawn again, a frame's auto exposure and temporal passes move on)
+    let t_3d = std::time::Instant::now();
     e.draw(cx.now);
+    crate::native::rows_dump(e.world_mut(), cx.now);
     raea_sys_frame::gpu::said(e.world_mut(), cx.now)?;
+    crate::native::part(1, t_3d);
     let px = if mats { page.read_ui_materials(e.world()).and_then(|_| page.frame())? } else { px };
+    let t_read = std::time::Instant::now();
     let three = e.read_target()?;
+    crate::native::part(2, t_read);
     let (tw, th) = e.size();
     // layered: the 3D (clear where it has nothing) is its slot's picture, in the page's paint order; the page drawn
     // again with it. The fed render's slot draws the 3D's texture as premultiplied (quads' texture paint), so light a
