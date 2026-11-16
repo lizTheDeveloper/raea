@@ -34,6 +34,7 @@ impl Engine {
         store::clear(world);
         world.despawn_all::<With<Mirror>>();
         let ents = store::load(world, inserted);
+        mem_mark("load: rows stored");
         #[cfg(feature = "native")]
         let mut rows2d: Vec<(String, serde_json::Value, Entity)> = Vec::new();
         let mut camera = None;
@@ -86,11 +87,13 @@ impl Engine {
                 _ => {} // data kinds (face, cut, ...): rows only, read by rules
             }
         }
+        mem_mark("load: cameras and 3D spawned");
         // MotionBlur's previous poses: a pre-step before every update (motion_blur.rs)
         self.prestep = inserted.iter().any(|t| t.kind == "camera" && t.vals.contains_key("mb_on"));
         // plugin component and resource rows through the TypeRegistry, and the frame clock back at 0 (plugins.rs)
         plugins::apply_rows(world, inserted, &ents, &self.dir)?;
         // shaders over lit surfaces (docs/shaders.feature SH1-SH4), once their textures' "render:NAME" images exist
+        mem_mark("load: plugin rows applied");
         world.remove_resource::<scene3d::SceneShader>();
         scene3d::shade_rows(world, inserted)?;
         // a camera on a bare <Entity> (a second view, a viewport) draws into the edit's frame unless its rows give it a
@@ -118,6 +121,7 @@ impl Engine {
         } else {
             world.remove_non_send::<Rows2d>();
         }
+        mem_mark("load: shaders and 2D rows");
         let base = store::gather(world);
         let ix: bevy::ecs::entity::EntityHashMap<usize> = store::rows(world).iter().enumerate().map(|(r, &e)| (e, r)).collect();
         let media = inserted.iter().filter(|t| t.kind == "media").cloned().collect();
@@ -151,11 +155,13 @@ impl Engine {
                 }
         }
         raea_sys_frame::spawn_tag(world, self.target.clone(), h);
+        mem_mark("load: timeline made");
         // glTF models loaded and set up before any frame draws
         if models > 0 {
             scene3d::await_models(&mut self.app)?;
         }
         // and the assets a component row's handle fields loaded by path (plugins.rs)
+        mem_mark("load: models ready");
         plugins::await_loads(&mut self.app)?;
         Ok(())
     }

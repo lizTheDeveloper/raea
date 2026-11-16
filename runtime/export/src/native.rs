@@ -580,6 +580,15 @@ fn hashes(dir: &Path, names: &[String]) -> Vec<(String, Option<String>)> {
     })
 }
 
+/// Bakes being kept (written to the shot cache) on threads of their own, joined before a render returns.
+static KEEPING: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+fn kept_all() {
+    for h in std::mem::take(&mut *KEEPING.lock().unwrap()) {
+        let _ = h.join();
+    }
+}
+
 /// The shot baked, or read back from the cache.
 fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     let stepped = stepped_of(wanted);
@@ -644,19 +653,28 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     let ops: Vec<(i64, Vec<String>)> = piece.into_iter().map(|(f, o, _, _)| (f, o)).collect();
     let shot = Shot { w, h, fps, total, ops, prog };
     if let Some(p) = path {
-        let t2 = std::time::Instant::now();
-        let doc = json!({"w": shot.w, "h": shot.h, "fps": shot.fps, "total": shot.total, "ops": shot.ops, "prog": shot.prog.as_ref().map(prog_json)});
-        if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
-            let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-            let packed = zstd::encode_all(portable(&doc, dir).as_bytes(), 3).unwrap_or_default();
-            if !packed.is_empty() && std::fs::write(&tmp, packed).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
-                prune_cache(d, "zst", 64);
-            } else {
-                let _ = std::fs::remove_file(&tmp);
+        // kept on a thread of its own while the engine opens (1.6-2.1 s on Ch5 that frame one waited for); the render
+        // joins it before it returns (KEEPING)
+        let (ops, prog, dir) = (shot.ops.clone(), shot.prog.clone(), dir.to_path_buf());
+        let (sw, sh, sfps, stotal) = (shot.w, shot.h, shot.fps, shot.total);
+        let h = std::thread::Builder::new().name("raea shot keep".into()).spawn(move || {
+            let t2 = std::time::Instant::now();
+            let doc = json!({"w": sw, "h": sh, "fps": sfps, "total": stotal, "ops": ops, "prog": prog.as_ref().map(prog_json)});
+            if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
+                let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
+                let packed = zstd::encode_all(portable(&doc, &dir).as_bytes(), 3).unwrap_or_default();
+                if !packed.is_empty() && std::fs::write(&tmp, packed).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
+                    prune_cache(d, "zst", 64);
+                } else {
+                    let _ = std::fs::remove_file(&tmp);
+                }
             }
-        }
-        if trace() {
-            eprintln!("raea native: the bake kept at {} in {:.0} ms", p.display(), t_ms(t2));
+            if trace() {
+                eprintln!("raea native: the bake kept at {} in {:.0} ms (beside the engine's opening)", p.display(), t_ms(t2));
+            }
+        });
+        if let Ok(h) = h {
+            KEEPING.lock().unwrap().push(h);
         }
     }
     Ok(Some(shot))
@@ -684,6 +702,12 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     edit_dir(dir);
     raea_gpu_device::check::scene_black(Some(false));
     raea_runtime_react::native::rendering_in(dir);
+    let r = render_shot(js, dir, out, wanted);
+    kept_all();
+    r
+}
+
+fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<String>> {
     let Some(shot) = shot_of(js, dir, wanted)? else {
         raea_runtime_react::startup_mark("native: the shot has no 3D or carries state; rendered the usual way");
         return Ok(None);
