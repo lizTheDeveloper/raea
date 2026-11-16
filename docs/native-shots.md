@@ -374,8 +374,9 @@ frame drawn alone.
   EAGAIN, map count) retried on another member with no blame, failing a job only after 5 members (a "hangs" refusal
   failed ch01v72-p21300 outright as a job fault); HOST_HARD now catches "Unable to find a GPU" / a panic in
   bevy_render's renderer (60953699 at 11:38 went unblamed). Dispatcher restarted on it (SIGTERM saves; resume).
-- **Dev box moved** to 60968602 (400 GB; EPYC 7B13 / 4090, 141.195.21.87:43316) after 60922640's 160 GB disk filled
-  with build caches (no deleting: a bigger box instead). Destroy both when done.
+- **Dev boxes 60922640 and 60968602: both destroyed.** Rent a box with a 400 GB disk next time (build caches for release,
+  dist and a trace build filled 160 GB; nothing may be deleted). Box scripts (r.sh, ab.sh, maps.sh, fov.sh, st2.sh,
+  sticky.sh, psnr) are described above; recreate them from this log.
 - **"Stack overflow" on Ch5 8400-8550 (and many Ch1/Ch5 batches in rq.log, exit 134) is thread exhaustion, not
   recursion.** The member's log: "failed to allocate an alternative stack: Cannot allocate memory", then the main
   thread's `thread::scope` "failed to spawn thread: Resource temporarily unavailable" -> abort. It didn't reproduce on
