@@ -150,3 +150,100 @@ Where the cold bake goes (11 runtimes):
 3. World asks (`world.watch`/`system`/`observe`) go through one process-global queue (`ASKS`), drained by whichever
    App's `asks` system runs. With several React runtimes in a process (`scene_frames`' workers, a native bake), one
    runtime's asks can land in another's App.
+
+## Milestone 2: a Ch2 shore shot with characters (done; raea 0.1.4-pc202, pc203)
+
+The shot is Ch2 @14189–14249: Pell speaking ("Director Marra of the Basin"), with Noys, Marra, the procession and the
+child (skinned rigs, face morphs, crowns, posed nodes), the sea's uniforms (`own:uniforms` component rows), a layered
+Canvas3D and captions.
+
+**Two native bugs found and fixed on the way:**
+- **Node ids reused across a RESET.** A piece from another runtime numbers its tree its own way. The bevy_ui page keys
+  its elements by React node id, so a reused id kept the old element: from the piece starting at 14230, the layered
+  3D's holder painted its gradient over the 3D (15 dB). Each piece's ids are now moved into a range of their own.
+- **Folding from the stepped neighbour.** See milestone 1.
+
+**Parity.** Native against live is 57.4–58.7 dB on all 60 frames, with no visible difference. Live against live is
+62.3–69.5 dB.
+- No reflected property differs on any row entity or its descendants (`RAEA_ROWS_DUMP`).
+- The gap grows with the number of extra component-row entities (live 6,930; native over 21 frames 8,295 at
+  63–72 dB; over 60 frames 10,834 at 57–58 dB), which points at draw-order noise.
+
+**Measured on one host** (EPYC 7B13, RTX 4090):
+
+| path | frame one | steady s/frame | wall | frames/min |
+|---|---|---|---|---|
+| pc162 live | 45.6 s | 2.01 | 167.5 s | 21.5 |
+| pc201 live | 36.8–49.4 s | 2.08 | 163–176 s | 20.5–22.1 |
+| `--native`, cold | 71–98 s | 0.20 | 87–114 s | 31–41 |
+| `--native`, cached | 40.9 s | 0.19 | 55.6 s | 65 |
+
+- **Frame one** is Ch2's engine open (its models) in both paths, about 40 s. A cold bake adds its 22 s on 11 runtimes.
+- **Through rq on a loaded pool** (three members, each with other jobs' lanes): pc162 live 202 s, pc202 live 240 s,
+  pc202 `--native` 91 s of raea time for the 60 frames.
+
+## Milestone 3: coverage across Chapters 1, 2, 3 and 5 (done; raea 0.1.4-pc203)
+
+Each chapter has 8 sample shots spread through it, 24 frames each. Each is rendered live and native with
+`RAEA_BAKE_MIN=4`, so every shot is baked in 6+ pieces and the joins are exercised. PNGs on one host, PSNR native
+against live:
+
+| chapter | samples | compile natively | identical on all 24 frames | worst frame |
+|---|---|---|---|---|
+| Ch1 | 8 | 8 | 2 | 30.97 dB (@27800: the live path's 3D text, below) |
+| Ch2 | 8 | 8 | 0 (Ch2 never repeats exactly, live against live) | 55.0 dB (@2700) |
+| Ch3 | 8 | 8 | 2 | 58.7 dB (@3200) |
+| Ch5 | 8 | 8 | 4 | 76.9 dB (@6000) |
+
+**Every sample compiles.** No bake met a layout read, a World read or a stateful `<Compute>` (the `NATIVE  probe`
+line), so none fell back.
+
+**What the sweep found, and where each was fixed:**
+1. **A mesh's emissive colour was the first frame's in the fold** (strength only was keyed, and a mesh black at
+   first had no glow at all). Ch1 @20500 went from 47.8 to 66.1 dB.
+   - Fixed with keyed `em_r..em_b`. The fold is also live play's 3D (`scene_program`), so play had this too.
+2. **A timeline engine's first frame wasn't warmed up.** Ch5's facet windows (second cameras into textures) came up
+   empty on a shot's first frame: 19–24 dB on five Ch5 samples.
+   - Fixed with `Engine::warm`, armed as a live engine's first rows arm it. Now identical.
+3. **The live path garbles changing 3D text (RichText) within a batch** (bevy_rich_text3d's "atlas expansion" warning).
+   On Ch1 @27800, frame 27812: live batch 30.9 dB against the frame drawn alone, native 43.3 dB.
+   - Native is the closer one. Not fixed: it's in the live path's text.
+4. **Per-update engine state in a live batch flickers** on Ch3 @900: frames alternate with the batch's start.
+   - Native matched the frame drawn alone (96 dB) where the live batch didn't (42 dB). After fix 2 the sample is
+     74.8 dB.
+5. **`<Model>` surface overrides** (`<MeshStandardMaterial>` children) were the first frame's in both paths. They are
+   now keyed: fold `sf{i}_*`, LiveScene, `sync_surfaces`.
+   - Ch5 @2400 frame 2459 against the frame drawn alone went from 63.5 to 69.2 dB, native identical to live.
+   - The live half of this and the node fix (0a16018 on `fix/live-node-overrides`, pc163) are the same family. That
+     commit covers nodes only.
+
+**Still not native-exact, and why:**
+- **Ch2's residual** (55–58 dB, below its own 62 dB run noise): no property differs; it tracks the number of extra
+  component-row entities. The next step is to make component rows data, not entities.
+- **Constructs no sample used, which the bake refuses rather than compiles:**
+  - layout reads (`page.layout`): the bake has no page;
+  - World reads (useResource, useQuery, useSystem, useObserver, raycasts through the Engine's reads): the bake has no
+    Engine;
+  - a stateful `<Compute>`;
+  - a camera inside a page element (S3a), whose box is known only once the page is laid out. Not detected yet.
+  - Building these into the exporter means answering them in the bake: a page laid out per piece for layout reads, or
+    a headless Engine per piece fed the piece's rows for World reads. That's the next step if a chapter needs them;
+    none of the 32 does.
+
+## Scout pass 2 (2026-11-16), tried
+
+- **Bake runtimes sized to the lanes.** In raea rather than rq: a bake takes cores ÷ (raea processes running on the
+  machine) runtimes, and the same share of free memory. `RAEA_BAKE_MIN` still sets the least frames a piece.
+- **The kept bake compressed.** zstd over the JSON: 124 MB → 11.3 MB for Ch5's 62 frames, read back in 0.9 s,
+  bit-identical. About 4 GB a chapter, not 44.
+  - Sharing it across the pool through the relay is rq's side: the cache is `$XDG_CACHE_HOME/raea/shots`, or
+    `RAEA_SHOT_CACHE`.
+- **`RAEA_BEVY_EXECUTOR=multi` for the native draw: slower.** 0.276 against 0.196 s/frame on a 64-core host, so it stays
+  single-threaded (`new_live`'s choice).
+
+**Next, by expected payoff:**
+1. Warm bake runtimes kept across a process's shots (removes the 3.3–3.9 s opening each).
+2. A JIT (JavaScriptCore or V8) for the bake only. It's now the one place JavaScript runs.
+3. An async readback ring and pipelined draw: about 0.2 → 0.15 s/frame.
+4. Component rows as data rather than entities.
+5. rq: `--native` by default for chapter renders, and the shared bake cache (milestone 4).
