@@ -96,6 +96,8 @@ impl Engine {
         // a camera's roll and window on a larger view after the camera is placed and before the looks copy it, then
         // footage behind the 3D where the camera now is: matchmove
         app.add_systems(Update, matchmove::sync_view.after(scene3d::sync_camera).before(look::sync_looks));
+        // skin weights normalised as each mesh arrives, before the render world takes it (scene3d::normalise_new_skins)
+        app.add_systems(PostUpdate, scene3d::normalise_new_skins.after(bevy::asset::AssetEventSystems));
         #[cfg(feature = "native")]
         app.add_systems(Update, matchmove::sync_plates.after(matchmove::sync_view).before(clips_gpu));
         // without native the same 3D systems in the same order, and no clips or page overlay (a browser's page is its

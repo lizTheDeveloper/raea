@@ -251,25 +251,44 @@ pub fn model_setup(
 /// be 1 and Bevy draws the weights as written, so a file exported with sums above 1 (RobotExpressive's hands reach
 /// 1.75) stretches its skinned parts into spikes. Only meshes whose sums are off are touched.
 pub fn normalise_joint_weights(g: &Gltf, gmeshes: &Assets<bevy::gltf::GltfMesh>, meshes: &mut Assets<Mesh>) {
+    for gm in g.meshes.iter().filter_map(|h| gmeshes.get(h)) {
+        for p in &gm.primitives {
+            normalise_mesh_weights(meshes, p.mesh.id());
+        }
+    }
+}
+
+/// One mesh's skin weights scaled to sum to 1 (normalise_joint_weights), when any is off.
+fn normalise_mesh_weights(meshes: &mut Assets<Mesh>, id: AssetId<Mesh>) -> &'static str {
     use bevy::mesh::VertexAttributeValues;
     let off = |w: &[f32; 4]| {
         let s: f32 = w.iter().sum();
         s > 0.0 && (s - 1.0).abs() > 1e-3
     };
-    for gm in g.meshes.iter().filter_map(|h| gmeshes.get(h)) {
-        for p in &gm.primitives {
-            let needs = meshes.get(&p.mesh).and_then(|m| m.attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT)).is_some_and(|v| matches!(v, VertexAttributeValues::Float32x4(w) if w.iter().any(off)));
-            if !needs {
-                continue;
-            }
-            let Some(mut m) = meshes.get_mut(&p.mesh) else { continue };
-            if let Ok(Some(VertexAttributeValues::Float32x4(w))) = m.try_attribute_mut_option(Mesh::ATTRIBUTE_JOINT_WEIGHT) {
-                for x in w.iter_mut().filter(|x| off(x)) {
-                    let s: f32 = x.iter().sum();
-                    x.iter_mut().for_each(|c| *c /= s);
-                }
-            }
+    let Some(mesh) = meshes.get(id) else { return "no mesh" };
+    let Some(v) = mesh.attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT) else { return "no weights" };
+    if !matches!(v, VertexAttributeValues::Float32x4(w) if w.iter().any(off)) {
+        return "fine";
+    }
+    let Some(mut m) = meshes.get_mut(id) else { return "no mesh" };
+    if let Ok(Some(VertexAttributeValues::Float32x4(w))) = m.try_attribute_mut_option(Mesh::ATTRIBUTE_JOINT_WEIGHT) {
+        for x in w.iter_mut().filter(|x| off(x)) {
+            let s: f32 = x.iter().sum();
+            x.iter_mut().for_each(|c| *c /= s);
         }
+    }
+    "normalised"
+}
+
+/// Every mesh added this update normalised before the render world first takes it (PostUpdate, after the asset events,
+/// before Extract). model_setup's pass came once the model's glTF was loaded, and a mesh its loader had added an update
+/// or more before was already on the GPU unnormalised, its main-world copy gone: whether a model's skin drew with its
+/// weights normalised depended on when its file finished loading against the engine's updates (Ch5 @2400's old woman:
+/// her silhouette 60 dB apart from run to run once the 3D's spawn got faster).
+pub fn normalise_new_skins(mut events: MessageReader<AssetEvent<Mesh>>, mut meshes: ResMut<Assets<Mesh>>) {
+    let added: Vec<AssetId<Mesh>> = events.read().filter_map(|e| match e { AssetEvent::Added { id } => Some(*id), _ => None }).collect();
+    for id in added {
+        normalise_mesh_weights(&mut meshes, id);
     }
 }
 
@@ -366,6 +385,27 @@ pub fn await_models(app: &mut App) -> Result<(), String> {
     // RAEA_MODELS_TRACE=1: each wait that ran an update says how many and for which models (a render's frame time)
     let trace = std::env::var("RAEA_MODELS_TRACE").as_deref() == Ok("1");
     let mut pumped = 0usize;
+    // every model's glTF (and what it depends on) loaded before the World is updated at all: only the asset server's
+    // own events taken in meanwhile. When some files finished before the first update and some after (a fast spawn,
+    // a busy host), a shot's frames came out one of two ways run to run (Ch5 @2400: an old woman's silhouette 60 dB
+    // apart, live and native alike), where loads all done first drew the same every time
+    {
+        let t = bevy::platform::time::Instant::now();
+        loop {
+            bevy::asset::handle_internal_asset_events(app.world_mut());
+            let world = app.world_mut();
+            let server = world.resource::<AssetServer>().clone();
+            let mut q = world.query::<&Model3d>();
+            let loading = q.iter(world).any(|m| matches!(m.state, ModelState::Loading) && !matches!(server.get_recursive_dependency_load_state(&m.gltf), Some(bevy::asset::RecursiveDependencyLoadState::Loaded) | Some(bevy::asset::RecursiveDependencyLoadState::Failed(_))));
+            if !loading || t.elapsed().as_secs_f64() > 60.0 {
+                if trace {
+                    eprintln!("raea models: files loaded in {:.1} ms before the first update", t.elapsed().as_secs_f64() * 1e3);
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
     loop {
         let world = app.world_mut();
         if let Some(e) = world.resource_mut::<Error>().0.take() {

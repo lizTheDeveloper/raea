@@ -66,27 +66,56 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
         let c = if !srgb { l } else if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
         (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
     };
-    let mut cur: Vec<[f32; 4]> = data[..(w * h * 4) as usize].chunks_exact(4).map(|p| [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0]).collect();
+    // a large picture's rows across threads (a 4K map was ~0.6 s on one): the same arithmetic per texel, so the same
+    // bytes; small ones stay on the caller's thread (this runs inside the per-texture lanes too)
+    let lanes = |rows: u32, cw: u32| -> usize {
+        if (rows as u64) * (cw as u64) < (1 << 20) { 1 } else { std::thread::available_parallelism().map_or(4, |n| n.get()).min(8).min(rows as usize).max(1) }
+    };
+    let base = &data[..(w * h * 4) as usize];
+    let mut cur: Vec<[f32; 4]> = vec![[0.0; 4]; (w * h) as usize];
+    {
+        let k = lanes(h, w);
+        let per = (h as usize).div_ceil(k) * w as usize;
+        std::thread::scope(|sc| {
+            for (part, src) in cur.chunks_mut(per).zip(base.chunks(per * 4)) {
+                let to_lin = &to_lin;
+                sc.spawn(move || {
+                    for (o, p) in part.iter_mut().zip(src.chunks_exact(4)) {
+                        *o = [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0];
+                    }
+                });
+            }
+        });
+    }
     let (mut cw, mut ch) = (w, h);
     let mut levels = 1;
     while cw > 1 || ch > 1 {
         let (nw, nh) = ((cw / 2).max(1), (ch / 2).max(1));
         let mut next = vec![[0.0f32; 4]; (nw * nh) as usize];
-        for y in 0..nh {
-            for x in 0..nw {
-                let mut acc = [0.0f32; 4];
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let p = cur[((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize];
-                    for k in 0..4 {
-                        acc[k] += p[k] * 0.25;
+        let mut bytes = vec![0u8; (nw * nh * 4) as usize];
+        let k = lanes(nh, nw);
+        let rows_per = (nh as usize).div_ceil(k);
+        std::thread::scope(|sc| {
+            for (i, (part, out)) in next.chunks_mut(rows_per * nw as usize).zip(bytes.chunks_mut(rows_per * nw as usize * 4)).enumerate() {
+                let (cur, enc) = (&cur, &enc);
+                sc.spawn(move || {
+                    let y0 = (i * rows_per) as u32;
+                    for (j, px) in part.iter_mut().enumerate() {
+                        let (x, y) = (j as u32 % nw, y0 + j as u32 / nw);
+                        let mut acc = [0.0f32; 4];
+                        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                            let p = cur[((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize];
+                            for k in 0..4 {
+                                acc[k] += p[k] * 0.25;
+                            }
+                        }
+                        *px = acc;
+                        out[j * 4..j * 4 + 4].copy_from_slice(&[enc(acc[0]), enc(acc[1]), enc(acc[2]), (acc[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8]);
                     }
-                }
-                next[(y * nw + x) as usize] = acc;
+                });
             }
-        }
-        for p in &next {
-            data.extend_from_slice(&[enc(p[0]), enc(p[1]), enc(p[2]), (p[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8]);
-        }
+        });
+        data.extend_from_slice(&bytes);
         cur = next;
         (cw, ch) = (nw, nh);
         levels += 1;
@@ -609,5 +638,55 @@ mod screen_map_tests {
         vals.insert("emissive_map".to_string(), V::S("raea-screen:other@8x4".into()));
         let t = Tup { kind: "mesh".into(), id: "panel".into(), vals };
         assert!(material(&mut world, &t, &[], Path::new(".")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mips_tests {
+    /// the serial chain mips_rgba8 made before its rows went across threads
+    fn serial(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u32) {
+        let to_lin: Vec<f32> = (0..256).map(|i| {
+            let c = i as f32 / 255.0;
+            if srgb { if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } } else { c }
+        }).collect();
+        let enc = |l: f32| -> u8 {
+            let c = if !srgb { l } else if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+            (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+        };
+        let mut cur: Vec<[f32; 4]> = data[..(w * h * 4) as usize].chunks_exact(4).map(|p| [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0]).collect();
+        let (mut cw, mut ch) = (w, h);
+        let mut levels = 1;
+        while cw > 1 || ch > 1 {
+            let (nw, nh) = ((cw / 2).max(1), (ch / 2).max(1));
+            let mut next = vec![[0.0f32; 4]; (nw * nh) as usize];
+            for y in 0..nh {
+                for x in 0..nw {
+                    let mut acc = [0.0f32; 4];
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let p = cur[((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize];
+                        for k in 0..4 {
+                            acc[k] += p[k] * 0.25;
+                        }
+                    }
+                    next[(y * nw + x) as usize] = acc;
+                }
+            }
+            for p in &next {
+                data.extend_from_slice(&[enc(p[0]), enc(p[1]), enc(p[2]), (p[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8]);
+            }
+            cur = next;
+            (cw, ch) = (nw, nh);
+            levels += 1;
+        }
+        (data, levels)
+    }
+
+    #[test]
+    fn rows_across_threads_make_the_same_bytes() {
+        for &(w, h, srgb) in &[(2049u32, 1031u32, true), (1600, 1200, false), (3, 5, true), (4096, 300, true)] {
+            let mut x: u32 = 12345;
+            let px: Vec<u8> = (0..w * h * 4).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; (x >> 3) as u8 }).collect();
+            assert_eq!(super::mips_rgba8(px.clone(), w, h, srgb), serial(px, w, h, srgb), "{w}x{h} srgb {srgb}");
+        }
     }
 }
