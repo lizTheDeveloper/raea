@@ -60,6 +60,10 @@ static ASKS: Mutex<Vec<Ask>> = Mutex::new(Vec::new());
 /// back through ENGINE_OUT.
 static ENGINE_ASKS: Mutex<Vec<Ask>> = Mutex::new(Vec::new());
 
+/// React's asks of the World taken so far (watches, reads, systems, observers, writes), every runtime's: a native
+/// shot's bake has no Engine to answer them, so a shot that makes any isn't native (docs/native-shots.md)
+pub static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The Engine's pushes for React, sent with React's App's own in its Last.
 static ENGINE_OUT: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
@@ -238,6 +242,7 @@ fn channel(app: &mut App) -> &mut App {
 /// (an unwatch goes to both: a key's read is in one of them).
 fn asks(world: &mut World) {
     let queued = std::mem::take(&mut *ASKS.lock().unwrap());
+    ASKED.fetch_add(queued.len() as u64, std::sync::atomic::Ordering::Relaxed);
     let (here, engine) = split(queued, engine_reads());
     ENGINE_ASKS.lock().unwrap().extend(engine);
     apply(world, here);

@@ -304,7 +304,23 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         }
     }
     raea_runtime_react::startup_mark("the shot's bake: stepping React across runtimes");
-    let Some((conf, piece)) = bake(js, dir, &stepped)? else { return Ok(None) };
+    let ld = |x: &std::sync::atomic::AtomicU64| x.load(std::sync::atomic::Ordering::Relaxed);
+    let (lr0, wr0) = (ld(&raea_runtime_react::layout::READS), ld(&raea_runtime_react::shared::ASKED));
+    let baked = bake(js, dir, &stepped)?;
+    // what the bake met that only a drawn page or a running Engine answers: page.layout reads (answered "nothing drawn"
+    // here) and the World's reads (useResource, useQuery, useSystem, useObserver: answered by no Engine here). A shot
+    // that makes either isn't native: it renders the usual way, and the line says why (the coverage report reads it)
+    let (layout, world) = (ld(&raea_runtime_react::layout::READS) - lr0, ld(&raea_runtime_react::shared::ASKED) - wr0);
+    let stateful = baked.is_none();
+    eprintln!("NATIVE  probe: {} frames stepped, layout reads {layout}, world reads {world}, stateful compute {}", stepped.len(), if stateful { "yes" } else { "no" });
+    if std::env::var("RAEA_NATIVE_PROBE").as_deref() == Ok("1") {
+        return Err(format!("NATIVE  probe only (RAEA_NATIVE_PROBE=1): layout reads {layout}, world reads {world}, stateful compute {stateful}"));
+    }
+    if stateful || ((layout > 0 || world > 0) && std::env::var("RAEA_NATIVE_FORCE").as_deref() != Ok("1")) {
+        eprintln!("NATIVE  not native: {}; rendered the usual way (RAEA_NATIVE_FORCE=1 draws it natively anyway)", if stateful { "a <Compute> carries state from frame to frame".to_string() } else { format!("{layout} layout reads and {world} World reads need a drawn page or a running Engine") });
+        return Ok(None);
+    }
+    let Some((conf, piece)) = baked else { return Ok(None) };
     let (w, h) = (num(&conf, "width").unwrap_or(1080.0) as u32, num(&conf, "height").unwrap_or(1920.0) as u32);
     let fps = num(&conf, "fps").unwrap_or(30.0);
     let total = num(&conf, "frames").unwrap_or(60.0) as i64;

@@ -59,3 +59,94 @@ bakes make an iteration that only moves the camera or lights nearly free.
 2. One Ch2 shore shot with characters (skinning, morphs, cloth bones, uniforms, captions).
 3. A coverage report across chapters.
 4. rq integration with a per-shot fallback to the live path.
+
+## Milestone 1: one Ch5 shot, native (done; raea 0.1.4-pc201)
+
+`raea render EDIT.tsx --at A,B,… -o DIR/ --native` (or `RAEA_NATIVE=1`), in `runtime/export/src/native.rs`:
+
+1. **The bake.** The shot's stepped frames (each drawn frame and its neighbours) are cut into pieces, one React runtime
+   each, on threads. There is one runtime per core, capped at one per GB of free memory, with at least
+   `RAEA_BAKE_MIN` (6) frames each. Each piece taps its commits; its first frame is a RESET plus that runtime's whole
+   tree, so a piece replays on its own.
+   - Frames are asked for one `raea-frame` event at a time, as a render asks. `raea-frames` (what `bake.rs` and
+     `scene_frames` use) left the JS thread idle about 0.45 s a frame: 1.12 s a frame against 0.67, for the same JS
+     CPU (`RAEA_NATIVE_STEP=range` keeps it, to compare).
+2. **The fold.** The Program is folded over the shot's frames alone, from the first drawn frame, then moved there.
+   - Its keys are moved, and so are the `from`/`to` of page, screen and sound rows.
+   - Component and resource rows are made at their own frame through raea-runtime-look's `KEY_BASE`.
+   - The engine's clock, time uniforms and plugin clock stay the composition's own.
+   - Folding from the stepped neighbour before the first frame showed that neighbour's `<Entity>` places on the first
+     frame (a live engine's first draw shows its rows' own values for that kind).
+3. **The draw.** A `ReplayPlugin` App, no JS thread: the recorded commits are fed in, the page is synced and painted
+   from them, and the 3D is drawn from the Program.
+   - The page step skips the 3D elements' props, and the scene isn't read each frame: page 42 → 24 ms.
+4. **The cache.** The bake (each frame's commits and the Program as JSON, 124 MB for 62 frames of Ch5) is kept by the
+   bundle's bytes (the edit, its imports, its `--input`), this binary, the frames and the settings that change a step.
+   - `RAEA_SHOT_CACHE` (`0`: none). A read-back cache is bit-identical to a fresh bake.
+5. **The fallback.** A shot whose bake makes layout reads (`page.layout`, answered "nothing drawn" in a bake) or World
+   reads (useResource, useQuery, useSystem, useObserver: no Engine answers them in a bake), or has a stateful
+   `<Compute>`, renders the usual way.
+   - The render's `NATIVE  probe:` line says what it met, and `RAEA_NATIVE_FORCE=1` draws it natively anyway.
+   - `RAEA_NATIVE_PROBE=1` stops after the bake (the coverage report).
+6. **Parity tools.** `RAEA_ROWS_DUMP=DIR` writes each drawn frame's 3D as the engine holds it: every row's entity and
+   the entities under it, reflected, with their materials. `tools/native-diff.py A B` compares two dumps property by
+   property; quaternion sign and entity-keyed maps are noise.
+
+### Parity: what differed, and why
+
+On Ch5 @2400 native came out 41–46 dB against today's path (pc162). Property by property:
+
+- **`<Model nodes>` (per-bone poses: Noys's leg IK) froze in the live path.** LiveScene sent a model's
+  `node{i}_*` columns only when the engine opened, so a stills batch held its first frame's pose for the whole batch.
+  Native keyed them every frame, as React computed them.
+  - Fixed in LiveScene (the columns are sent when they change; the fast path hands a posed model to the full diff).
+  - Against each frame rendered alone in a fresh process, pc162 is 41.7–45.8 dB, and the fixed live path and native
+    are 63–72 dB.
+- **The first drawn frame showed the stepped neighbour's `<Entity>` places** (`sea-g34`, 2 mm). Fixed by folding from
+  the first drawn frame.
+- **Not fixed, and the same in both paths:** a `<Model>`'s surface overrides (`surfaces`, the chorometer strings'
+  emissive) are the first frame's in the fold and in LiveScene.
+  - That's the residual 63–72 dB against frames rendered alone: batch-sticky, as render-perf.md found.
+
+**Result: native is PSNR-identical to the fixed live path on all 60 frames** (PNG on one host; the rq mp4s are
+identical too).
+
+### Measured
+
+Chapter 5 @2400, 60 frames, PNG stills:
+
+| host | path | frame one | steady s/frame | raea wall | frames/min |
+|---|---|---|---|---|---|
+| vast EPYC 7B13 (64 cores), RTX 4090 | pc162 live | 17.7–31.9 s | 0.87 | 72–86 s | 42–50 |
+| | pc201 live | 32.4 s | 0.91 | 88.8 s | 40.6 |
+| | pc201 `--native`, cold (11 runtimes) | 27.5 s | 0.21 | 43.5 s | 82.7 |
+| | pc201 `--native`, cached bake | 15.6 s | 0.215 | 31.3 s | 115 |
+| rq pool member 60862935 (16 cores, 3090) | pc201 live | | | 94 s | 38 |
+| | pc201 `--native`, cold | | | 50 s | 72 |
+
+Where a native frame goes (EPYC 7B13, 4090, cached):
+- replay of the commits: 19 ms;
+- page: 24 ms;
+- 3D draw: 123 ms;
+- read back: 38 ms;
+- PNG: 7.5 ms.
+
+Where the cold bake goes (11 runtimes):
+- each runtime opens in 3.3–3.9 s (bundle parse and module top level);
+- its first frame is a whole tree;
+- then 0.67 s a frame of QuickJS;
+- the Program folds 62 frames in 2.9 s;
+- the engine opens in 5.6 s, or 11 s right after a many-runtime bake (the runtimes' teardown overlaps it).
+
+**What a frame costs in CPU.** A cold native frame still pays React once, at about the live path's cost (0.67 s of JS).
+- It's spread across cores, so a shot's wall time falls.
+- Each piece also pays its runtime's opening and a whole first tree.
+- So a member whose cores are all busy with lanes gains less than these single-process numbers. The win there is the
+  cache, and the draw (0.2 s a frame against 0.9).
+
+**Found on the way (upstream issues to file):**
+1. LiveScene's frozen model nodes.
+2. `raea-frames` stepping idles the JS thread.
+3. World asks (`world.watch`/`system`/`observe`) go through one process-global queue (`ASKS`), drained by whichever
+   App's `asks` system runs. With several React runtimes in a process (`scene_frames`' workers, a native bake), one
+   runtime's asks can land in another's App.
