@@ -227,6 +227,13 @@ impl Engine {
         Engine::build(prog, inserted, dir, None, true)
     }
 
+    /// The next frame drawn warms up first, as a frame across a cut does (8 updates at it): a timeline engine's first
+    /// frame, where a live one's first rows arm the same (set_rows: its looks parsed), so secondary cameras' textures and
+    /// the sky's light are there when the frame is drawn (native shots: Ch5's facet windows came up empty on frame one).
+    pub fn warm(&mut self) {
+        self.warm_next = true;
+    }
+
     /// Frame `f` drawn into the target (one update: the pipeline is synchronous, so it's on the GPU's queue when this
     /// returns, ahead of anything the paint device is given next).
     pub fn draw(&mut self, f: i64) {

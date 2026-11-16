@@ -420,6 +420,10 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     let t_open = std::time::Instant::now();
     cx.scene3d = Some(aov_on(raea_render::engine::Engine::new_live(prog, &raea_render::inserted_of(prog), dir)?));
     raea_runtime_react::startup_mark(&format!("native: the 3D's engine open ({:.0} ms)", t_ms(t_open)));
+    // its first frame warmed up as a live engine's is (Engine::warm)
+    if let Some(e) = cx.scene3d.as_mut() {
+        e.warm();
+    }
     let folder = out_ext(out).is_empty();
     if folder {
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;

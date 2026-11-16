@@ -322,7 +322,7 @@ pub fn sync_toon(
     parts: Query<(Entity, &Toon, &MeshMaterial3d<ToonMaterial>)>,
     hulls: Query<(&OutlineHull, &MeshMaterial3d<OutlineMaterial>)>,
 ) {
-    const KEYED: [&str; 9] = ["col_r", "opacity", "emissive_k", "rough", "sh_r", "rim_k", "spec_k", "outline_w", "metal"];
+    const KEYED: [&str; 10] = ["col_r", "opacity", "emissive_k", "em_r", "rough", "sh_r", "rim_k", "spec_k", "outline_w", "metal"];
     let mut changed_opacity: HashMap<Entity, (f32, Color)> = HashMap::new();
     for (e, toon, h) in &parts {
         let Some(v) = frame.vals(e) else { continue };
@@ -338,7 +338,7 @@ pub fn sync_toon(
         let opacity = if v.contains_key("opacity") { num(v, "opacity", 1.0).clamp(0.0, 1.0) } else { cur.base.base_color.alpha() };
         base.set_alpha(opacity);
         let emissive = if v.contains_key("emissive_k") {
-            let em = colour(v.get("emissive"), [0.0, 0.0, 0.0, 1.0]).to_linear() * num(v, "emissive_k", 1.0);
+            let em = raea_sys_frame::emissive_colour(|k| v.get(k)).to_linear() * num(v, "emissive_k", 1.0);
             LinearRgba::rgb(em.red, em.green, em.blue)
         } else {
             cur.base.emissive

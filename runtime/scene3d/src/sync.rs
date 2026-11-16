@@ -132,7 +132,7 @@ pub fn sync_meshes(
                 }
             }
         }
-        let animated = ["col_r", "opacity", "emissive_k", "rough", "metal"].iter().any(|k| v.contains_key(*k));
+        let animated = ["col_r", "opacity", "emissive_k", "em_r", "rough", "metal"].iter().any(|k| v.contains_key(*k));
         if !animated {
             continue;
         }
@@ -149,7 +149,7 @@ pub fn sync_meshes(
         let rough = if v.contains_key("rough") { num(v, "rough", 0.45) } else { cur.perceptual_roughness };
         let metal = if v.contains_key("metal") { num(v, "metal", 0.0) } else { cur.metallic };
         let emissive = if v.contains_key("emissive_k") {
-            let em = colour(v.get("emissive"), [0.0, 0.0, 0.0, 1.0]).to_linear() * num(v, "emissive_k", 1.0);
+            let em = raea_sys_frame::emissive_colour(|k| v.get(k)).to_linear() * num(v, "emissive_k", 1.0);
             LinearRgba::rgb(em.red, em.green, em.blue)
         } else {
             cur.emissive

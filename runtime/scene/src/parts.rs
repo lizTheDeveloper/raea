@@ -152,9 +152,21 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let metal0 = if has("metalnessMap") || has("metallicRoughnessMap") { 1.0 } else { 0.0 };
         column(p, &mut row, &id, "rough", &mats.iter().map(|m| n(m, "roughness", rough0)).collect::<Vec<_>>());
         column(p, &mut row, &id, "metal", &mats.iter().map(|m| n(m, "metalness", metal0)).collect::<Vec<_>>());
-        if let Some(e) = hex(m0.get("emissive")).filter(|e| e != "#000000") {
-            row.insert("emissive".into(), V::S(e));
-            column(p, &mut row, &id, "emissive_k", &mats.iter().map(|m| emissive_power(m)).collect::<Vec<_>>());
+        // the glow: its colour from the first frame that has one, its strength keyed (0 on a frame with none: one that
+        // stopped glowing kept glowing), and its colour keyed too when it changes (em_r..em_b; a mesh black at first
+        // and glowing later had none at all, and one whose glow changed colour kept the first)
+        let ems: Vec<Option<String>> = mats.iter().map(|m| hex(m.get("emissive")).filter(|e| e != "#000000")).collect();
+        if let Some(e0) = ems.iter().flatten().next().cloned() {
+            row.insert("emissive".into(), V::S(e0.clone()));
+            column(p, &mut row, &id, "emissive_k", &mats.iter().zip(&ems).map(|(m, e)| if e.is_some() { emissive_power(m) } else { 0.0 }).collect::<Vec<_>>());
+            if ems.iter().any(|e| e.as_deref().is_some_and(|e| e != e0)) {
+                let c: Vec<[f64; 3]> = ems.iter().map(|e| rgb(e.as_deref().unwrap_or(&e0))).collect();
+                for (k, name) in ["em_r", "em_g", "em_b"].iter().enumerate() {
+                    let vals: Vec<f64> = c.iter().map(|v| v[k]).collect();
+                    p.keys.insert((id.clone(), name.to_string()), raea_runtime_look::linear_keys(&vals));
+                    row.insert(name.to_string(), V::N(vals[0]));
+                }
+            }
         }
         let see_through = mats.iter().any(|m| m.get("transparent") == Some(&Value::Bool(true)) || num(m, "opacity").is_some_and(|o| o < 1.0));
         if see_through {

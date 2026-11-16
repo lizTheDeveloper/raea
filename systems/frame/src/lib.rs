@@ -238,6 +238,19 @@ pub fn colour(v: Option<&V>, d: [f32; 4]) -> Color {
     Color::srgba(c[0], c[1], c[2], c[3])
 }
 
+/// A row's emissive colour: its em_r, em_g, em_b (sRGB, 0..1) when it has them (a fold keys them when a part's emissive
+/// colour changes over its frames: a timeline keys numbers, not the hex), else its `emissive` hex.
+pub fn emissive_colour<'a>(get: impl Fn(&str) -> Option<&'a V>) -> Color {
+    let n = |k: &str| match get(k) {
+        Some(V::N(x)) => *x as f32,
+        _ => 0.0,
+    };
+    if get("em_r").is_some() {
+        return Color::srgb(n("em_r"), n("em_g"), n("em_b"));
+    }
+    colour(get("emissive"), [0.0, 0.0, 0.0, 1.0])
+}
+
 /// A picture file Bevy reads itself (a .ktx2 cubemap or lightmap, with its own format and mips) decoded into a new
 /// image (`what` names the part in the error): an environment map's, a skybox's or a lightmap's.
 pub fn image_file(world: &mut World, what: &str, p: &str) -> Result<Handle<Image>, String> {
