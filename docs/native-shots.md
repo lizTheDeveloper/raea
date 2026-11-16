@@ -292,7 +292,9 @@ line), so none fell back.
 
 ### Current build and pin
 
-- **Latest and pinned:** `0.1.4-pc211` (commit d0cec75; release with sha256 on the fork; rollback pc210). JSC on
+- **Latest and pinned:** `0.1.4-pc212` (commit 10f50d7; rollback pc211): every camera without GPU culling
+  (`NoIndirectDrawing`; `RAEA_GPU_CULLING=1` restores), so draw order and depth ties are the same every run.
+- **pc211** (commit d0cec75; rollback pc210). JSC on
   the system malloc (the members' map exhaustion), bare <Entity> placement per frame (Ch1's batch-boundary zoom pops),
   near/far keyed, threads sized to the process's share and never fatal, no file watcher in render runtimes, 3D text
   following its atlas, `raea render-serve`.
@@ -340,6 +342,23 @@ frame drawn alone.
 - a light's target placed by its groups.
 
 ### In progress, and exactly where it stands
+
+**2026-11-16, third engine agent (live log; newest first):**
+- **In progress: first-frame-only columns (coordinator, from Ch1 v7.4 probes).** Batch-boundary check `bd.sh BIN TAG CH
+  B live|native` on the box: [B-4,B+4) as one batch vs [B,B+4) fresh, pixels plus rows-dump property diff
+  (tools/native-diff.py) and RAEA_STATE_DUMP. Live census on Ch1: f17100 and f29700 step 52 dB, and the only differing
+  property is the camera's AmbientLight colour (the fold wrote `ambient_color` from the first frame; live's cam_keyed
+  didn't list it; sync_camera set brightness only). Fix in the tree: `amb_r..amb_b` keyed (fold, live, sync_camera,
+  written only past 1e-4). f11550 and f34950 clean on live. Native census and the rest (bg/clear, envmap_k) next.
+- **RAEA_STATE_DUMP=DIR** (engine/render load.rs `state_dump`): every reflectable main-world resource and both
+  worlds' entity counts per component, written after a fresh engine's build ("fresh") and after `reload` ("reload"),
+  for item 2 (kept-engine carryover).
+- **pc212 shipped and pinned** (10f50d7, sha256 bd44c638…). The Ch3 @900 "shadow banding" was z-fighting plus GPU
+  culling's atomic instance compaction (draw order, so depth-tie winners, differed run to run). Not shadows (the
+  cascades were bit-identical; it persists with the sun off). Ruled out first: frame count, main-world system order,
+  raea's pipelined render thread. Cost none (Ch5 250 -> 248 frames/min, Ch2 221 -> 236). Validation in the project's
+  design/render-perf.md. The frame-to-frame lit/dark alternation from f904 remains and is the scene's (identical each
+  run and to frames drawn alone); likely shore-dusk.tsx `sand`/`ripple-*`, handed to the coordinator.
 
 **2026-11-16, second engine agent (live log; newest first):**
 - **pc211 shipped and pinned (rq pin, rollback pc210).** Validation: Ch5 identical to live; Ch2 62.5 dB; Ch5 8400 86.7
