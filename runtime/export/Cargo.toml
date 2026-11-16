@@ -33,6 +33,8 @@ raea-runtime-scene = { path = "../scene" }
 raea-runtime-look = { path = "../look" }
 # native shots: the kept bake compressed (a chapter's JSON bakes ran to tens of GB)
 zstd = "0.13"
+# native shots: the kept bake's project files by their content (a changed model is a stale bake)
+blake3 = "1.8"
 raea-sys-contact = { path = "../../systems/contact" }
 # a render's findings, in one shape (docs/direction.feature DR3)
 raea-core-facts = { path = "../../core/facts" }

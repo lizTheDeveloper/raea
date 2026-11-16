@@ -119,7 +119,6 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     let opened = t_ms(t);
                     std::mem::take(&mut app.world_mut().resource_mut::<raea_runtime_react::CommitTap>().0);
                     let mut out: Piece = Vec::with_capacity((b - a) as usize);
-                    let mut inner = Inner3d::default();
                     let mut record = |app: &mut App, f: i64| -> R<()> {
                         let world = app.world_mut();
                         let scene = scene_of(world);
@@ -137,7 +136,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                         // each piece's node ids in a range of their own: another runtime numbers its tree its own way,
                         // and the page kept what it knew of an id across the RESET (Ch2 @14230: the layered 3D's
                         // holder painted over it from the piece that renumbered it on)
-                        let ops = ops.into_iter().map(|j| if j == raea_runtime_bake::RESET { j } else { inner.kept(&j, off) }).collect();
+                        // (moved, and the 3D's interior left out, once the piece is whole: page_commits)
                         out.push((f, ops, scene, clear));
                         Ok(())
                     };
@@ -157,6 +156,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     if trace() {
                         eprintln!("raea native: piece {a}..{b}: runtime open {opened:.0} ms, {} frames stepped in {:.0} ms (flush waits {:.0} ms, {} timed out, every runtime)", b - a, t_ms(t) - opened, (ld(&raea_runtime_react::FLUSH_WAIT_NS) - w0) as f64 / 1e6, ld(&raea_runtime_react::FLUSH_TIMEOUTS) - to0);
                     }
+                    page_commits(&mut out, off);
                     kept = Some(app);
                     Ok((conf, out))
                     })();
@@ -195,62 +195,154 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
     Ok(conf.map(|c| (c, all)))
 }
 
-/// What a piece's commits say of the 3D's place in React's tree: each node's parent, and the 3D's elements (data-3d).
-/// A 3D element inside another is the 3D's alone (a native shot draws its 3D from the Program), so its ops are left
-/// out of the page's commits: they were all but 0.1 MB of Ch5's 87.6 MB, replayed every frame (22 ms) into a page
-/// world of ~12k entities its sync then walked. The 3D's outermost elements stay, as the page finds its holders by them.
-#[derive(Default)]
-struct Inner3d {
-    parent: HashMap<u64, u64>,
-    d3: std::collections::HashSet<u64>,
+/// RAEA_NATIVE_DROP3D: on unless "0". The page's commits without the 3D's interior (page_commits).
+fn drop3d() -> bool {
+    std::env::var("RAEA_NATIVE_DROP3D").as_deref() != Ok("0")
 }
 
-impl Inner3d {
-    fn inside(&self, mut id: u64) -> bool {
+/// A piece's commits as the page replays them: each id moved up by `off` (ids_moved_ops) and, unless RAEA_NATIVE_DROP3D=0,
+/// the 3D's interior left out. A 3D element (data-3d) inside another is the 3D's alone (a native shot draws its 3D from
+/// the Program): they were all but 0.1 MB of Ch5's 87.6 MB of commits, replayed every frame (18-143 ms) into a page
+/// world of ~12k entities its sync then walked. Decided over the whole piece, so it can see what any frame adds:
+///  - the 3D's outermost elements stay, as the page finds its holders by them;
+///  - so does every element over a page element inside the 3D: a <Screen>'s picture (data-raea-screen, its own root
+///    when the page walks to it), a UiMaterial's or a texture's slot, a layered Canvas3D's slot. Left out, these hung
+///    from a parent the page never made and their pictures went (pc208's opt-in: Ch3 @900 at 33.7 dB);
+///  - text under an element left out goes with it;
+///  - an insert before a sibling left out goes before the next sibling kept, else to the end (the page's replay skips
+///    an insert whose `before` it doesn't know, and the node never hung anywhere).
+fn page_commits(piece: &mut Piece, off: u64) {
+    use std::collections::HashSet;
+    let moved = |ops: Vec<Value>| -> String { ids_moved_ops(ops, off) };
+    let parse = |j: &str| serde_json::from_str::<Vec<Value>>(j).ok();
+    if !drop3d() {
+        for (_, ops, _, _) in piece.iter_mut() {
+            for j in ops.iter_mut().filter(|j| j.as_str() != raea_runtime_bake::RESET) {
+                if let Some(v) = parse(j) {
+                    *j = moved(v);
+                }
+            }
+        }
+        return;
+    }
+    let n = |o: &Value, k: &str| o.get(k).and_then(Value::as_u64);
+    // what the whole piece says: each node's parent, its 3D elements, its page elements and its text
+    let (mut parent, mut d3, mut page, mut text) = (HashMap::<u64, u64>::new(), HashSet::<u64>::new(), Vec::<u64>::new(), Vec::<u64>::new());
+    let mut all: Vec<Vec<Option<Vec<Value>>>> = Vec::with_capacity(piece.len());
+    for (_, ops, _, _) in piece.iter() {
+        let mut frame = Vec::with_capacity(ops.len());
+        for j in ops {
+            let v = if j.as_str() == raea_runtime_bake::RESET { None } else { parse(j) };
+            for o in v.iter().flatten() {
+                match o.get("op").and_then(Value::as_str) {
+                    Some("create") => {
+                        if let Some(i) = n(o, "id") {
+                            if o.get("props").is_some_and(|p| p.get("data-3d").is_some()) {
+                                d3.insert(i);
+                            } else {
+                                page.push(i);
+                            }
+                        }
+                    }
+                    Some("createText") | Some("createTextSpan") => text.extend(n(o, "id")),
+                    Some("append") | Some("insert") => {
+                        if let (Some(p), Some(c)) = (n(o, "parent"), n(o, "child")) {
+                            parent.insert(c, p);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            frame.push(v);
+        }
+        all.push(frame);
+    }
+    // every element over a page element stays
+    let mut needed = HashSet::<u64>::new();
+    for &e in &page {
+        let mut id = e;
         for _ in 0..4096 {
-            let Some(&p) = self.parent.get(&id) else { return false };
-            if self.d3.contains(&p) {
+            let Some(&p) = parent.get(&id) else { break };
+            if !needed.insert(p) {
+                break;
+            }
+            id = p;
+        }
+    }
+    let inside = |mut id: u64| -> bool {
+        for _ in 0..4096 {
+            let Some(&p) = parent.get(&id) else { return false };
+            if d3.contains(&p) {
                 return true;
             }
             id = p;
         }
         false
-    }
-
-    /// `json`'s ops without those for the 3D's interior, the rest's ids moved up by `off` (ids_moved).
-    fn kept(&mut self, json: &str, off: u64) -> String {
-        // opt in (RAEA_NATIVE_DROP3D=1) until it's clean: replay fell to 0.2 ms a frame, Ch5 identical, Ch2 at its
-        // noise, but Ch3 @900 had one frame at 33.7 dB and Ch1 @12500 came out 60 dB where it was identical
-        if std::env::var("RAEA_NATIVE_DROP3D").as_deref() != Ok("1") {
-            return ids_moved(json, off);
+    };
+    let mut gone: HashSet<u64> = d3.iter().copied().filter(|&i| !needed.contains(&i) && inside(i)).collect();
+    for t in text {
+        if parent.get(&t).is_some_and(|p| gone.contains(p)) {
+            gone.insert(t);
         }
-        let Ok(ops) = serde_json::from_str::<Vec<Value>>(json) else { return ids_moved(json, off) };
-        for o in &ops {
-            let n = |k: &str| o.get(k).and_then(Value::as_u64);
-            match o.get("op").and_then(Value::as_str) {
-                Some("create") if o.get("props").is_some_and(|p| p.get("data-3d").is_some()) => {
-                    if let Some(i) = n("id") {
-                        self.d3.insert(i);
-                    }
-                }
-                Some("append") | Some("insert") => {
-                    if let (Some(p), Some(c)) = (n("parent"), n("child")) {
-                        self.parent.insert(c, p);
-                    }
-                }
-                _ => {}
+    }
+    // each parent's children in order, as replay keeps them (every op, kept or not), to place an insert whose
+    // `before` is gone
+    let mut kids: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut at: HashMap<u64, u64> = HashMap::new();
+    let unhang = |kids: &mut HashMap<u64, Vec<u64>>, at: &mut HashMap<u64, u64>, c: u64| {
+        if let Some(p) = at.remove(&c) {
+            if let Some(l) = kids.get_mut(&p) {
+                l.retain(|&k| k != c);
             }
         }
-        // a 3D element (data-3d) inside another: a page element there (a layered Canvas3D's slot, its <img
-        // data-raea-scene>, sits right under the 3D's root) stays, as do the roots
-        let keep: Vec<Value> = ops.into_iter().filter(|o| o.get("id").or_else(|| o.get("child")).and_then(Value::as_u64).is_none_or(|i| !(self.d3.contains(&i) && self.inside(i)))).collect();
-        ids_moved(&Value::Array(keep).to_string(), off)
+    };
+    for ((_, ops, _, _), frame) in piece.iter_mut().zip(all) {
+        for (j, v) in ops.iter_mut().zip(frame) {
+            let Some(v) = v else {
+                kids.clear();
+                at.clear();
+                continue;
+            };
+            let mut keep = Vec::with_capacity(v.len());
+            for mut o in v {
+                let kind = o.get("op").and_then(Value::as_str).unwrap_or("").to_string();
+                let (p, c) = (n(&o, "parent"), n(&o, "child"));
+                match (kind.as_str(), p, c) {
+                    ("append", Some(p), Some(c)) => {
+                        unhang(&mut kids, &mut at, c);
+                        kids.entry(p).or_default().push(c);
+                        at.insert(c, p);
+                    }
+                    ("insert", Some(p), Some(c)) => {
+                        unhang(&mut kids, &mut at, c);
+                        let l = kids.entry(p).or_default();
+                        let b = n(&o, "before");
+                        let k = b.and_then(|b| l.iter().position(|&x| x == b)).unwrap_or(l.len());
+                        l.insert(k, c);
+                        at.insert(c, p);
+                        if b.is_some_and(|b| gone.contains(&b)) && !gone.contains(&c) {
+                            match l[k + 1..].iter().find(|x| !gone.contains(x)) {
+                                Some(&next) => o["before"] = json!(next),
+                                None => {
+                                    o = json!({"op": "append", "parent": p, "child": c});
+                                }
+                            }
+                        }
+                    }
+                    ("remove", _, Some(c)) => unhang(&mut kids, &mut at, c),
+                    _ => {}
+                }
+                if n(&o, "id").or(c).is_none_or(|i| !gone.contains(&i)) {
+                    keep.push(o);
+                }
+            }
+            *j = moved(keep);
+        }
     }
 }
 
 /// A commit's node ids moved up by `off` (the root's, 0, stays): a piece's ids kept apart from every other piece's.
-fn ids_moved(json: &str, off: u64) -> String {
-    let Ok(mut ops) = serde_json::from_str::<Vec<Value>>(json) else { return json.to_string() };
+fn ids_moved_ops(mut ops: Vec<Value>, off: u64) -> String {
     for op in ops.iter_mut().filter_map(Value::as_object_mut) {
         for k in ["id", "parent", "child", "before"] {
             if let Some(n) = op.get(k).and_then(Value::as_u64).filter(|n| *n != raea_runtime_react::ROOT_ID) {
@@ -400,11 +492,92 @@ fn key_of(js: &Path, stepped: &[i64]) -> R<u64> {
         }
     };
     eat(&std::fs::read(js).map_err(|e| format!("{}: {e}", js.display()))?);
-    eat(format!("native-1|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
-    for v in ["RAEA_HIDE_LAYERS", "RAEA_CAMERA", "RAEA_ENGINE_READS", "RAEA_SOURCE_STAMPS", "RAEA_LAYERS"] {
+    eat(format!("native-3|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
+    for v in ["RAEA_NATIVE_DROP3D", "RAEA_HIDE_LAYERS", "RAEA_CAMERA", "RAEA_ENGINE_READS", "RAEA_SOURCE_STAMPS", "RAEA_LAYERS"] {
         eat(format!("|{v}={:?}", std::env::var(v).ok()).as_bytes());
     }
     Ok(key)
+}
+
+/// Where the project's root stands in a kept bake: its files' paths are kept relative to it, so a bake made in one copy
+/// of the project (an rq snapshot, /root/snap/NAME) draws in another. The SDK resolves media to absolute paths as it
+/// runs, so they were in the bake as the copy's own, and once that copy was pruned the bake's models "didn't exist".
+const ROOT_MARK: &str = "@@raea-project@@";
+
+/// The project's root as a bake's paths start: as given and as the files resolve (a link to a snapshot).
+fn roots(dir: &Path) -> Vec<String> {
+    let mut r = vec![dir.to_string_lossy().trim_end_matches('/').to_string()];
+    if let Ok(c) = dir.canonicalize() {
+        let c = c.to_string_lossy().trim_end_matches('/').to_string();
+        if !r.contains(&c) {
+            r.insert(0, c);
+        }
+    }
+    r.retain(|s| s.len() > 1);
+    r
+}
+
+/// The JSON-escaped body of a path, as it sits inside a JSON string (and inside a string in one, escaped again).
+fn escaped(s: &str) -> String {
+    let q = serde_json::to_string(s).unwrap_or_default();
+    q[1..q.len().saturating_sub(1)].to_string()
+}
+
+/// A bake as kept: the project's root (followed by "/") marked, and each project file it names listed with its content
+/// hash ("assets"), so stale() can tell a changed model from an unrelated edit.
+fn portable(doc: &Value, dir: &Path) -> String {
+    let mut text = doc.to_string();
+    for r in roots(dir) {
+        text = text.replace(&format!("{}/", escaped(&r)), &format!("{ROOT_MARK}/"));
+    }
+    let mut named: Vec<String> = Vec::new();
+    let mut at = 0;
+    while let Some(i) = text[at..].find(ROOT_MARK) {
+        let a = at + i + ROOT_MARK.len() + 1;
+        let end = text[a..].find(|c: char| matches!(c, '"' | '\\' | ')' | '\'' | '?' | '#')).map_or(text.len(), |e| a + e);
+        named.push(text[a..end].to_string());
+        at = end;
+    }
+    named.sort();
+    named.dedup();
+    let assets: Map<String, Value> = hashes(dir, &named).into_iter().filter_map(|(k, h)| Some((k, Value::String(h?)))).collect();
+    let body = text.strip_prefix('{').unwrap_or(&text);
+    format!("{{\"assets\":{},{body}", Value::Object(assets))
+}
+
+/// A kept bake's marked paths placed at this project's root.
+fn placed(text: &str, dir: &Path) -> String {
+    text.replace(&format!("{ROOT_MARK}/"), &format!("{}/", escaped(roots(dir).last().map(String::as_str).unwrap_or(""))))
+}
+
+/// Why a kept bake no longer matches the project's files: one it names changed or went (None when all match).
+fn stale(v: &Value, dir: &Path) -> Option<String> {
+    let Some(assets) = v.get("assets").and_then(Value::as_object) else { return Some("it lists no project files".into()) };
+    let names: Vec<String> = assets.keys().cloned().collect();
+    for (k, (_, h)) in names.iter().zip(hashes(dir, &names)) {
+        if h.as_deref() != assets[k].as_str() {
+            return Some(format!("{k} {}", if h.is_none() { "is gone" } else { "changed" }));
+        }
+    }
+    None
+}
+
+/// Each project file's content hash (blake3), across the cores; None for a name that isn't a file.
+fn hashes(dir: &Path, names: &[String]) -> Vec<(String, Option<String>)> {
+    let one = |n: &String| {
+        let p = dir.join(n);
+        let h = p.is_file().then(|| {
+            let mut x = blake3::Hasher::new();
+            std::fs::File::open(&p).ok().and_then(|f| x.update_reader(f).ok()).map(|x| x.finalize().to_hex().to_string())
+        });
+        (n.clone(), h.flatten())
+    };
+    let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16).max(1);
+    let chunk = names.len().div_ceil(lanes).max(1);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = names.chunks(chunk).map(|c| s.spawn(move || c.iter().map(one).collect::<Vec<_>>())).collect();
+        parts.into_iter().flat_map(|t| t.join().unwrap_or_default()).collect()
+    })
 }
 
 /// The shot baked, or read back from the cache.
@@ -419,7 +592,15 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         None => None,
     };
     if let Some(p) = path.as_ref().filter(|p| p.exists()) {
-        let read = std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string())).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string()));
+        let read = std::fs::read(p)
+            .map_err(|e| e.to_string())
+            .and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string()))
+            .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+            .and_then(|t| serde_json::from_str::<Value>(&placed(&t, dir)).map_err(|e| e.to_string()))
+            .and_then(|v| match stale(&v, dir) {
+                Some(why) => Err(format!("stale: {why}")),
+                None => Ok(v),
+            });
         match read {
             Ok(v) => {
                 let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
@@ -429,7 +610,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
                 raea_runtime_react::startup_mark(&format!("the shot's bake read back ({:.0} ms)", t_ms(t0)));
                 return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog }));
             }
-            Err(e) => eprintln!("raea native: the kept bake {} is unreadable ({e}); baking again", p.display()),
+            Err(e) => eprintln!("raea native: the kept bake {} can't be used ({e}); baking again", p.display()),
         }
     }
     raea_runtime_react::startup_mark("the shot's bake: stepping React across runtimes");
@@ -467,7 +648,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         let doc = json!({"w": shot.w, "h": shot.h, "fps": shot.fps, "total": shot.total, "ops": shot.ops, "prog": shot.prog.as_ref().map(prog_json)});
         if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
             let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-            let packed = zstd::encode_all(&serde_json::to_vec(&doc).unwrap_or_default()[..], 3).unwrap_or_default();
+            let packed = zstd::encode_all(portable(&doc, dir).as_bytes(), 3).unwrap_or_default();
             if !packed.is_empty() && std::fs::write(&tmp, packed).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
                 prune_cache(d, "zst", 64);
             } else {

@@ -15091,6 +15091,7 @@ name = "raea-runtime-export"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "blake3",
  "image",
  "raea-core-facts",
  "raea-core-program",
@@ -15121,6 +15122,7 @@ dependencies = [
  "raea-sys-page",
  "serde_json",
  "wgpu",
+ "zstd",
 ]
 
 [[package]]
