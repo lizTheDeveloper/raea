@@ -20,6 +20,10 @@ impl LiveScene {
         if self.rows.values().any(|r| !LIVE_GROUPS.contains(&r.kind.as_str())) {
             return None;
         }
+        // a model with <Model nodes> (per-frame joint transforms): the full path, which keys them (live.rs diff)
+        if self.rows.values().any(|r| r.kind == "model" && r.first.keys().any(|k| node_value(k))) {
+            return None;
+        }
         // a lens, motion blur or a toon surface's keyed values: the full path, which keys them (camera_of, rows_into_of)
         if self.cam.keys().any(|k| k.starts_with("lens_") || k.starts_with("mb_")) || self.rows.values().any(|r| ["sh_r", "rim_k", "spec_k", "outline_w"].iter().any(|k| r.first.contains_key(*k))) {
             return None;

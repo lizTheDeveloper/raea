@@ -58,6 +58,14 @@ pub(crate) const GRAPH_COLS: [[&str; 2]; 16] = [["g0_w", "g0_t"], ["g1_w", "g1_t
 /// Up to 64 morph weights a model (Bevy takes 256; a MakeHuman face has 34 expression units).
 pub(crate) const MORPH_COLS: [&str; 64] = ["morph0", "morph1", "morph2", "morph3", "morph4", "morph5", "morph6", "morph7", "morph8", "morph9", "morph10", "morph11", "morph12", "morph13", "morph14", "morph15", "morph16", "morph17", "morph18", "morph19", "morph20", "morph21", "morph22", "morph23", "morph24", "morph25", "morph26", "morph27", "morph28", "morph29", "morph30", "morph31", "morph32", "morph33", "morph34", "morph35", "morph36", "morph37", "morph38", "morph39", "morph40", "morph41", "morph42", "morph43", "morph44", "morph45", "morph46", "morph47", "morph48", "morph49", "morph50", "morph51", "morph52", "morph53", "morph54", "morph55", "morph56", "morph57", "morph58", "morph59", "morph60", "morph61", "morph62", "morph63"];
 
+/// A <Model nodes> transform column (models.rs node_columns: node{i}_x/_y/_z, node{i}_q_x.._q_w, node{i}_s_x.._s_z);
+/// node{i} itself, the node's name, is fixed by the first frame.
+pub(crate) fn node_value(k: &str) -> bool {
+    k.strip_prefix("node").and_then(|r| r.split_once('_')).is_some_and(|(i, c)| {
+        !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()) && matches!(c, "x" | "y" | "z" | "q_x" | "q_y" | "q_z" | "q_w" | "s_x" | "s_y" | "s_z")
+    })
+}
+
 /// The columns a frame may change, per kind (what `rows_into` and `camera` key); everything else is the first frame's.
 pub(crate) fn live_dynamic(kind: &str) -> &'static [&'static str] {
     match kind {
@@ -302,6 +310,15 @@ impl LiveScene {
                     want.insert(k.to_string(), v.clone());
                 }
             }
+            if kind == "model" {
+                // a <Model nodes>'s per-frame transforms (node{i}_q_x.., _x.., _s_x..: a joint turned by hand, a pointing arm,
+                // walking legs), keyed as a render keys them. They weren't in live_dynamic's fixed list, so a live render (a
+                // game's, any composition with useGameState) held every node override at its first frame for the whole
+                // batch while the same frames drawn one at a time were right
+                for (k, v) in row.iter().filter(|(k, _)| node_value(k)) {
+                    want.insert(k.clone(), v.clone());
+                }
+            }
             if kind == "mesh" {
                 // a colour other than its first: keyed from now on, as a render keys it once a part's colour changes
                 if row.get("color") != r.first.get("color") {
@@ -395,6 +412,27 @@ mod tests {
 
     fn person(who: &str) -> Vec<Node3> {
         vec![model(json!({"name": format!("{who}-head"), "src": format!("/media/{who}/joint.glb")})), model(json!({"name": format!("{who}-body"), "src": format!("/media/{who}/body.glb"), "bones": {"head": format!("{who}-head")}}))]
+    }
+
+    /// A <Model nodes> joint turned frame by frame in a live render (a game's: any composition with useGameState) sends
+    /// each frame's rotation, on the full path (the fast one hands a model with nodes to it). It held the first frame's
+    /// for the whole batch, so a pointing arm stayed down in every Chapter 3 batch (premature-collapse, 2026-11-16).
+    #[test]
+    fn a_live_models_node_overrides_follow_each_frame() {
+        let arm = |z: f64| vec![model(json!({"name": "noys", "src": "/media/noys.glb", "nodes": {"Neck": {"rotation": [0.0, 0.0, 0.0, 1.0]}, "LeftArm": {"rotation": [0.0, 0.0, z, (1.0 - z * z).sqrt()]}}}))];
+        let mut ls = LiveScene::default();
+        ls.open(Shot { scene: &arm(0.0), clear: None }, 64, 64, 30.0);
+        let node_of = |set: &[raea_core_program::eval::Tup]| set.iter().find(|t| t.kind == "model").map(|t| t.vals.iter().filter(|(k, _)| node_value(k)).map(|(k, v)| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>());
+        for (i, z) in [0.1, 0.2, 0.3].into_iter().enumerate() {
+            let (set, _) = ls.frame(Shot { scene: &arm(z), clear: None });
+            let sent = node_of(&set).unwrap_or_default();
+            // the arm's z turn arrives each frame, under its node's index; the still neck isn't sent again
+            assert!(sent.values().any(|v| matches!(v, V::N(x) if (x - z).abs() < 1e-9)), "frame {i}: the arm's rotation wasn't sent: {sent:?}");
+            assert!(sent.keys().all(|k| k.starts_with("node1_") || k.starts_with("node0_")), "{sent:?}");
+        }
+        // the same frame again: nothing
+        assert!(node_of(&ls.frame(Shot { scene: &arm(0.3), clear: None }).0).unwrap_or_default().is_empty());
+        assert!(node_value("node12_q_w") && node_value("node0_x") && !node_value("node3") && !node_value("node_q_x") && !node_value("nodes"));
     }
 
     /// A keyed <Character> swapping people: the second person's skin follows its own joints by this scene's ids, not
