@@ -42,11 +42,20 @@ fn trace() -> bool {
     std::env::var_os("RAEA_NATIVE_TRACE").is_some()
 }
 
-/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32), each with at least
-/// RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
+/// Memory the system has free for new work (MemAvailable), in GB; None where it can't be read.
+fn mem_available_gb() -> Option<f64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: f64 = t.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1048576.0)
+}
+
+/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and one per 1 GB of free
+/// memory (a chapter's runtime held about 0.45 GB: Ch5 @2400, 11 runtimes, 7.7 GB peak against 2.7 drawing), each
+/// with at least RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
 fn workers_for(frames: usize) -> usize {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(cores.min(32)).clamp(1, 64);
+    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / 1.0).floor().max(1.0) as usize);
+    let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(cores.min(32).min(by_mem)).clamp(1, 64);
     let min = std::env::var("RAEA_BAKE_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).max(1);
     want.min(frames.div_ceil(min)).max(1)
 }
@@ -90,7 +99,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     let opened = t_ms(t);
                     std::mem::take(&mut app.world_mut().resource_mut::<raea_runtime_react::CommitTap>().0);
                     let mut out: Piece = Vec::with_capacity((b - a) as usize);
-                    raea_runtime_bake::step_frames(&mut app, a, b, |app, f| {
+                    let mut record = |app: &mut App, f: i64| -> R<()> {
                         let world = app.world_mut();
                         let scene = scene_of(world);
                         let clear = scene_clear(world);
@@ -99,9 +108,22 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                         let ops = if f == a { vec![raea_runtime_bake::RESET.to_string(), Value::Array(raea_runtime_react::snapshot_ops(world)).to_string()] } else { tapped };
                         out.push((f, ops, scene, clear));
                         Ok(())
-                    })?;
+                    };
+                    let ld = |x: &std::sync::atomic::AtomicU64| x.load(std::sync::atomic::Ordering::Relaxed);
+                    let (w0, to0) = (ld(&raea_runtime_react::FLUSH_WAIT_NS), ld(&raea_runtime_react::FLUSH_TIMEOUTS));
+                    // RAEA_NATIVE_STEP=range: the frames asked for as one range (raea-frames), the next set off by the
+                    // frame's own effect; by default each its own raea-frame event, as a render asks for a frame
+                    if std::env::var("RAEA_NATIVE_STEP").as_deref() == Ok("range") {
+                        raea_runtime_bake::step_frames(&mut app, a, b, |app, f| record(app, f))?;
+                    } else {
+                        for f in a..b {
+                            app.world().resource::<ReactOutbox>().send(json!({"t": "event", "name": "raea-frame", "value": f}));
+                            settle(&mut app, Some(f), 20.0)?;
+                            record(&mut app, f)?;
+                        }
+                    }
                     if trace() {
-                        eprintln!("raea native: piece {a}..{b}: runtime open {opened:.0} ms, {} frames stepped in {:.0} ms", b - a, t_ms(t) - opened);
+                        eprintln!("raea native: piece {a}..{b}: runtime open {opened:.0} ms, {} frames stepped in {:.0} ms (flush waits {:.0} ms, {} timed out, every runtime)", b - a, t_ms(t) - opened, (ld(&raea_runtime_react::FLUSH_WAIT_NS) - w0) as f64 / 1e6, ld(&raea_runtime_react::FLUSH_TIMEOUTS) - to0);
                     }
                     Ok((conf, out))
                 })

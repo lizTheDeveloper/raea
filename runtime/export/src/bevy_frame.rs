@@ -257,11 +257,9 @@ pub(crate) fn bevy_page_sync(world: &mut World, page: &mut raea_runtime_page::Be
     cx.marker = None;
     cx.mix = None;
     let mut q = world.query::<(&ReactKind, Option<&ReactProps>, Option<&raea_runtime_react::ReactNode>)>();
-    let items: Vec<(String, Map<String, Value>, Option<u64>)> = q.iter(world).map(|(k, p, n)| (k.0.clone(), p.map(|p| p.0.clone()).unwrap_or_default(), n.map(|n| n.0))).collect();
+    // the 3D's elements left out before their props are copied (thousands a frame; they're read as the scene below)
+    let items: Vec<(String, Map<String, Value>, Option<u64>)> = q.iter(world).filter(|(_, p, _)| !p.is_some_and(|p| p.0.contains_key("data-3d"))).map(|(k, p, n)| (k.0.clone(), p.map(|p| p.0.clone()).unwrap_or_default(), n.map(|n| n.0))).collect();
     for (kind, mut props, node) in items {
-        if props.contains_key("data-3d") {
-            continue;
-        }
         if let Some(f) = num(&props, "data-raea-frame") {
             cx.marker = Some(f as i64);
             continue;
@@ -278,7 +276,10 @@ pub(crate) fn bevy_page_sync(world: &mut World, page: &mut raea_runtime_page::Be
         }
     }
     // 3D: rows for raea-render, drawn under the page; the elements holding it see through, the nearest one's colour its clear
-    cx.scene = scene_of(world);
+    // (a native shot's 3D is its Program's: the scene isn't read again each frame)
+    if !crate::native::NATIVE.load(std::sync::atomic::Ordering::Relaxed) || cx.scene3d.is_none() {
+        cx.scene = scene_of(world);
+    }
     page_with_holders(world, page, cx)
 }
 
