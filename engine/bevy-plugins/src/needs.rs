@@ -15,7 +15,10 @@ pub(crate) fn add(app: &mut App, needs: &[&str]) {
     }
     if ["assets", "mesh", "shader", "image", "pbr"].iter().any(|n| needs.contains(n)) {
         // as the render Engine has it: a path anywhere, no .meta files
-        app.add_plugins(bevy::asset::AssetPlugin { unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow, meta_check: bevy::asset::AssetMetaCheck::Never, ..Default::default() });
+        // and no file watcher unless asked (RAEA_BEVY_WATCH=1): a render's React runtimes (a native bake's up to 32)
+        // each started notify's inotify threads, two of 2026-11-16's member panics were in them, and a batch never
+        // reloads a file mid-render
+        app.add_plugins(bevy::asset::AssetPlugin { unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow, meta_check: bevy::asset::AssetMetaCheck::Never, watch_for_changes_override: Some(std::env::var_os("RAEA_BEVY_WATCH").is_some()), ..Default::default() });
     }
     // meshes, and the skins whose bounds the camera's visibility and the gizmos read (MeshPlugin has both in a render)
     if needs.contains(&"mesh") {

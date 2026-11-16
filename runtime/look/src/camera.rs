@@ -102,9 +102,13 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
                 row.insert(col.into(), V::N(x));
             }
         }
+        // near and far keyed per frame, as fov is: the first frame's held for a whole batch, so a shot whose clip planes
+        // moved (Ch1's long lens, Ch3's pull-backs) drew each batch with its own first frame's (a jump at every batch
+        // boundary); a frame that doesn't give one holds the first frame's
         for (k, col) in [("near", "near"), ("far", "far")] {
-            if let Some(v) = num(first, k) {
-                row.insert(col.into(), V::N(v));
+            if let Some(v0) = num(first, k) {
+                let per: Vec<f64> = its.iter().map(|i| num(&i.props, k).unwrap_or(v0)).collect();
+                column(p, row, id, col, &per);
             }
         }
         layers_column(row, first);

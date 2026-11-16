@@ -54,6 +54,30 @@ pub struct StillSynced;
 /// The columns sync_meshes applies to a part's material.
 const MATERIAL_COLS: [&str; 6] = ["col_r", "opacity", "emissive_k", "rough", "metal", "sheet_frame"];
 
+/// Bare entities (<Entity>) placed and shown by their frame's row, as a mesh is (sync_meshes takes meshes, models and
+/// instances only, so an <Entity>'s keyed placement was applied at its spawn alone: on a batch's first frame, held
+/// for the rest of the batch). Ch1's pocket-world window cameras, <Entity>s that follow the main camera, froze at each
+/// batch's first frame and jumped at every batch boundary (live and native alike). A row the same on every frame is
+/// left as spawned, so an entity a plugin moves (a rigid body: its row holds one placement) stays the plugin's.
+pub fn sync_entities(frame: Res<FrameRows>, mut q: Query<(Entity, &mut Transform, &mut Visibility), With<super::BareEntity>>) {
+    for (e, mut t, mut vis) in &mut q {
+        if frame.still(e) {
+            continue;
+        }
+        let Some(v) = frame.vals(e) else { continue };
+        let nt = transform_of(&v);
+        if *t != nt {
+            *t = nt;
+        }
+        if let Some(on) = v.get("visible") {
+            let want = if on.truthy() { Visibility::Inherited } else { Visibility::Hidden };
+            if *vis != want {
+                *vis = want;
+            }
+        }
+    }
+}
+
 /// Meshes and models where the frame's rows put them: transform, whether they show, and the material values a row
 /// animates. Only columns a row has are applied, so rows written before these columns draw as they did.
 #[allow(clippy::type_complexity)]
@@ -245,6 +269,27 @@ pub fn sync_camera(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut placed: L
                 } else if !matches!(*p, Projection::Perspective(_)) {
                     *p = Projection::Perspective(bevy::camera::PerspectiveProjection { near: num(v, "near", 0.1), far: num(v, "far", 1000.0), ..default() });
                 }
+            }
+            // the clip planes keyed per frame (runtime/look camera.rs), not only at spawn
+            let (near, far) = (v.get("near").map(|n| n.num() as f32), v.get("far").map(|n| n.num() as f32));
+            match p.as_mut() {
+                Projection::Perspective(pp) => {
+                    if let Some(n) = near.filter(|n| pp.near != *n) {
+                        pp.near = n;
+                    }
+                    if let Some(f) = far.filter(|f| pp.far != *f) {
+                        pp.far = f;
+                    }
+                }
+                Projection::Orthographic(o) => {
+                    if let Some(n) = near.filter(|n| o.near != *n) {
+                        o.near = n;
+                    }
+                    if let Some(f) = far.filter(|f| o.far != *f) {
+                        o.far = f;
+                    }
+                }
+                _ => {}
             }
             if let Projection::Perspective(pp) = p.as_mut() {
                 if let Some(fov) = v.get("fov") {
