@@ -10,6 +10,28 @@ use raea_core_program::ir::{Program, V};
 /// `render --native`: stills drawn from a shot bake, React never running in the draw.
 pub(crate) static NATIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `raea render-serve`: this process renders many shots. With RAEA_KEEP_ENGINE=1 a native shot's engine is kept for
+/// the next one of the same size and drawing (Engine::reload). Opt in: sticky-checked (2026-11-16), a kept engine's
+/// next shot differed from the same shot drawn fresh (Ch5 @2400 again: 28.9 dB; Ch3 and Ch5 @3300 too), state the
+/// reload doesn't reset yet. A fresh engine per served shot matches (docs/native-shots.md).
+/// Bevy's task pools (global, made by the first app that asks) sized to this process's share of the cores, not the
+/// host's: a render's first app made a compute pool of ~110 threads on a 256-thread host, every lane of a member alike,
+/// where members ran out of threads and memory for them (raea_core_scene::par). Called first thing by a render.
+pub fn size_task_pools() {
+    bevy::app::TaskPoolOptions::with_num_threads(raea_core_scene::par::share().max(4)).create_default_pools();
+}
+
+pub static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    /// the engine a served shot left: its size, whether it reads AOVs, and the engine
+    static KEPT_ENGINE: std::cell::RefCell<Option<(u32, u32, bool, raea_render::engine::Engine)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn keeping_engine() -> bool {
+    SERVING.load(std::sync::atomic::Ordering::Relaxed) && std::env::var("RAEA_KEEP_ENGINE").as_deref() == Ok("1")
+}
+
 /// A shot baked: the composition's size and rate, each stepped frame's commits (the first frame of each runtime's
 /// piece a RESET and that runtime's whole tree, so a piece replays on its own), and the 3D as a Program keyed at the
 /// shot's own frames.
@@ -466,37 +488,24 @@ fn build_id() -> u64 {
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
         const CHUNK: u64 = 32 << 20;
         let n = len.div_ceil(CHUNK) as usize;
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let parts: Vec<std::sync::Mutex<u64>> = (0..n).map(|_| std::sync::Mutex::new(0)).collect();
-        let lanes = std::thread::available_parallelism().map_or(4, |x| x.get()).min(n.max(1)).min(16);
-        std::thread::scope(|sc| {
-            for _ in 0..lanes {
-                sc.spawn(|| {
-                    let mut buf = vec![0u8; CHUNK as usize];
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if i >= n {
-                            break;
-                        }
-                        let at = i as u64 * CHUNK;
-                        let want = CHUNK.min(len - at) as usize;
-                        let mut got = 0;
-                        while got < want {
-                            match read_at(&f, &mut buf[got..want], at + got as u64) {
-                                Ok(0) | Err(_) => break,
-                                Ok(k) => got += k,
-                            }
-                        }
-                        let mut ch = std::collections::hash_map::DefaultHasher::new();
-                        ch.write(&buf[..got]);
-                        *parts[i].lock().unwrap() = ch.finish();
-                    }
-                });
+        let parts = raea_core_scene::par::map(n, 16, |i| {
+            let at = i as u64 * CHUNK;
+            let want = CHUNK.min(len - at) as usize;
+            let mut buf = vec![0u8; want];
+            let mut got = 0;
+            while got < want {
+                match read_at(&f, &mut buf[got..want], at + got as u64) {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => got += k,
+                }
             }
+            let mut ch = std::collections::hash_map::DefaultHasher::new();
+            ch.write(&buf[..got]);
+            ch.finish()
         });
         h.write_u64(len);
         for p in parts {
-            h.write_u64(p.into_inner().unwrap());
+            h.write_u64(p);
         }
         h.finish()
     })
@@ -611,12 +620,7 @@ fn hashes(dir: &Path, names: &[String]) -> Vec<(String, Option<String>)> {
         });
         (n.clone(), h.flatten())
     };
-    let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16).max(1);
-    let chunk = names.len().div_ceil(lanes).max(1);
-    std::thread::scope(|s| {
-        let parts: Vec<_> = names.chunks(chunk).map(|c| s.spawn(move || c.iter().map(one).collect::<Vec<_>>())).collect();
-        parts.into_iter().flat_map(|t| t.join().unwrap_or_default()).collect()
-    })
+    raea_core_scene::par::map(names.len(), 16, |i| one(&names[i]))
 }
 
 /// Bakes being kept (written to the shot cache) on threads of their own, joined before a render returns.
@@ -791,8 +795,21 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     let mut page = raea_runtime_page::BevyPage::new(w, h, dir)?;
     let mut cx = Ctx { dir, work: &work, sounds: Vec::new(), scene: Vec::new(), clear: None, marker: None, mix: None, audible: HashMap::new(), brand: page_css(dir, w, js), manifest: MANIFEST.lock().unwrap().as_ref().map(|_| Vec::new()), now: 0, said: Default::default(), made: HashMap::new(), scene3d: None, live3d: None };
     let t_open = std::time::Instant::now();
-    cx.scene3d = Some(aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?));
-    raea_runtime_react::startup_mark(&format!("native: the 3D's engine open ({:.0} ms)", t_ms(t_open)));
+    let aov = AOV.load(std::sync::atomic::Ordering::Relaxed);
+    let kept = if keeping_engine() { KEPT_ENGINE.with(|k| k.borrow_mut().take()).filter(|k| (k.0, k.1, k.2) == (w, h, aov)) } else { None };
+    let reused = kept.is_some();
+    cx.scene3d = Some(match kept {
+        Some((_, _, _, mut e)) => match e.reload(prog, &inserted) {
+            Ok(()) => e,
+            Err(why) => {
+                eprintln!("raea native: the kept engine didn't take this shot ({why}); a fresh one");
+                drop(e);
+                aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?)
+            }
+        },
+        None => aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?),
+    });
+    raea_runtime_react::startup_mark(&format!("native: the 3D's engine {} ({:.0} ms)", if reused { "reloaded" } else { "open" }, t_ms(t_open)));
     // its first frame warmed up as a live engine's is (Engine::warm)
     if let Some(e) = cx.scene3d.as_mut() {
         e.warm();
@@ -942,6 +959,12 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     let clipping = FED_CLIPPING.lock().unwrap().take().and_then(|t| t.join().ok()).unwrap_or_default();
     raea_runtime_react::startup_mark("native: clipping check joined");
     write_manifest(&mut cx, (w, h, fps, shot.total), clipping, |_| json!([]))?;
+    // a served process keeps the engine for its next shot
+    if keeping_engine() {
+        if let Some(e) = cx.scene3d.take() {
+            KEPT_ENGINE.with(|k| *k.borrow_mut() = Some((w, h, aov, e)));
+        }
+    }
     Ok(Some(if folder {
         format!("APPLIED  {} frames rendered to {} (native: the shot baked once, drawn with no JavaScript)", wanted.len(), out.display())
     } else {

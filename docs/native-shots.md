@@ -341,6 +341,21 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **"Stack overflow" on Ch5 8400-8550 (and many Ch1/Ch5 batches in rq.log, exit 134) is thread exhaustion, not
+  recursion.** The member's log: "failed to allocate an alternative stack: Cannot allocate memory", then the main
+  thread's `thread::scope` "failed to spawn thread: Resource temporarily unavailable" -> abort. It didn't reproduce on
+  the 256-thread dev box (any piece size); it's intermittent on members running several lanes on a share of a big
+  host. Fix, in the tree for pc211: raea_core_scene::par (each/map): every parallel section sized to the process's
+  share (host threads / raea processes, RAEA_THREADS overrides) and a refused spawn leaves its work to the threads
+  that started (never a panic); Bevy's global pools sized to the share first thing in `render` (8 compute threads at a
+  16 share, ~110 before). Not reached: a second ~115-thread compute pool at peak, most likely libraea_bundle.so's own
+  Bevy statics (the stock 0.1.4 library). Ask the queue agent to report any further exit 134.
+- **3D text atlas (found by item 4's sticky-check):** bevy_rich_text3d grows its atlas by replacing the image, and the
+  glyph material kept its old bind group, so glyphs sampled a stale atlas (the live path's "changing 3D text garbles
+  within a batch"). raea-sys-text3d's follow_atlas now touches the glyph materials whenever the atlas image changes.
+  A served engine also resets the atlas after each reload. Being validated (fresh determinism, against live, served).
+- **Item 4 status:** `render-serve` works. Served shots took 5.8-11 s against 13-16 s fresh (Ch5, Ch2, Ch3 mixed).
+  Sticky-check failed on 3D text (above) before the atlas fix; re-running.
 - **pc210 shipped** (847f761). Parity: Ch5 identical to live; Ch2 56.1 dB; coverage samples identical or >=74 dB
   against pc209, except Ch1 @9000/@12500, where pc210 matches live (109 dB+) and pc209 was 58-60 dB off.
   The dev box exited once mid-run (vast host); `vastai start instance` brought it back with its disk.

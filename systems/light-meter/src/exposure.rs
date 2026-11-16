@@ -165,28 +165,18 @@ pub fn of_pngs(files: &[std::path::PathBuf]) -> Result<(Exposure, Value), String
     // the sampled frames decoded across the cores (20 1080p PNGs were 1.5-2.5 s after a 60-frame native render's last
     // frame), then measured in order as before
     let picked: Vec<&std::path::PathBuf> = files.iter().step_by(k).collect();
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    #[allow(clippy::type_complexity)]
-    let slots: Vec<std::sync::Mutex<Option<Result<(Option<Exposure>, Acc), String>>>> = picked.iter().map(|_| std::sync::Mutex::new(None)).collect();
-    let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(picked.len()).min(24);
-    std::thread::scope(|sc| {
-        for _ in 0..lanes {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(f) = picked.get(i) else { break };
-                let r = image::open(f).map(|i| i.to_rgba8()).map_err(|e| format!("{}: {e}", f.display())).map(|img| {
-                    // a quarter of each frame's pixels into the pool (every 4th), merged in frame order below
-                    let mut pool = Acc::default();
-                    pool.add(img.as_raw(), 4);
-                    (stats(img.as_raw()), pool)
-                });
-                *slots[i].lock().unwrap() = Some(r);
-            });
-        }
+    let slots = raea_core_scene::par::map(picked.len(), 24, |i| {
+        let f = picked[i];
+        image::open(f).map(|i| i.to_rgba8()).map_err(|e| format!("{}: {e}", f.display())).map(|img| {
+            // a quarter of each frame's pixels into the pool (every 4th), merged in frame order below
+            let mut pool = Acc::default();
+            pool.add(img.as_raw(), 4);
+            (stats(img.as_raw()), pool)
+        })
     });
     let mut pooled = Acc::default();
     for (f, slot) in picked.into_iter().zip(slots) {
-        let (own, pool) = slot.into_inner().unwrap().ok_or_else(|| format!("{}: not read", f.display()))??;
+        let (own, pool) = slot?;
         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(e) = own {
             per.push(json!({"file": name, "exposure": e.json()}));

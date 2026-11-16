@@ -8,6 +8,8 @@ use bevy::math::Mat4;
 use serde_json::{Map, Value};
 
 mod media;
+/// work across this process's share of the cores (par::each, par::map)
+pub mod par;
 mod parts;
 mod props;
 pub use media::*;

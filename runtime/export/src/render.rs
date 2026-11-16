@@ -25,9 +25,8 @@ pub fn render(args: &[String]) -> R<String> {
     if let Some(d) = flag(args, "--review") {
         return crate::review::review(args, Path::new(&d));
     }
-    if args.iter().any(|a| a == "--clay") {
-        raea_runtime_scene3d::clay::CLAY.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+    // set from each render's arguments (a served process renders many)
+    raea_runtime_scene3d::clay::CLAY.store(args.iter().any(|a| a == "--clay"), std::sync::atomic::Ordering::Relaxed);
     let tsx = PathBuf::from(&args[1]).canonicalize().map_err(|e| format!("{}: {e}", args[1]))?;
     let out = PathBuf::from(flag(args, "-o").ok_or("-o OUT.mp4|OUT.png|DIR")?);
     let dir = tsx.parent().unwrap().to_path_buf();

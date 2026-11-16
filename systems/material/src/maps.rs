@@ -68,22 +68,22 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
     };
     // a large picture's rows across threads (a 4K map was ~0.6 s on one): the same arithmetic per texel, so the same
     // bytes; small ones stay on the caller's thread (this runs inside the per-texture lanes too)
-    let lanes = |rows: u32, cw: u32| -> usize {
-        if (rows as u64) * (cw as u64) < (1 << 20) { 1 } else { std::thread::available_parallelism().map_or(4, |n| n.get()).min(8).min(rows as usize).max(1) }
+    // how many row chunks a level is cut into: a large picture's across this process's share of the cores
+    // (raea_core_scene::par), a small one whole on the caller's thread (this runs inside the per-texture lanes too)
+    let chunks = |rows: u32, cw: u32| -> usize {
+        if (rows as u64) * (cw as u64) < (1 << 20) { 1 } else { raea_core_scene::par::share().min(8).min(rows as usize).max(1) }
     };
     let base = &data[..(w * h * 4) as usize];
     let mut cur: Vec<[f32; 4]> = vec![[0.0; 4]; (w * h) as usize];
     {
-        let k = lanes(h, w);
+        let k = chunks(h, w);
         let per = (h as usize).div_ceil(k) * w as usize;
-        std::thread::scope(|sc| {
-            for (part, src) in cur.chunks_mut(per).zip(base.chunks(per * 4)) {
-                let to_lin = &to_lin;
-                sc.spawn(move || {
-                    for (o, p) in part.iter_mut().zip(src.chunks_exact(4)) {
-                        *o = [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0];
-                    }
-                });
+        let parts: Vec<std::sync::Mutex<(&mut [[f32; 4]], &[u8])>> = cur.chunks_mut(per).zip(base.chunks(per * 4)).map(std::sync::Mutex::new).collect();
+        raea_core_scene::par::each(parts.len(), 8, |i| {
+            let mut g = parts[i].lock().unwrap();
+            let (part, src) = &mut *g;
+            for (o, p) in part.iter_mut().zip(src.chunks_exact(4)) {
+                *o = [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0];
             }
         });
     }
@@ -93,28 +93,29 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
         let (nw, nh) = ((cw / 2).max(1), (ch / 2).max(1));
         let mut next = vec![[0.0f32; 4]; (nw * nh) as usize];
         let mut bytes = vec![0u8; (nw * nh * 4) as usize];
-        let k = lanes(nh, nw);
+        let k = chunks(nh, nw);
         let rows_per = (nh as usize).div_ceil(k);
-        std::thread::scope(|sc| {
-            for (i, (part, out)) in next.chunks_mut(rows_per * nw as usize).zip(bytes.chunks_mut(rows_per * nw as usize * 4)).enumerate() {
-                let (cur, enc) = (&cur, &enc);
-                sc.spawn(move || {
-                    let y0 = (i * rows_per) as u32;
-                    for (j, px) in part.iter_mut().enumerate() {
-                        let (x, y) = (j as u32 % nw, y0 + j as u32 / nw);
-                        let mut acc = [0.0f32; 4];
-                        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                            let p = cur[((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize];
-                            for k in 0..4 {
-                                acc[k] += p[k] * 0.25;
-                            }
+        {
+            let parts: Vec<std::sync::Mutex<(&mut [[f32; 4]], &mut [u8])>> = next.chunks_mut(rows_per * nw as usize).zip(bytes.chunks_mut(rows_per * nw as usize * 4)).map(std::sync::Mutex::new).collect();
+            let cur = &cur;
+            raea_core_scene::par::each(parts.len(), 8, |i| {
+                let mut g = parts[i].lock().unwrap();
+                let (part, out) = &mut *g;
+                let y0 = (i * rows_per) as u32;
+                for (j, px) in part.iter_mut().enumerate() {
+                    let (x, y) = (j as u32 % nw, y0 + j as u32 / nw);
+                    let mut acc = [0.0f32; 4];
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let p = cur[((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize];
+                        for k in 0..4 {
+                            acc[k] += p[k] * 0.25;
                         }
-                        *px = acc;
-                        out[j * 4..j * 4 + 4].copy_from_slice(&[enc(acc[0]), enc(acc[1]), enc(acc[2]), (acc[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8]);
                     }
-                });
-            }
-        });
+                    *px = acc;
+                    out[j * 4..j * 4 + 4].copy_from_slice(&[enc(acc[0]), enc(acc[1]), enc(acc[2]), (acc[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8]);
+                }
+            });
+        }
         data.extend_from_slice(&bytes);
         cur = next;
         (cw, ch) = (nw, nh);
@@ -160,19 +161,12 @@ pub fn mip_gltfs_textures(gs: &[&Gltf], mats: &Assets<bevy::gltf::GltfMaterial>,
     }
     // the largest first, each thread taking the next one left
     todo.sort_by_key(|d| std::cmp::Reverse(d.2 as u64 * d.3 as u64));
-    let next = std::sync::atomic::AtomicUsize::new(0);
     let jobs: Vec<std::sync::Mutex<Option<(Vec<u8>, u32)>>> = todo.iter_mut().map(|d| std::sync::Mutex::new(Some((std::mem::take(&mut d.1), 0)))).collect();
-    let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(todo.len()).min(32);
-    std::thread::scope(|s| {
-        for _ in 0..lanes {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(d) = todo.get(i) else { break };
-                let mut slot = jobs[i].lock().unwrap();
-                let (data, _) = slot.take().unwrap_or_default();
-                *slot = Some(mips_rgba8(data, d.2, d.3, d.4));
-            });
-        }
+    raea_core_scene::par::each(todo.len(), 32, |i| {
+        let d = &todo[i];
+        let mut slot = jobs[i].lock().unwrap();
+        let (data, _) = slot.take().unwrap_or_default();
+        *slot = Some(mips_rgba8(data, d.2, d.3, d.4));
     });
     for (d, j) in todo.iter().zip(jobs) {
         let Some((data, levels)) = j.into_inner().unwrap() else { continue };
@@ -249,21 +243,14 @@ fn prefetch_maps_now(inserted: &[Tup], dir: &Path) {
     }
     let mut out = HashMap::new();
     if !want.is_empty() {
-        let next = std::sync::atomic::AtomicUsize::new(0);
         let done = std::sync::Mutex::new(Vec::new());
-        let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(want.len()).min(32);
-        std::thread::scope(|sc| {
-            for _ in 0..lanes {
-                sc.spawn(|| loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((src, srgb)) = want.get(i) else { break };
-                    let Ok(path) = resolve_src(inserted, src, dir) else { continue };
-                    let Ok(pic) = image::open(&path).map(|p| p.to_rgba8()) else { continue };
-                    let (w, h) = pic.dimensions();
-                    let (data, levels) = mips_rgba8(pic.into_raw(), w, h, *srgb);
-                    done.lock().unwrap().push(((src.clone(), *srgb), std::sync::Arc::new((data, w, h, levels))));
-                });
-            }
+        raea_core_scene::par::each(want.len(), 32, |i| {
+            let (src, srgb) = &want[i];
+            let Ok(path) = resolve_src(inserted, src, dir) else { return };
+            let Ok(pic) = image::open(&path).map(|p| p.to_rgba8()) else { return };
+            let (w, h) = pic.dimensions();
+            let (data, levels) = mips_rgba8(pic.into_raw(), w, h, *srgb);
+            done.lock().unwrap().push(((src.clone(), *srgb), std::sync::Arc::new((data, w, h, levels))));
         });
         out.extend(done.into_inner().unwrap());
     }

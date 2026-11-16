@@ -9,6 +9,21 @@ impl Engine {
     }
 
     /// As load; a timeline passed in must be this edit's (its rows in the edit's order), and is used as it is.
+    /// Another program of the same size loaded into this engine as a fresh one opens it: the World's rows replaced
+    /// (load_shared) and warmed up by the same 8 updates (finish_build), its device, pipelines, models and textures
+    /// kept. A served process's next native shot (docs/native-shots.md).
+    pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
+        self.load_shared(prog, inserted, None)?;
+        // after the last program's text is gone and before the new one's is drawn into it
+        text3d::reset_atlas(self.app.world_mut());
+        for _ in 0..8 {
+            self.app.update();
+        }
+        self.drawn = Some(self.app.world().resource::<Clock>().0);
+        self.pipe = raea_sys_frame::pipe::Pipe::new();
+        Ok(())
+    }
+
     pub fn load_shared(&mut self, prog: &Program, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>) -> Result<(), String> {
         if (prog.width, prog.height) != self.size() {
             return Err("the edit's size changed: make a new Engine".into());

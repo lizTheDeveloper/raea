@@ -27,12 +27,46 @@ use serde_json::Value;
 /// Raster pixels an em at a block's own size: the atlas resolution of its glyphs (a span twice the size is drawn at twice).
 const RES: f32 = 128.0;
 
+/// The shared glyph atlas emptied back to how the plugin made it (its image at the plugin's size, no glyphs): an engine
+/// that loads another program keeps none of the last one's glyphs, whose places in the atlas moved the new text's
+/// (a served Ch5 @2400 after other shots: its 3D clock labels 44 dB from the shot drawn fresh).
+pub fn reset_atlas(world: &mut World) {
+    let Some((x, y)) = world.get_resource::<Text3dPlugin>().map(|p| p.default_atlas_dimension) else { return };
+    if !world.contains_resource::<Assets<TextAtlas>>() {
+        return;
+    }
+    if std::env::var_os("RAEA_MEM_MARKS").is_some() {
+        let size = world.resource::<Assets<Image>>().get(&TextAtlas::DEFAULT_IMAGE).map(|i| (i.width(), i.height()));
+        let n = world.resource::<Assets<TextAtlas>>().iter().count();
+        eprintln!("mem_mark   text atlas reset: image {size:?}, {n} atlases, to {x}x{y}");
+    }
+    let _ = world.resource_mut::<Assets<Image>>().insert(&TextAtlas::DEFAULT_IMAGE, TextAtlas::empty_image(x, y));
+    let _ = world.resource_mut::<Assets<TextAtlas>>().insert(AssetId::default(), TextAtlas::new(TextAtlas::DEFAULT_IMAGE));
+}
+
 pub fn install(app: &mut App) {
     if !app.is_plugin_added::<Text3dPlugin>() {
         // the window's scale factor isn't the raster's (renders have no window): glyphs are drawn at RES an em
         app.add_plugins(Text3dPlugin { default_atlas_dimension: (512, 512), sync_scale_factor_with_main_window: false, ..default() });
     }
     app.init_resource::<Faces>();
+    app.add_systems(PostUpdate, follow_atlas.after(bevy::asset::AssetEventSystems));
+}
+
+/// The glyph materials told their atlas changed. bevy_rich_text3d grows its atlas by replacing the image ("atlas
+/// expansion currently requires manually triggering change detection on materials"), and a material's bind group
+/// kept the image it was made with: glyphs laid out in the grown atlas sampled the old one, garbled by how many times
+/// it had grown since the material was made (the live path's changing 3D text within a batch; a served engine's text
+/// 28-44 dB from the shot drawn fresh).
+fn follow_atlas(mut images: MessageReader<AssetEvent<Image>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+    let atlas = TextAtlas::DEFAULT_IMAGE.id();
+    if !images.read().any(|e| matches!(e, AssetEvent::Added { id } | AssetEvent::Modified { id } if *id == atlas)) {
+        return;
+    }
+    let using: Vec<AssetId<StandardMaterial>> = materials.iter().filter(|(_, m)| m.base_color_texture.as_ref().is_some_and(|t| t.id() == atlas)).map(|(id, _)| id).collect();
+    for id in using {
+        let _ = materials.get_mut(id);
+    }
 }
 
 /// The faces loaded into the plugin's FontSystem, by (family, weight, italic), and whether the system's were.

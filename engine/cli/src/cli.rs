@@ -13,6 +13,10 @@ pub fn register_sandbox() {
 }
 
 pub fn cli(args: &[String]) -> i32 {
+    // a render's threads sized to its share of the machine before any app makes Bevy's pools (raea_core_scene::par)
+    if matches!(args.first().map(String::as_str), Some("render" | "render-serve")) {
+        raea_runtime_export::size_task_pools();
+    }
     // the media verbs (`media probe|still|sheet|...`, `ffmpeg`, `ffprobe`: raea-media, no ffmpeg binary) and an HTML
     // composition's render are raea-app-media's (apps/media/src/command.rs)
     let html = args.first().map(String::as_str) == Some("render") && args.get(1).is_some_and(|e| e.ends_with(".html") || Path::new(e).join("index.html").is_file());
@@ -40,10 +44,41 @@ pub fn cli(args: &[String]) -> i32 {
         register_sandbox();
     }
     // a play or a render leaves its session to look back at (raea_io_trace: ~/Library/Logs/raea/raea/)
-    let traced = matches!(args.first().map(String::as_str), Some("play" | "render"));
+    let traced = matches!(args.first().map(String::as_str), Some("play" | "render" | "render-serve"));
     if traced {
         raea_io_trace::start("raea");
         raea_runtime_react::startup_mark("trace started");
+    }
+    // `raea render-serve`: one process rendering many shots (a render queue's lane), each request a line on stdin, a JSON
+    // array of a render's arguments (["render", "EDIT.tsx", "-o", ...]); each answered by one line on stdout,
+    // `SERVED {"ok":..,"said"|"error":..,"code":..}`. The process's start (Bevy's plugins, the pools, the bundler) is paid
+    // once; each shot opens its own engine (RAEA_KEEP_ENGINE=1 keeps one: not sticky-clean yet, docs/native-shots.md)
+    if args.first().map(String::as_str) == Some("render-serve") {
+        use std::io::{BufRead, Write};
+        raea_runtime_export::SERVING.store(true, std::sync::atomic::Ordering::Relaxed);
+        println!("SERVING");
+        let _ = std::io::stdout().flush();
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let reply = match serde_json::from_str::<Vec<String>>(&line) {
+                Err(e) => json!({"ok": false, "error": format!("a request is a JSON array of a render's arguments: {e}")}),
+                Ok(req) if req.first().map(String::as_str) != Some("render") => json!({"ok": false, "error": "render-serve serves render requests only"}),
+                Ok(req) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&req))) {
+                    Ok(Ok(msg)) => json!({"ok": true, "said": msg, "code": raea_app_direction::rendered(&req)}),
+                    Ok(Err(e)) => json!({"ok": false, "error": e}),
+                    Err(_) => json!({"ok": false, "error": "the render panicked"}),
+                },
+            };
+            println!("SERVED {reply}");
+            let _ = std::io::stdout().flush();
+        }
+        if traced {
+            raea_io_trace::end();
+        }
+        return 0;
     }
     let code = match run(args) {
         Ok(msg) => {

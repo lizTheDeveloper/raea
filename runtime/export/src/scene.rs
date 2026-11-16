@@ -20,12 +20,8 @@ pub(crate) fn all_items(frames: &[(i64, Frame)]) -> Vec<Vec<raea_core_scene::Ite
 /// on one thread, twice)
 pub(crate) fn all_items_par(frames: &[(i64, Frame)]) -> Vec<Vec<raea_core_scene::Item>> {
     let scenes: Vec<&[raea_core_scene::Node3]> = frames.iter().map(|(_, f)| f.scene.as_slice()).collect();
-    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(scenes.len().max(1));
-    let per = scenes.len().div_ceil(n.max(1)).max(1);
-    std::thread::scope(|s| {
-        let parts: Vec<_> = scenes.chunks(per).map(|c| s.spawn(move || c.iter().map(|sc| raea_runtime_scene::items_of(sc)).collect::<Vec<_>>())).collect();
-        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    })
+    // this process's share of the cores, a thread the system refuses left out (raea_core_scene::par)
+    raea_core_scene::par::map(scenes.len(), 64, |i| raea_runtime_scene::items_of(scenes[i]))
 }
 
 /// raea_sys_contact::told on a render's frames: the parts that clip where the camera sees them, said on stderr

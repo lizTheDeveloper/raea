@@ -46,6 +46,7 @@ mod run;
 pub use run::*;
 pub use raea_sys_page::not_applied;
 mod native;
+pub use native::{SERVING, size_task_pools};
 mod scene;
 pub use scene::{USAGE as SCENE_USAGE, cli as scene_cli};
 
