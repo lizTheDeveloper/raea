@@ -458,19 +458,58 @@ fn build_id() -> u64 {
     static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
         use std::hash::Hasher;
-        use std::io::Read;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         h.write(env!("CARGO_PKG_VERSION").as_bytes());
-        let Some(mut f) = std::env::current_exe().ok().and_then(|e| std::fs::File::open(e).ok()) else { return h.finish() };
-        let mut buf = vec![0u8; 8 << 20];
-        while let Ok(n) = f.read(&mut buf) {
-            if n == 0 {
-                break;
+        let Some(f) = std::env::current_exe().ok().and_then(|e| std::fs::File::open(e).ok()) else { return h.finish() };
+        // in 32 MB chunks across the cores, each chunk's hash then folded in order: 0.3-0.5 s on one core for a
+        // 490 MB raea (1.2 s for a 2.7 GB build with its debug info), in front of every shot's bake read
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        const CHUNK: u64 = 32 << 20;
+        let n = len.div_ceil(CHUNK) as usize;
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let parts: Vec<std::sync::Mutex<u64>> = (0..n).map(|_| std::sync::Mutex::new(0)).collect();
+        let lanes = std::thread::available_parallelism().map_or(4, |x| x.get()).min(n.max(1)).min(16);
+        std::thread::scope(|sc| {
+            for _ in 0..lanes {
+                sc.spawn(|| {
+                    let mut buf = vec![0u8; CHUNK as usize];
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let at = i as u64 * CHUNK;
+                        let want = CHUNK.min(len - at) as usize;
+                        let mut got = 0;
+                        while got < want {
+                            match read_at(&f, &mut buf[got..want], at + got as u64) {
+                                Ok(0) | Err(_) => break,
+                                Ok(k) => got += k,
+                            }
+                        }
+                        let mut ch = std::collections::hash_map::DefaultHasher::new();
+                        ch.write(&buf[..got]);
+                        *parts[i].lock().unwrap() = ch.finish();
+                    }
+                });
             }
-            h.write(&buf[..n]);
+        });
+        h.write_u64(len);
+        for p in parts {
+            h.write_u64(p.into_inner().unwrap());
         }
         h.finish()
     })
+}
+
+#[cfg(unix)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(f, buf, at)
+}
+
+#[cfg(windows)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(f, buf, at)
 }
 
 /// Where shot bakes are kept: RAEA_SHOT_CACHE ("0" keeps none), else raea's caches' shots/.
@@ -601,19 +640,40 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         None => None,
     };
     if let Some(p) = path.as_ref().filter(|p| p.exists()) {
+        let mut lap = std::time::Instant::now();
+        let mut laps: Vec<(&str, f64)> = Vec::new();
+        let mut mark = |what: &'static str| {
+            laps.push((what, t_ms(lap)));
+            lap = std::time::Instant::now();
+        };
         let read = std::fs::read(p)
             .map_err(|e| e.to_string())
             .and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string()))
             .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
-            .and_then(|t| serde_json::from_str::<Value>(&placed(&t, dir)).map_err(|e| e.to_string()))
-            .and_then(|v| match stale(&v, dir) {
-                Some(why) => Err(format!("stale: {why}")),
-                None => Ok(v),
+            .map(|t| {
+                mark("zstd");
+                let t = placed(&t, dir);
+                mark("root placed");
+                t
+            })
+            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
+            .and_then(|v| {
+                mark("parsed");
+                let s = stale(&v, dir);
+                mark("files hashed");
+                match s {
+                    Some(why) => Err(format!("stale: {why}")),
+                    None => Ok(v),
+                }
             });
         match read {
             Ok(v) => {
                 let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
                 let prog = if v["prog"].is_null() { None } else { prog_of(&v["prog"]) };
+                mark("Program made");
+                if trace() {
+                    eprintln!("raea native: bake read back: {}", laps.iter().map(|(w, ms)| format!("{w} {ms:.0} ms")).collect::<Vec<_>>().join(", "));
+                }
                 let num = |k: &str| v[k].as_f64().unwrap_or(0.0);
                 let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
                 raea_runtime_react::startup_mark(&format!("the shot's bake read back ({:.0} ms)", t_ms(t0)));
@@ -703,6 +763,7 @@ pub(crate) fn render_native(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -
     raea_gpu_device::check::scene_black(Some(false));
     raea_runtime_react::native::rendering_in(dir);
     let r = render_shot(js, dir, out, wanted);
+    raea_runtime_react::startup_mark("native: shot returned");
     kept_all();
     r
 }
@@ -877,7 +938,9 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         let p = *PARTS.lock().unwrap();
         eprintln!("raea native: per frame: replay {:.1} ms, draw {:.1} ms (page {:.1}, 3D {:.1}, read back {:.1}), png {:.1} ms", t_replay / n, t_draw / n, p[0] / n, p[1] / n, p[2] / n, t_png / n);
     }
+    raea_runtime_react::startup_mark("native: frames written");
     let clipping = FED_CLIPPING.lock().unwrap().take().and_then(|t| t.join().ok()).unwrap_or_default();
+    raea_runtime_react::startup_mark("native: clipping check joined");
     write_manifest(&mut cx, (w, h, fps, shot.total), clipping, |_| json!([]))?;
     Ok(Some(if folder {
         format!("APPLIED  {} frames rendered to {} (native: the shot baked once, drawn with no JavaScript)", wanted.len(), out.display())

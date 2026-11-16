@@ -28,43 +28,87 @@ fn linear(c: u8) -> f64 {
 
 /// The stats of RGBA8 pixels (straight alpha, sRGB).
 pub fn stats(rgba: &[u8]) -> Option<Exposure> {
-    let lin: Vec<f64> = (0..=255u8).map(linear).collect();
-    let mut hist = [0usize; 256];
-    let (mut n, mut sum_luma, mut sum_lin, mut hi, mut lo) = (0usize, 0.0, 0.0, 0usize, 0usize);
-    for p in rgba.chunks_exact(4) {
-        if p[3] == 0 {
-            continue;
-        }
-        n += 1;
-        let y = 0.2126 * lin[p[0] as usize] + 0.7152 * lin[p[1] as usize] + 0.0722 * lin[p[2] as usize];
-        sum_lin += y;
-        // display luma: the linear luminance encoded back (what a histogram shows)
-        let enc = if y <= 0.0031308 { 12.92 * y } else { 1.055 * y.powf(1.0 / 2.4) - 0.055 };
-        sum_luma += enc;
-        hist[(enc * 255.0).round().clamp(0.0, 255.0) as usize] += 1;
-        if p[0].max(p[1]).max(p[2]) >= 254 {
-            hi += 1;
-        }
-        if p[0].max(p[1]).max(p[2]) <= 1 {
-            lo += 1;
-        }
+    let mut a = Acc::default();
+    a.add(rgba, 1);
+    a.finish()
+}
+
+/// stats' running sums over pixels, so parts of a pool can be summed apart and merged.
+#[derive(Clone)]
+struct Acc {
+    hist: [usize; 256],
+    n: usize,
+    sum_luma: f64,
+    sum_lin: f64,
+    hi: usize,
+    lo: usize,
+}
+
+impl Default for Acc {
+    fn default() -> Self {
+        Acc { hist: [0; 256], n: 0, sum_luma: 0.0, sum_lin: 0.0, hi: 0, lo: 0 }
     }
-    if n == 0 {
-        return None;
-    }
-    let pct = |q: f64| {
-        let want = (q * n as f64).ceil().max(1.0) as usize;
-        let mut acc = 0;
-        for (i, c) in hist.iter().enumerate() {
-            acc += c;
-            if acc >= want {
-                return i as f64 / 255.0;
+}
+
+thread_local! {
+    static LIN: [f64; 256] = std::array::from_fn(|i| linear(i as u8));
+}
+
+impl Acc {
+    /// every `step`-th pixel of `rgba`
+    fn add(&mut self, rgba: &[u8], step: usize) {
+        LIN.with(|lin| {
+            for p in rgba.chunks_exact(4).step_by(step) {
+                if p[3] == 0 {
+                    continue;
+                }
+                self.n += 1;
+                let y = 0.2126 * lin[p[0] as usize] + 0.7152 * lin[p[1] as usize] + 0.0722 * lin[p[2] as usize];
+                self.sum_lin += y;
+                // display luma: the linear luminance encoded back (what a histogram shows)
+                let enc = if y <= 0.0031308 { 12.92 * y } else { 1.055 * y.powf(1.0 / 2.4) - 0.055 };
+                self.sum_luma += enc;
+                self.hist[(enc * 255.0).round().clamp(0.0, 255.0) as usize] += 1;
+                if p[0].max(p[1]).max(p[2]) >= 254 {
+                    self.hi += 1;
+                }
+                if p[0].max(p[1]).max(p[2]) <= 1 {
+                    self.lo += 1;
+                }
             }
+        })
+    }
+
+    fn merge(&mut self, o: &Acc) {
+        for (a, b) in self.hist.iter_mut().zip(o.hist.iter()) {
+            *a += b;
         }
-        1.0
-    };
-    let mean_lin = (sum_lin / n as f64).max(1e-6);
-    Some(Exposure { mean_luma: sum_luma / n as f64, p01: pct(0.01), p99: pct(0.99), clipped_high: hi as f64 / n as f64, clipped_low: lo as f64 / n as f64, over_stops: (mean_lin / 0.18).log2(), pixels: n })
+        self.n += o.n;
+        self.sum_luma += o.sum_luma;
+        self.sum_lin += o.sum_lin;
+        self.hi += o.hi;
+        self.lo += o.lo;
+    }
+
+    fn finish(&self) -> Option<Exposure> {
+        let n = self.n;
+        if n == 0 {
+            return None;
+        }
+        let pct = |q: f64| {
+            let want = (q * n as f64).ceil().max(1.0) as usize;
+            let mut acc = 0;
+            for (i, c) in self.hist.iter().enumerate() {
+                acc += c;
+                if acc >= want {
+                    return i as f64 / 255.0;
+                }
+            }
+            1.0
+        };
+        let mean_lin = (self.sum_lin / n as f64).max(1e-6);
+        Some(Exposure { mean_luma: self.sum_luma / n as f64, p01: pct(0.01), p99: pct(0.99), clipped_high: self.hi as f64 / n as f64, clipped_low: self.lo as f64 / n as f64, over_stops: (mean_lin / 0.18).log2(), pixels: n })
+    }
 }
 
 fn r(x: f64, k: i32) -> f64 {
@@ -115,15 +159,36 @@ pub fn said(v: &Value) -> Vec<raea_core_facts::Finding> {
 /// `{"frames": [{file, exposure}], "exposure": pooled, "found": [{check, level, says}]}`.
 pub fn of_pngs(files: &[std::path::PathBuf]) -> Result<(Exposure, Value), String> {
     let mut per = Vec::new();
-    let mut pooled: Vec<u8> = Vec::new();
     let mut found = Vec::new();
     // pooling every frame of a long folder is a lot of pixels: every k-th, at most 24 frames
     let k = files.len().div_ceil(24).max(1);
-    for f in files.iter().step_by(k) {
-        let img = image::open(f).map_err(|e| format!("{}: {e}", f.display()))?.to_rgba8();
-        let raw = img.as_raw();
+    // the sampled frames decoded across the cores (20 1080p PNGs were 1.5-2.5 s after a 60-frame native render's last
+    // frame), then measured in order as before
+    let picked: Vec<&std::path::PathBuf> = files.iter().step_by(k).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    #[allow(clippy::type_complexity)]
+    let slots: Vec<std::sync::Mutex<Option<Result<(Option<Exposure>, Acc), String>>>> = picked.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let lanes = std::thread::available_parallelism().map_or(4, |n| n.get()).min(picked.len()).min(24);
+    std::thread::scope(|sc| {
+        for _ in 0..lanes {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(f) = picked.get(i) else { break };
+                let r = image::open(f).map(|i| i.to_rgba8()).map_err(|e| format!("{}: {e}", f.display())).map(|img| {
+                    // a quarter of each frame's pixels into the pool (every 4th), merged in frame order below
+                    let mut pool = Acc::default();
+                    pool.add(img.as_raw(), 4);
+                    (stats(img.as_raw()), pool)
+                });
+                *slots[i].lock().unwrap() = Some(r);
+            });
+        }
+    });
+    let mut pooled = Acc::default();
+    for (f, slot) in picked.into_iter().zip(slots) {
+        let (own, pool) = slot.into_inner().unwrap().ok_or_else(|| format!("{}: not read", f.display()))??;
         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if let Some(e) = stats(raw) {
+        if let Some(e) = own {
             per.push(json!({"file": name, "exposure": e.json()}));
             if files.len() > 1 {
                 for (level, says) in e.found(&name) {
@@ -133,10 +198,9 @@ pub fn of_pngs(files: &[std::path::PathBuf]) -> Result<(Exposure, Value), String
                 }
             }
         }
-        // a quarter of each frame's pixels into the pool (every 4th), so a folder is measured in bounded memory
-        pooled.extend(raw.chunks_exact(4).step_by(4).flatten());
+        pooled.merge(&pool);
     }
-    let all = stats(&pooled).ok_or("exposure: every pixel is transparent")?;
+    let all = pooled.finish().ok_or("exposure: every pixel is transparent")?;
     if files.len() == 1 {
         for (level, says) in all.found("the frame") {
             found.push(json!({"check": "exposure", "level": level, "says": says}));

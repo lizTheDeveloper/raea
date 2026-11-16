@@ -341,6 +341,24 @@ frame drawn alone.
 ### In progress, and exactly where it stands
 
 **2026-11-16, second engine agent (live log; newest first):**
+- **Toward pc210 (committed on native-shots: c966ee3, 7fa6beb; in the tree: the rest):**
+  - glTF texture mips across the cores (mip_gltfs_textures): model_setup's 1.77 s call gone.
+  - Map files prefetched (decoded and mipped across the cores) from the bake's rows, beside the page's and engine's
+    opening (prefetch_start / prefetch_maps; cached_map takes them): Ch2's 3D spawn 3.5 -> 0.55 s.
+  - Each glTF's skin weights normalised once, not per model.
+  - build_id (the bake key's binary hash) in 32 MB chunks across threads (0.3-1.2 s on one core).
+  - Exposure after a folder render: frames decoded and measured across the cores. It was 2.4-2.9 s after the last
+    frame of a 60-frame native render (20 PNGs re-read, a powf a pixel on one thread).
+  - Vello's shaders initialised on many threads off Apple (it was forced to 1 everywhere).
+  - Measured, medians of 3 interleaved (host shared, load ~70): engine open Ch5 8.4 -> 6.5 s, Ch2 9.6 -> 6.2 s.
+  - Not taken: RAEA_BEVY_ASYNC_PIPELINES=1 (Bevy's task pool compiles): Ch2 -1.2 s wall, Ch5 nothing; opt-in only,
+    for the Windows open stalls on record.
+- **Coordinator's queue (scout pass 3, design/research-performance.md), in order:** (1) Vello init threads (done
+  above) and a persisted Vello pipeline cache; (2) held-frame skip (count the held share in the pool's bakes first:
+  /tmp/held.py on Hetzner; time-driven content is never held; 32 coverage shots pixel-identical on and off);
+  (3) a blake3-keyed texture/mip cache on disk; (4) a long-lived raea per lane, sticky-checked on Ch5, Ch2 @6000 and
+  Ch3 @900.
+- Box notes: /root/ab.sh CH START N ROUNDS BIN... (interleaved A/B, medians; binaries stripped in /root/bins).
 - **pc209 shipped** (e2b84a1 + e08c756). Ch5 cached 158 -> 184 frames/min, identical; Ch2 cached 145 -> 157,
   cold 96 -> 108, 56.3 dB. Next: engine open. Cached open on Ch5 is 7.6 s: plugins 0.9, 3D spawn 1.3, timeline
   0.46, await_models 4.6 (290 models). In the chrome trace, model_setup is one 1.77 s call: glTF texture mips made

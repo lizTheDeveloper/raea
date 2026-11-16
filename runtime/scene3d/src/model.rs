@@ -59,6 +59,8 @@ pub fn model_setup(
     mats: Res<Assets<bevy::gltf::GltfMaterial>>,
     targets: Query<(Option<&Name>, Option<&bevy::animation::AnimationTargetId>)>,
     spawned: Query<(), With<SceneSpawned>>,
+    // each glTF's skin weights normalised once, not once per model that shows it (idempotent: a second pass found none)
+    mut normalised: Local<std::collections::HashSet<AssetId<Gltf>>>,
 ) {
     // the textures of every glTF that's ready to spawn this update, mipped together across the cores (mip_gltfs_textures)
     {
@@ -94,7 +96,9 @@ pub fn model_setup(
                         m.state = ModelState::Ready { player: None };
                         break 'step;
                     };
-                    normalise_joint_weights(g, &gmeshes, &mut meshes);
+                    if normalised.insert(m.gltf.id()) {
+                        normalise_joint_weights(g, &gmeshes, &mut meshes);
+                    }
                     mip_gltf_textures(g, &mats, &mut images);
                     // Bevy says when the scene's whole hierarchy exists (WorldInstanceReady), rather than raea counting frames
                     let child = commands

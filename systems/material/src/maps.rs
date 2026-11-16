@@ -273,12 +273,16 @@ pub fn cached_map(world: &mut World, key: String, kind: MapKind, repeat: bool, s
     if let Some(h) = world.get_resource::<Maps>().and_then(|m| m.0.get(&key)) {
         return Ok(h.clone());
     }
-    let ahead = PREFETCHED.lock().unwrap().as_ref().and_then(|p| p.get(&(src, kind == MapKind::Colour)).cloned());
+    // taken, not copied (a 4K map's chain is ~90 MB): a second use with another sampler makes its own, as before
+    let ahead = PREFETCHED.lock().unwrap().as_mut().and_then(|p| p.remove(&(src, kind == MapKind::Colour)));
     if std::env::var_os("RAEA_MEM_MARKS").is_some() {
         eprintln!("mem_mark   map {key} ({}): {}", if kind == MapKind::Colour { "colour" } else { "data" }, if ahead.is_some() { "prefetched" } else { "made here" });
     }
     let img = match ahead {
-        Some(m) => mipped_image(m.0.clone(), m.1, m.2, m.3, kind, repeat, sampling),
+        Some(m) => {
+            let (data, w, h, levels) = std::sync::Arc::try_unwrap(m).unwrap_or_else(|a| (*a).clone());
+            mipped_image(data, w, h, levels, kind, repeat, sampling)
+        }
         None => map_image(make()?, kind, repeat, sampling),
     };
     let h = world.resource_mut::<Assets<Image>>().add(img);

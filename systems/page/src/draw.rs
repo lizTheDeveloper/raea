@@ -154,7 +154,9 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
         }
         vello::Renderer::new(
             device,
-            vello::RendererOptions { antialiasing_support: vello::AaSupport::area_only(), num_init_threads: std::num::NonZeroUsize::new(1), ..default() },
+            // shaders made on one thread on Apple only, as Vello does by default there (bevy#10812); elsewhere Vello's own
+            // heuristic, many threads (it was forced to one everywhere: the page's opening paid it serially)
+            vello::RendererOptions { antialiasing_support: vello::AaSupport::area_only(), num_init_threads: if cfg!(target_vendor = "apple") { std::num::NonZeroUsize::new(1) } else { None }, ..default() },
         )
         .expect("vello on Bevy's device")
     }));

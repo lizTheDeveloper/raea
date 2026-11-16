@@ -122,6 +122,7 @@ pub fn render(args: &[String]) -> R<String> {
         }
     }
     let said = render_bundle(&js, &dir, &out, wanted);
+    raea_runtime_react::startup_mark("render: bundle rendered");
     let _ = std::fs::remove_file(&js);
     if let (Some(c), Ok(s)) = (&cache, &said) {
         if c.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) {
@@ -143,7 +144,10 @@ pub fn render(args: &[String]) -> R<String> {
             }
         }
     }
-    said.map(|s| with_exposure(s, &out, manifest.as_deref()))
+    raea_runtime_react::startup_mark("render: export cache kept");
+    let r = said.map(|s| with_exposure(s, &out, manifest.as_deref()));
+    raea_runtime_react::startup_mark("render: exposure measured");
+    r
 }
 
 /// The render's message with its pictures' exposure after it (a still, or a folder's frames; a video's frames are
