@@ -285,3 +285,135 @@ line), so none fell back.
   - the kept bake written on a thread.
 - **A binary's first render on a host** pays its bundle (about 7 s) and the GPU's per-binary shader caches (engine
   open 13–19 s against 6.5–10 s later).
+
+---
+
+## HANDOFF (2026-11-16): read this first
+
+### Current build and pin
+
+- **Latest:** `0.1.4-pc208` (branch `native-shots`; release with sha256 on the fork). It's pc207 plus the sun-light fix
+  plus the opt-in 3D-interior drop.
+- **Pin:** pc203 was pinned for new reels. pc204–pc207 were each marked "ready to pin" in the project's
+  design/render-perf.md status lines, and the queue agent pins with rollback.
+- **Install:** `tools/render-vast-setup.sh 0.1.4-pcN` (project). It installs raea 0.1.4, swaps in the fork binary
+  (checked against the sha256), and installs `libjavascriptcoregtk-4.1-0` for the JIT (optional).
+- **Use:** `raea render FILE.tsx --composition C --at A,B,… -o DIR/ --input I.json --native`.
+  - `--native` brings `--jit` when JavaScriptCore is installed; `--no-jit` opts out.
+  - rq jobs pass it as an extra arg (milestone 4, `--native` by default and a shared bake cache, is the queue agent's).
+- **Batch size:** keep 150 for `--native`. A 600-frame native batch drifted on Ch2 @6000–6600 (27 dB): the
+  render-to-texture "seven alternatives" panels carry state across a batch, live as much as native.
+
+### Done, with numbers
+
+One host (EPYC 7713, RTX 3090), 60 frames, unless noted.
+
+| shot | path | frame one | steady s/frame | frames/min | PSNR to live |
+|---|---|---|---|---|---|
+| Ch5 @2400 | pc203 live | 38 s | 1.01 | 35 | |
+| | pc205+ live | 15–18 s | 0.93–1.05 | 43–49 | identical to pc203 live |
+| | pc207 native, cold | about 19.5 s | 0.10–0.14 | 112–122 | identical |
+| | pc206/207 native, cached | 12–13 s | 0.10 | 154–168 | identical |
+| Ch2 @14189 shore | pc203 live | 49 s | 2.36 | 19 | |
+| | pc206 native, cold | 41 s (bundle and shader-cache first run included) | 0.12 | 69 | 57.4 dB (live against live: 62–69) |
+| | pc206 native, cached | 17.7 s | 0.117 | 127 | 57.1 dB |
+
+**Coverage (pc203):** 32 sample shots across Ch1, Ch2, Ch3 and Ch5. All compile. 31 match live at 55 dB or better, 13
+of them identical on every frame. The outlier, Ch1 @27800, is the live path's 3D-text bug; native is closer to the
+frame drawn alone.
+
+**Fixed on the way** (commit messages have the detail):
+- LiveScene's frozen `<Model nodes>` poses and `<Model>` surfaces;
+- node ids reused across bake pieces;
+- the fold's first-frame base;
+- emissive colour keyed (`em_r..`);
+- `Engine::warm` on a timeline engine's first frame;
+- `raea-frames` stepping idling the JS thread;
+- the bake key as a hash of the binary;
+- JavaScriptCore on Linux (dlopen of WebKitGTK; 5.3× on the bake);
+- **the clock jump as one fixed step** (Bevy's fixed loop had replayed ~frame-number steps on every batch's first draw:
+  live and native);
+- the GPU-composited native draw (one readback a frame);
+- the parallel fold;
+- a light's target placed by its groups.
+
+### In progress, and exactly where it stands
+
+**`RAEA_NATIVE_DROP3D=1`** (`Inner3d` in runtime/export/src/native.rs) leaves 3D elements nested in other 3D elements
+out of the page's recorded commits. They're about 99.9% of the commit bytes, and replay falls from 18–143 ms a frame to
+0.2 ms. It's opt-in because of:
+- Ch3 @900: one frame at 33.7 dB;
+- Ch1 @12500: 60 dB where it was identical.
+
+Find which page element depends on a nested 3D element:
+- render both with `RAEA_PAGE_DUMP=DIR`;
+- diff with `RAEA_ROWS_DUMP` and tools/native-diff.py.
+
+Test scripts on the dev box: `/root/run12.sh` compares keep and drop.
+
+### Ordered next steps
+
+1. Finish the DROP3D investigation above, then make it the default. It also shrinks the cache about 1000×.
+2. Engine open (6.5–10 s cached, 13–19 s on a binary's first run on a host).
+   - Per a chrome trace: model_setup about 1.7 s, GPU image upload about 1.3 s, upscaling pipelines 0.7 s, mesh
+     allocation 0.6 s, glTF loads about 1.2 s.
+   - Candidates: a persistent wgpu pipeline cache (needs a Bevy patch), and loading the glTFs in parallel ahead of the
+     engine.
+3. `BevyPage::new` is 2.8 s on frame one. Making it alongside the bake was measured slower, so find why the page is slow.
+4. The steady draw is about 0.10 s/frame: Render about 34 ms, Update about 29 ms. Trace with
+   `--features raea-render/trace`, `RUST_LOG=info`, then analyse trace-*.json (spans.py in the dev-box notes below).
+5. Batch-sticky render-to-texture screens (Ch2 @6000–6600). Fixing it allows `--batch 600` and spreads frame one over
+   4× the frames.
+6. Ch2's 57–58 dB residual: no reflected property differs, and it isn't spawn order. Low priority, as nothing is visible.
+7. Upstream issues and PRs (only after production validation):
+   - LiveScene node/surface freezing;
+   - the clock-jump fixed-step catch-up;
+   - the emissive colour fold;
+   - the light target in groups;
+   - `raea-frames` idling;
+   - the global World-asks queue across runtimes;
+   - bake RESET id reuse in `bake_incremental`.
+
+### Known bugs
+
+- **A sun (directional or spot light) in a moved or turned group ignored the group's aim.** Fixed in pc208 (8ce2a35,
+  with a unit test) for render, live and native alike. Ch5's old-person helper has a workaround that can now come out;
+  re-check it.
+- The live path garbles changing 3D text (RichText atlas) within a batch. Native is right.
+- Batch-sticky render-to-texture screens, in both paths (above).
+- The World-asks queue (`ASKS` in runtime/shared) is process-global: several React runtimes in one process can cross
+  asks. Harmless while a bake meets none (the probe line counts them).
+- A native shot that makes layout or World reads, or has a stateful `<Compute>`, falls back to the live path. None of
+  the 32 coverage samples did.
+
+### How to build and validate
+
+**Build box:** rent a vast GPU box with 64 cores (image nvidia/cuda:12.6.3-base-ubuntu24.04, label `pc-native-dev`,
+never a pool label).
+1. apt the packages in tools/release/linux/Dockerfile plus `libjavascriptcoregtk-4.1-0 time`; rustup 1.99.1; bun; uv.
+2. rsync this worktree to /root/raea (excluding .git, target and node_modules).
+3. `bun install --frozen-lockfile` in sdk/react/js and sdk/react/tw.
+4. `cargo build --profile dist -p raea-cli --bin raea --no-default-features --features "$(bash tools/bevy-plugins.sh features sdk/raea/bench/bevy-plugins)"`:
+   about 4–5 min cold. A release build with `CARGO_PROFILE_RELEASE_INCREMENTAL=true` rebuilds in about 15 s.
+5. Strip, sha256, `gh release create v0.1.4-pcN -R lizTheDeveloper/raea --target <commit> --prerelease` with the
+   binary and the .sha256.
+
+**Test assets:**
+- the project via `tools/vast-relay.sh mirror` then `push HOST PORT /root/pc`;
+- raea 0.1.4 via `sh render-vast-setup.sh 0.1.4-pcN`, then `python3 tools/raea-patches/apply.py` in /root/pc;
+- a dev binary needs `libraea_bundle.so` beside it (symlink from ~/.raea/bin).
+
+**Validate:** a 60-frame shot rendered live and `--native` on one host; per-frame PSNR of the PNGs.
+- Ch5 @2400 must be identical.
+- Ch2 @14189 at about 57 dB or better (its live/live noise is 62–69).
+- Parity tools: `RAEA_ROWS_DUMP=DIR` on both paths, tools/native-diff.py A B.
+- Timing: `RAEA_NATIVE_TRACE=1`, `RAEA_STARTUP_TRACE=<ms epoch>`.
+- Through rq: `tools/rq submit ch05-iso.tsx chapter-5-iso 60 out/perf/native/X.mp4 --test --start 2400 --raea 0.1.4-pcN --input story/reel-input-film-ch05.json --native`, then `rq wait`.
+
+**Rules:**
+- fork branch only, never main;
+- destroy your boxes;
+- never rm (`tools/trash.sh` in the project, mv to .trash elsewhere);
+- keys in env only;
+- uv for Python;
+- no time estimates.
