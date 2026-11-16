@@ -292,8 +292,9 @@ line), so none fell back.
 
 ### Current build and pin
 
-- **Latest:** `0.1.4-pc208` (branch `native-shots`; release with sha256 on the fork). It's pc207 plus the sun-light fix
-  plus the opt-in 3D-interior drop.
+- **Latest:** `0.1.4-pc209` (commit e08c756; release with sha256 on the fork). pc208 plus portable bakes (project
+  root marked, project files hashed: a pruned rq snapshot no longer breaks reuse), DROP3D on by default, and the bake
+  kept on a thread beside the engine's opening. Handed to the queue agent to pin, rollback pc208.
 - **Pin:** pc203 was pinned for new reels. pc204–pc207 were each marked "ready to pin" in the project's
   design/render-perf.md status lines, and the queue agent pins with rollback.
 - **Install:** `tools/render-vast-setup.sh 0.1.4-pcN` (project). It installs raea 0.1.4, swaps in the fork binary
@@ -339,21 +340,33 @@ frame drawn alone.
 
 ### In progress, and exactly where it stands
 
-**`RAEA_NATIVE_DROP3D=1`** (`Inner3d` in runtime/export/src/native.rs) leaves 3D elements nested in other 3D elements
-out of the page's recorded commits. They're about 99.9% of the commit bytes, and replay falls from 18–143 ms a frame to
-0.2 ms. It's opt-in because of:
-- Ch3 @900: one frame at 33.7 dB;
-- Ch1 @12500: 60 dB where it was identical.
+**2026-11-16, second engine agent (live log; newest first):**
+- **pc209 shipped** (e2b84a1 + e08c756). Ch5 cached 158 -> 184 frames/min, identical; Ch2 cached 145 -> 157,
+  cold 96 -> 108, 56.3 dB. Next: engine open. Cached open on Ch5 is 7.6 s: plugins 0.9, 3D spawn 1.3, timeline
+  0.46, await_models 4.6 (290 models). In the chrome trace, model_setup is one 1.77 s call: glTF texture mips made
+  serially. Making them across the cores (mip_gltfs_textures), in test.
+- **Bake portability** (the queue agent's bug: bakes held `/root/snap/NAME/media/...` paths, so a pruned or other
+  snapshot refused them). Now the root is `@@raea-project@@` in the kept bake, placed at the current root on read, and
+  `assets` lists each project file the bake names with its blake3. A changed or missing one is "stale" (re-baked, the
+  line names the file); an unrelated edit reuses. Tested: baked in a hard-linked copy, copy moved away, drawn from the
+  project: 24/24 identical. Edit elsewhere: reused. One byte added to a referenced atlas: re-baked.
+- **DROP3D coverage, 32 samples x 24 frames, 6+ pieces, drop against keep (same binary):** 13 identical on every
+  frame; all others 56.5 dB or better, with nothing visible, except Ch3 @900.
+  - **Ch3 @900 is not DROP3D.** Two keep runs differ by the same 32.4 dB: shadow banding (striped acne) on the sloped
+    wall, top right, on alternating frames, and which frames get it changes from run to run. This is the flicker
+    coverage item 4 names. It's visible: a known bug, open (below). pc208's "33.7 dB" was this, plus keep and drop
+    bakes sharing one key.
+  - Ch1 @9000 (57.8) and @12500 (60.1): keep is deterministic and drop differs at skinned edges (an eye highlight,
+    glasses rim). The 3D rows are identical, and so are the pages. The same shot differs by the same 60.1 dB between
+    keep with the GPU composite and keep without it (RAEA_NATIVE_GPU=0), so it is the engine's update sequence, not a
+    missing element. Within the rule; worth a look later.
 
-Find which page element depends on a nested 3D element:
-- render both with `RAEA_PAGE_DUMP=DIR`;
-- diff with `RAEA_ROWS_DUMP` and tools/native-diff.py.
-
-Test scripts on the dev box: `/root/run12.sh` compares keep and drop.
+Parity tools: `RAEA_ROWS_DUMP=DIR` (3D rows) with tools/native-diff.py; `RAEA_PAGE_DUMP=DIR` (note: it turns the GPU
+composite off, so it changes the draw path it is measuring).
 
 ### Ordered next steps
 
-1. Finish the DROP3D investigation above, then make it the default. It also shrinks the cache about 1000×.
+1. ~~Finish DROP3D and make it the default~~: done in e2b84a1 (pc209 once benchmarked).
 2. Engine open (6.5–10 s cached, 13–19 s on a binary's first run on a host).
    - Per a chrome trace: model_setup about 1.7 s, GPU image upload about 1.3 s, upscaling pipelines 0.7 s, mesh
      allocation 0.6 s, glTF loads about 1.2 s.
@@ -376,6 +389,8 @@ Test scripts on the dev box: `/root/run12.sh` compares keep and drop.
 
 ### Known bugs
 
+- **Ch3 @900 shadow banding flicker** (both paths, run to run): striped acne on the sloped wall on alternating
+  frames. Visible. Likely shadow-map state carried per update (cascades or a temporal filter). Open.
 - **A sun (directional or spot light) in a moved or turned group ignored the group's aim.** Fixed in pc208 (8ce2a35,
   with a unit test) for render, live and native alike. Ch5's old-person helper has a workaround that can now come out;
   re-check it.
