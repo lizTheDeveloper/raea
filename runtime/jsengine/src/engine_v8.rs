@@ -17,10 +17,6 @@ fn init() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         v8::V8::set_flags_from_string("--stack-size=32000");
-        // no process-wide page pool: a bake's isolates start together and end before the engine opens, so pooling
-        // their freed pages for reuse only held them (Ch5 2400-2549 cold: ~3 GB still resident after the bake,
-        // under the engine's opening). RAEA_V8_FLAGS=--memory-pool restores it
-        v8::V8::set_flags_from_string("--no-memory-pool");
         // RAEA_V8_FLAGS: V8's own flags, for measuring (e.g. "--prof --logfile=/tmp/v8-%p.log --no-logfile-per-isolate")
         if let Ok(f) = std::env::var("RAEA_V8_FLAGS") {
             v8::V8::set_flags_from_string(&f);
