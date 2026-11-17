@@ -819,20 +819,9 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     }
     // frames written on two threads of their own, a few queued, so the next frame draws while the last one encodes
-    // (a PNG was 7.5 ms of a 0.2 s frame on the draw's thread)
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(PathBuf, Vec<u8>)>(4);
-    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
-    let writers: Vec<std::thread::JoinHandle<R<()>>> = (0..2)
-        .map(|_| {
-            let rx = rx.clone();
-            std::thread::spawn(move || -> R<()> {
-                loop {
-                    let Ok((dest, px)) = rx.lock().unwrap().recv() else { return Ok(()) };
-                    image::save_buffer(&dest, &px, w, h, image::ColorType::Rgba8).map_err(|e| format!("{}: {e}", dest.display()))?;
-                }
-            })
-        })
-        .collect();
+    // (a PNG was 7.5 ms of a 0.2 s frame on the draw's thread); or, with RAEA_FRAME_PIPE, sent in order to an encoder
+    // with no files (raea_runtime_encode::sink). A still (one file) is written here
+    let sink = if folder { Some(raea_runtime_encode::sink::Sink::open(out, w, h, wanted.len(), 2, 4)?) } else { None };
     // the draw pipelined (RAEA_NATIVE_PIPE=0: not): a frame that's the page over its 3D alone leaves its readback in
     // flight, and it's taken after the next frame is drawn, so the GPU's work and the copy overlap the next frame's
     // replay, page and draw. A frame of another kind (a layered slot, a camera in a page box) is drawn whole
@@ -847,16 +836,28 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         Some(_) => Some(bevy_fed_buffer(w, h)?),
         None => None,
     };
-    let mut copying: Option<(usize, i64, Copy)> = None;
+    // the frames being read back, oldest first: each frame's copy is waited for only once RAEA_READBACK_DEPTH (2) newer
+    // frames are queued behind it, so the draw never waits on the GPU for the frame it just drew; the copies go into
+    // staging buffers that are reused, each handed mapped to the writer and given back once its frame is written
+    let depth = std::env::var("RAEA_READBACK_DEPTH").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).max(1);
+    let mut copying: std::collections::VecDeque<(usize, i64, Copy)> = std::collections::VecDeque::new();
+    let ring = Ring::new();
     let mut pending: Option<(usize, i64, Vec<u8>, raea_render::engine::ReadBack)> = None;
-    let send = |i: usize, px: Vec<u8>| -> R<()> {
-        let dest = if folder { out.join(format!("frame-{i:05}.png")) } else { out.to_path_buf() };
-        tx.send((dest, px)).map_err(|_| "a frame writer stopped".to_string())
+    let send = |i: usize, px: Box<dyn raea_runtime_encode::sink::Frame>| -> R<()> {
+        match &sink {
+            Some(s) => s.put(i, px),
+            None => px.pixels(&mut |px| raea_render::save_png(out, px, w, h)),
+        }
     };
     // a readback finished and laid under its page; one all black is the scene's own black if the GPUs still pass
     // their canaries (as black_twice keeps one), else the render stops there, the frames before it written
-    let check_black = |cx: &mut Ctx, pg: &mut raea_runtime_page::BevyPage, i: usize, f: i64, px: &[u8]| -> R<()> {
-        if px.chunks_exact(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0) {
+    let check_black = |cx: &mut Ctx, pg: &mut raea_runtime_page::BevyPage, i: usize, f: i64, px: &dyn raea_runtime_encode::sink::Frame| -> R<()> {
+        let mut black = false;
+        px.pixels(&mut |px| {
+            black = px.chunks_exact(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0);
+            Ok(())
+        })?;
+        if black {
             let e = cx.scene3d.as_ref().ok_or("no 3D")?;
             raea_gpu_device::check::black_twice(f, pg.canary().and_then(|()| e.canary())).map_err(|err| format!("{err}; the {i} frames before it are in {}", out.display()))?;
         }
@@ -867,6 +868,7 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         check_black(cx, pg, i, f, &px)?;
         Ok(px)
     };
+    let (mut t_read, mut t_send) = (0f64, 0f64);
     // the next stepped frame to feed; a frame before the last one fed goes back to its piece's start (a RESET)
     let mut next = 0usize;
     let (mut t_replay, mut t_draw, mut t_png) = (0f64, 0f64, 0f64);
@@ -889,13 +891,19 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
                 cx.now = f;
                 pg.at_frame(f, fps);
                 bevy_fed_gpu(app.world_mut(), pg, &mut cx, buf, fps, &g.device, &g.queue)?;
-                Ok(start_copy(&g.device, &g.queue, buf))
+                Ok(start_copy(&g.device, &g.queue, buf, &ring))
             })
             .map_err(|e| if i == 0 { format!("{e}; no frame was written") } else { format!("{e}; the {i} frames before it are in {}", out.display()) })?;
-            if let Some((pi, pf, prev)) = copying.replace((i, f, c)) {
-                let px = finish_copy(&g.device, prev)?;
+            copying.push_back((i, f, c));
+            while copying.len() > depth {
+                let (pi, pf, prev) = copying.pop_front().ok_or("no readback")?;
+                let tr = std::time::Instant::now();
+                let px = finish_copy(&g.device, prev, &ring)?;
+                t_read += t_ms(tr);
                 check_black(&mut cx, pg, pi, pf, &px)?;
-                send(pi, px)?;
+                let ts = std::time::Instant::now();
+                send(pi, Box::new(px))?;
+                t_send += t_ms(ts);
             }
             t_draw += t_ms(t);
             if i == 0 {
@@ -921,10 +929,10 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         // the frame before's readback, waited for now that this frame's work is queued behind it
         if let Some((pi, pf, page, read)) = pending.take() {
             let px = finish(&mut cx, pg, pi, pf, page, read)?;
-            send(pi, px)?;
+            send(pi, Box::new(px))?;
         }
         match step {
-            Over::Done(px) => send(i, px)?,
+            Over::Done(px) => send(i, Box::new(px))?,
             Over::Reading { page, read } => pending = Some((i, f, page, read)),
         }
         t_draw += t_ms(t);
@@ -939,21 +947,32 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     }
     if let Some((pi, pf, page, read)) = pending.take() {
         let px = finish(&mut cx, pg, pi, pf, page, read)?;
-        send(pi, px)?;
+        send(pi, Box::new(px))?;
     }
-    if let (Some(g), Some((pi, pf, prev))) = (&dev, copying.take()) {
-        let px = finish_copy(&g.device, prev)?;
-        check_black(&mut cx, pg, pi, pf, &px)?;
-        send(pi, px)?;
+    if let Some(g) = &dev {
+        while let Some((pi, pf, prev)) = copying.pop_front() {
+            let px = finish_copy(&g.device, prev, &ring)?;
+            check_black(&mut cx, pg, pi, pf, &px)?;
+            send(pi, Box::new(px))?;
+        }
     }
-    drop(tx);
-    for t in writers {
-        t.join().map_err(|_| "a frame writer panicked".to_string())??;
+    let piped = sink.as_ref().is_some_and(|s| s.piped_out());
+    let tw = std::time::Instant::now();
+    if let Some(s) = sink {
+        s.finish()?;
     }
     if trace() {
         let n = wanted.len().max(1) as f64;
         let p = *PARTS.lock().unwrap();
         eprintln!("raea native: per frame: replay {:.1} ms, draw {:.1} ms (page {:.1}, 3D {:.1}, read back {:.1}), png {:.1} ms", t_replay / n, t_draw / n, p[0] / n, p[1] / n, p[2] / n, t_png / n);
+        eprintln!(
+            "raea native: capture per frame: readback wait {:.2} ms, handed to the {} {:.2} ms (in the draw), staging buffers {}, writers' tail {:.0} ms",
+            t_read / n,
+            if piped { "pipe" } else { "PNG writers" },
+            t_send / n,
+            ring.made(),
+            t_ms(tw)
+        );
     }
     raea_runtime_react::startup_mark("native: frames written");
     let clipping = FED_CLIPPING.lock().unwrap().take().and_then(|t| t.join().ok()).unwrap_or_default();
@@ -976,32 +995,91 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
 struct Copy {
     staging: wgpu::Buffer,
     rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    sub: wgpu::SubmissionIndex,
 }
 
-fn start_copy(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> Copy {
-    let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("native frame readback"), size: src.size(), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+/// The staging buffers frames are read back into, reused: a buffer goes out mapped with its frame ([Staged]) and comes
+/// back once the frame is written. As many are made as are out at once (the frames in flight, queued and being
+/// written: about 8), where a buffer was made and freed for every frame.
+struct Ring {
+    back: std::sync::mpsc::Sender<wgpu::Buffer>,
+    free: std::sync::mpsc::Receiver<wgpu::Buffer>,
+    made: std::cell::Cell<usize>,
+}
+
+impl Ring {
+    fn new() -> Ring {
+        let (back, free) = std::sync::mpsc::channel();
+        Ring { back, free, made: std::cell::Cell::new(0) }
+    }
+
+    fn take(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        if let Some(b) = self.free.try_iter().find(|b| b.size() == size) {
+            return b;
+        }
+        self.made.set(self.made.get() + 1);
+        device.create_buffer(&wgpu::BufferDescriptor { label: Some("native frame readback"), size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false })
+    }
+
+    fn made(&self) -> usize {
+        self.made.get()
+    }
+}
+
+/// A frame read back, its pixels still in their mapped staging buffer: written from there (no copy on the draw's
+/// thread), then unmapped and given back to the ring.
+struct Staged {
+    buf: Option<wgpu::Buffer>,
+    back: std::sync::mpsc::Sender<wgpu::Buffer>,
+}
+
+impl raea_runtime_encode::sink::Frame for Staged {
+    fn pixels(&self, f: &mut dyn FnMut(&[u8]) -> R<()>) -> R<()> {
+        let b = self.buf.as_ref().ok_or("a frame given back")?;
+        let view = b.slice(..).get_mapped_range().map_err(|e| format!("the frame's readback: {e:?}"))?;
+        f(&view)
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(b) = self.buf.take() {
+            b.unmap();
+            let _ = self.back.send(b);
+        }
+    }
+}
+
+fn start_copy(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, ring: &Ring) -> Copy {
+    let staging = ring.take(device, src.size());
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("native frame readback") });
     enc.copy_buffer_to_buffer(src, 0, &staging, 0, src.size());
-    queue.submit([enc.finish()]);
+    let sub = queue.submit([enc.finish()]);
     let (tx, rx) = std::sync::mpsc::channel();
     staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    Copy { staging, rx }
+    Copy { staging, rx, sub }
 }
 
-fn finish_copy(device: &wgpu::Device, c: Copy) -> R<Vec<u8>> {
+/// A copy's frame, once mapped: the device polled without blocking, then (if it still isn't) waited for up to this
+/// copy's own submission, never the frames queued after it.
+fn finish_copy(device: &wgpu::Device, c: Copy, ring: &Ring) -> R<Staged> {
     let mapped = match c.rx.try_recv() {
         Ok(m) => m,
         Err(_) => {
-            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).map_err(|e| format!("the frame's readback: {e}"))?;
-            c.rx.recv().map_err(|e| e.to_string())?
+            let _ = device.poll(wgpu::PollType::Poll);
+            match c.rx.try_recv() {
+                Ok(m) => m,
+                Err(_) => {
+                    device.poll(wgpu::PollType::Wait { submission_index: Some(c.sub), timeout: Some(std::time::Duration::from_secs(60)) }).map_err(|e| format!("the frame's readback: {e}"))?;
+                    c.rx.recv().map_err(|e| e.to_string())?
+                }
+            }
         }
     };
     mapped.map_err(|e| format!("the frame's readback: {e}"))?;
-    let px = c.staging.slice(..).get_mapped_range().map_err(|e| format!("the frame's readback: {e:?}"))?.to_vec();
-    c.staging.unmap();
-    Ok(px)
+    Ok(Staged { buf: Some(c.staging), back: ring.back.clone() })
 }
 
 /// RAEA_ROWS_DUMP=DIR: each drawn frame's 3D as the engine holds it, DIR/FRAME.json: every row's entity and the

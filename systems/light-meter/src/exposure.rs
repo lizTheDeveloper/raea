@@ -158,46 +158,81 @@ pub fn said(v: &Value) -> Vec<raea_core_facts::Finding> {
 /// The exposure of PNG files, each read and measured, and all of them pooled (as one frame of all their pixels):
 /// `{"frames": [{file, exposure}], "exposure": pooled, "found": [{check, level, says}]}`.
 pub fn of_pngs(files: &[std::path::PathBuf]) -> Result<(Exposure, Value), String> {
-    let mut per = Vec::new();
-    let mut found = Vec::new();
-    // pooling every frame of a long folder is a lot of pixels: every k-th, at most 24 frames
-    let k = files.len().div_ceil(24).max(1);
+    let mut meter = Meter::new(files.len());
     // the sampled frames decoded across the cores (20 1080p PNGs were 1.5-2.5 s after a 60-frame native render's last
     // frame), then measured in order as before
-    let picked: Vec<&std::path::PathBuf> = files.iter().step_by(k).collect();
+    let picked: Vec<&std::path::PathBuf> = files.iter().step_by(meter.k).collect();
     let slots = raea_core_scene::par::map(picked.len(), 24, |i| {
         let f = picked[i];
-        image::open(f).map(|i| i.to_rgba8()).map_err(|e| format!("{}: {e}", f.display())).map(|img| {
-            // a quarter of each frame's pixels into the pool (every 4th), merged in frame order below
-            let mut pool = Acc::default();
-            pool.add(img.as_raw(), 4);
-            (stats(img.as_raw()), pool)
-        })
+        image::open(f).map(|i| i.to_rgba8()).map_err(|e| format!("{}: {e}", f.display())).map(|img| Meter::measure(img.as_raw()))
     });
-    let mut pooled = Acc::default();
     for (f, slot) in picked.into_iter().zip(slots) {
         let (own, pool) = slot?;
-        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        meter.take(&f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), own, &pool);
+    }
+    meter.finish()
+}
+
+/// of_pngs's measure of a render's frames, given their pixels as they're made instead of read back from files (a render
+/// whose frames go straight to an encoder): the same frames sampled, pooled and found as of_pngs finds them in a folder
+/// of `total` frames.
+pub struct Meter {
+    total: usize,
+    /// every k-th frame measured: pooling every frame of a long folder is a lot of pixels, so at most 24
+    k: usize,
+    per: Vec<Value>,
+    found: Vec<Value>,
+    pooled: Acc,
+}
+
+impl Meter {
+    pub fn new(total: usize) -> Meter {
+        Meter { total, k: total.div_ceil(24).max(1), per: Vec::new(), found: Vec::new(), pooled: Acc::default() }
+    }
+
+    /// Whether the `i`th frame (from 0, in order) is one measured.
+    pub fn wants(&self, i: usize) -> bool {
+        i % self.k == 0
+    }
+
+    /// A sampled frame (`wants`), in order: `name` as its file would be named, `rgba` straight RGBA8.
+    pub fn add(&mut self, name: &str, rgba: &[u8]) {
+        let (own, pool) = Meter::measure(rgba);
+        self.take(name, own, &pool);
+    }
+
+    /// a frame's own stats, and a quarter of its pixels (every 4th) for the pool
+    fn measure(rgba: &[u8]) -> (Option<Exposure>, Acc) {
+        let mut pool = Acc::default();
+        pool.add(rgba, 4);
+        (stats(rgba), pool)
+    }
+
+    fn take(&mut self, name: &str, own: Option<Exposure>, pool: &Acc) {
         if let Some(e) = own {
-            per.push(json!({"file": name, "exposure": e.json()}));
-            if files.len() > 1 {
-                for (level, says) in e.found(&name) {
+            self.per.push(json!({"file": name, "exposure": e.json()}));
+            if self.total > 1 {
+                for (level, says) in e.found(name) {
                     if level == "warning" {
-                        found.push(json!({"check": "exposure", "level": level, "says": says}));
+                        self.found.push(json!({"check": "exposure", "level": level, "says": says}));
                     }
                 }
             }
         }
-        pooled.merge(&pool);
+        self.pooled.merge(pool);
     }
-    let all = pooled.finish().ok_or("exposure: every pixel is transparent")?;
-    if files.len() == 1 {
-        for (level, says) in all.found("the frame") {
-            found.push(json!({"check": "exposure", "level": level, "says": says}));
+
+    /// The pooled exposure and of_pngs's document.
+    pub fn finish(mut self) -> Result<(Exposure, Value), String> {
+        let all = self.pooled.finish().ok_or("exposure: every pixel is transparent")?;
+        if self.total == 1 {
+            for (level, says) in all.found("the frame") {
+                self.found.push(json!({"check": "exposure", "level": level, "says": says}));
+            }
         }
+        let sampled = if self.k > 1 { json!(self.per.len()) } else { Value::Null };
+        Ok((all, json!({"exposure": all.json(), "frames": self.per, "sampled": sampled, "found": self.found})))
     }
-    let sampled = if k > 1 { json!(per.len()) } else { Value::Null };
-    Ok((all, json!({"exposure": all.json(), "frames": per, "sampled": sampled, "found": found})))
 }
 
 #[cfg(test)]
@@ -222,6 +257,31 @@ mod tests {
         let b = stats(&flat(0, 100)).unwrap();
         assert_eq!(b.clipped_low, 1.0);
         assert!(b.found("f").iter().any(|(_, s)| s.contains("crush to black")));
+    }
+
+    #[test]
+    fn meter_is_of_pngs() {
+        // 50 frames (every 3rd sampled): the meter fed the pixels says what of_pngs says of them as files
+        let dir = std::env::temp_dir().join(format!("raea-meter-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (16u32, 8u32);
+        let frames: Vec<Vec<u8>> = (0..50u32).map(|f| (0..w * h).flat_map(|p| [(f * 5) as u8, (p * 2) as u8, 255 - (f * 3) as u8, if p % 9 == 0 { 0 } else { 255 }]).collect()).collect();
+        let mut files = Vec::new();
+        let mut meter = Meter::new(frames.len());
+        for (i, px) in frames.iter().enumerate() {
+            let f = dir.join(format!("frame-{i:05}.png"));
+            image::save_buffer(&f, px, w, h, image::ColorType::Rgba8).unwrap();
+            files.push(f);
+            if meter.wants(i) {
+                meter.add(&format!("frame-{i:05}.png"), px);
+            }
+        }
+        let (a, va) = of_pngs(&files).unwrap();
+        let (b, vb) = meter.finish().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(va, vb);
+        assert_eq!(va["sampled"], json!(17));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

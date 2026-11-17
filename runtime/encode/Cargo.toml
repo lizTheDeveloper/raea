@@ -18,5 +18,7 @@ raea-io-net = { path = "../../io/net" }
 raea-sys-mix = { path = "../../systems/mix" }
 raea-sys-k = { path = "../../systems/k" }
 raea-gpu-device = { path = "../../gpu/device" }
+# a folder render's EXPOSURE measured on frames piped to an encoder (sink.rs), as of_pngs measures files
+raea-sys-light-meter = { path = "../../systems/light-meter" }
 serde_json = "1"
 wgpu = "=30.0.1"

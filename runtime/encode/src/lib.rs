@@ -12,6 +12,7 @@ use raea_render::engine;
 pub use raea_render::{dir_of, inserted_of, save_png};
 
 pub mod html;
+pub mod sink;
 mod sound;
 pub use sound::*;
 mod render;
