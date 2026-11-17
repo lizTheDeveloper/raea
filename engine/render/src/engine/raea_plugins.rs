@@ -108,6 +108,7 @@ pub fn scene3d_systems() -> ScheduleConfigs<ScheduleSystem> {
     (
         // 2D over the 3D: its camera once there's a part, then each part's place, cell and colour (raea-sys-sprite)
         (super::sprite2d::camera_2d, super::sprite2d::sync_2d).chain(),
+        super::scene3d::issue_gltf_loads,
         super::scene3d::model_setup,
         super::scene3d::instance_models,
         super::scene3d::model_shadow_markers,

@@ -65,11 +65,48 @@ mod share;
 pub use share::*;
 pub use raea_sys_material::clay;
 
+/// Every model's glTF, held while a kept engine loads its next program (Engine::reload), so a model the next shot
+/// names again is the asset already loaded, not read and parsed again.
+/// The next glTF asked of the asset server, once the last one asked has loaded (or failed): one at a time, in the
+/// models' entity order. Bevy gives a glTF's meshes and materials their asset ids while it loads, so glTFs loading
+/// together took them in whatever order their loads ran; those ids order the opaque draws (the phase's bins), and
+/// where two surfaces meet at the same depth the later draw wins: Ch4's cut at 5186 drew a few pixels of a lid and a
+/// crown one of two ways run to run (84-90 dB). RAEA_PARALLEL_GLTF=1 asks for every one at once, as before.
+pub fn issue_gltf_loads(world: &mut World) {
+    let server = world.resource::<AssetServer>().clone();
+    let parallel = std::env::var_os("RAEA_PARALLEL_GLTF").is_some();
+    let mut q = world.query::<(Entity, &mut Model3d)>();
+    loop {
+        if !parallel && q.iter(world).any(|(_, m)| m.queued.is_none() && matches!(m.state, ModelState::Loading) && !gltf_done(&server, &m.gltf)) {
+            return;
+        }
+        let Some(path) = q.iter(world).filter_map(|(e, m)| m.queued.as_ref().map(|p| (e, p.clone()))).min_by_key(|(e, _)| *e).map(|(_, p)| p) else { return };
+        let h: Handle<Gltf> = server.load(path.clone());
+        for (_, mut m) in q.iter_mut(world) {
+            if m.queued.as_deref() == Some(path.as_str()) {
+                m.gltf = h.clone();
+                m.queued = None;
+            }
+        }
+    }
+}
+
+fn gltf_done(server: &AssetServer, h: &Handle<Gltf>) -> bool {
+    matches!(server.get_load_state(h), Some(bevy::asset::LoadState::Failed(_)))
+        || matches!(server.get_recursive_dependency_load_state(h), Some(bevy::asset::RecursiveDependencyLoadState::Loaded) | Some(bevy::asset::RecursiveDependencyLoadState::Failed(_)))
+}
+
+pub fn model_handles(world: &mut World) -> Vec<Handle<Gltf>> {
+    world.query::<&Model3d>().iter(world).map(|m| m.gltf.clone()).collect()
+}
+
 /// A model row's glTF: loaded by the asset server, then its scene spawned under the row's entity and its clip set up.
 #[derive(Component)]
 #[require(Model)]
 pub struct Model3d {
     gltf: Handle<Gltf>,
+    /// its file, until `issue_gltf_loads` asks for it (one glTF at a time, in entity order: see there)
+    queued: Option<String>,
     scene: usize,
     anim: Option<V>,
     state: ModelState,

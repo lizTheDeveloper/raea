@@ -8,7 +8,9 @@ pub fn model(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], dir: &Path
     if cfg!(not(target_arch = "wasm32")) && !path.exists() {
         return Err(format!("model {}: {} doesn't exist", t.id, path.display()));
     }
-    let gltf: Handle<Gltf> = world.resource::<AssetServer>().load(path.to_string_lossy().to_string());
+    // asked for by issue_gltf_loads, one glTF at a time
+    let gltf: Handle<Gltf> = Handle::default();
+    let queued = Some(path.to_string_lossy().to_string());
     let anim = t.vals.get("anim").cloned().filter(|v| v.truthy() || matches!(v, V::N(_)));
     let toon = super::toon::ToonSpec::of(&t.vals);
     let t_s = std::time::Instant::now();
@@ -38,7 +40,8 @@ pub fn model(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], dir: &Path
     if ["flat", "look", "toon"].iter().any(|k| t.vals.get(*k).is_some_and(V::truthy)) {
         world.entity_mut(e).insert(raea_sys_shader::OwnSurface);
     }
-    world.entity_mut(e).insert((Model3d { gltf, scene: num(&t.vals, "scene", 0.0) as usize, anim, state: ModelState::Loading, src, id: t.id.clone(), toon, toon_wait: 0, surfaces, shaders, sampler, mix: names_col(&t.vals, "mix"), mixer: vec![], morphs: names_col(&t.vals, "morph_names"), graph: graph_col(&t.vals).map_err(|e| format!("model {}: {e}", t.id))?, built: None, inst }, transform_of(&t.vals), Visibility::default()));
+    world.entity_mut(e).insert((Model3d { gltf, queued, scene: num(&t.vals, "scene", 0.0) as usize, anim, state: ModelState::Loading, src, id: t.id.clone(), toon, toon_wait: 0, surfaces, shaders, sampler, mix: names_col(&t.vals, "mix"), mixer: vec![], morphs: names_col(&t.vals, "morph_names"), graph: graph_col(&t.vals).map_err(|e| format!("model {}: {e}", t.id))?, built: None, inst }, transform_of(&t.vals), Visibility::default()));
+    super::issue_gltf_loads(world);
     Ok(())
 }
 
@@ -64,7 +67,7 @@ pub fn model_setup(
 ) {
     // the textures of every glTF that's ready to spawn this update, mipped together across the cores (mip_gltfs_textures)
     {
-        let ready: Vec<&Gltf> = models.iter().filter(|(_, m)| matches!(m.state, ModelState::Loading) && server.is_loaded_with_dependencies(&m.gltf)).filter_map(|(_, m)| gltfs.get(&m.gltf)).collect();
+        let ready: Vec<&Gltf> = models.iter().filter(|(_, m)| matches!(m.state, ModelState::Loading) && m.queued.is_none() && server.is_loaded_with_dependencies(&m.gltf)).filter_map(|(_, m)| gltfs.get(&m.gltf)).collect();
         if !ready.is_empty() {
             raea_sys_material::maps::mip_gltfs_textures(&ready, &mats, &mut images);
         }
@@ -75,6 +78,9 @@ pub fn model_setup(
         'step: {
             match m.state {
                 ModelState::Loading => {
+                    if m.queued.is_some() {
+                        break 'step;
+                    }
                     if let Some(bevy::asset::LoadState::Failed(why)) = server.get_load_state(&m.gltf) {
                         err.0 = Some(format!("model {}: {why}", m.src));
                         m.state = ModelState::Ready { player: None };
@@ -393,10 +399,11 @@ pub fn await_models(app: &mut App) -> Result<(), String> {
         let t = bevy::platform::time::Instant::now();
         loop {
             bevy::asset::handle_internal_asset_events(app.world_mut());
+            super::issue_gltf_loads(app.world_mut());
             let world = app.world_mut();
             let server = world.resource::<AssetServer>().clone();
             let mut q = world.query::<&Model3d>();
-            let loading = q.iter(world).any(|m| matches!(m.state, ModelState::Loading) && !matches!(server.get_recursive_dependency_load_state(&m.gltf), Some(bevy::asset::RecursiveDependencyLoadState::Loaded) | Some(bevy::asset::RecursiveDependencyLoadState::Failed(_))));
+            let loading = q.iter(world).any(|m| matches!(m.state, ModelState::Loading) && (m.queued.is_some() || !matches!(server.get_recursive_dependency_load_state(&m.gltf), Some(bevy::asset::RecursiveDependencyLoadState::Loaded) | Some(bevy::asset::RecursiveDependencyLoadState::Failed(_)))));
             if !loading || t.elapsed().as_secs_f64() > 60.0 {
                 if trace {
                     eprintln!("raea models: files loaded in {:.1} ms before the first update", t.elapsed().as_secs_f64() * 1e3);
