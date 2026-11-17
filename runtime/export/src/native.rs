@@ -872,18 +872,27 @@ fn cache_dir() -> Option<PathBuf> {
 
 /// The bake's key: the bundle's bytes (the edit, everything it imports, its --input, the runtime bundled in), this
 /// build, the frames stepped, and the settings that change what a frame steps to.
+/// What made a bake, for its key: the source that can change it (build.rs RAEA_BAKE_SRC_HASH), or with
+/// RAEA_BAKE_KEY=binary the whole binary's hash (`binary_id`), and in either case the JS engine it ran on (a V8 bake and
+/// a JavaScriptCore one of the same shot are different bakes: Lane G2 found them sharing a key).
+fn made_by(binary_id: u64, binary: bool, engine: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if binary {
+        h.write_u64(binary_id);
+    } else {
+        h.write(env!("RAEA_BAKE_SRC_HASH").as_bytes());
+    }
+    h.write(b"|engine=");
+    h.write(engine.as_bytes());
+    h.finish()
+}
+
 fn key_of(js: &Path, stepped: &[i64]) -> R<u64> {
     // what made the bake: the source that can change it (build.rs RAEA_BAKE_SRC_HASH: drawing-, capture- and GPU-only
     // pins keep every kept bake) and the JS engine it ran on; RAEA_BAKE_KEY=binary keys by the whole binary as before
-    let made = if std::env::var("RAEA_BAKE_KEY").as_deref() == Ok("binary") {
-        build_id()
-    } else {
-        use std::hash::Hasher;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        h.write(env!("RAEA_BAKE_SRC_HASH").as_bytes());
-        h.write(std::env::var("BEVY_TSX_ENGINE").unwrap_or_default().as_bytes());
-        h.finish()
-    };
+    let binary = std::env::var("RAEA_BAKE_KEY").as_deref() == Ok("binary");
+    let made = made_by(if binary { build_id() } else { 0 }, binary, &std::env::var("BEVY_TSX_ENGINE").unwrap_or_default());
     let mut key: u64 = 0xcbf2_9ce4_8422_2325 ^ made;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
@@ -1848,6 +1857,17 @@ mod bin_tests {
         assert!(e.contains("frame 11"), "{e}");
         let mut fine: Piece = vec![(10, vec![raea_runtime_bake::RESET.to_string(), "[]".to_string()], Vec::new(), None)];
         assert!(page_commits(&mut fine, 1 << 36).is_ok());
+    }
+
+    #[test]
+    fn the_engine_is_in_the_key() {
+        // a V8 bake and a JavaScriptCore one never share a key, in either key mode
+        for binary in [false, true] {
+            let (jsc, v8, qjs) = (made_by(7, binary, "jsc"), made_by(7, binary, "v8"), made_by(7, binary, ""));
+            assert!(jsc != v8 && jsc != qjs && v8 != qjs, "binary={binary}");
+            assert_eq!(jsc, made_by(7, binary, "jsc"));
+        }
+        assert_ne!(made_by(7, true, "jsc"), made_by(8, true, "jsc"), "the binary's hash counts in binary mode");
     }
 
     #[test]
