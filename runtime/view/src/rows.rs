@@ -30,7 +30,7 @@ pub fn row2d(t: &Tup, all: &[Tup]) -> (String, serde_json::Value) {
             }
             // a picture's path as written (`image logo {src: "assets/logo.png"}`) was dropped and the row drew nothing
             if t.kind == "image" && !src.starts_with("media:") && !src.is_empty() {
-                props.insert("src".into(), serde_json::json!({"asset": src}));
+                props.insert("src".into(), serde_json::json!({"asset": &**src}));
                 continue;
             }
         }
@@ -68,7 +68,7 @@ pub fn prop_of(col: &str) -> &str {
 pub fn json_of(v: &V) -> serde_json::Value {
     match v {
         V::N(n) => serde_json::json!(n),
-        V::S(s) => serde_json::json!(s),
+        V::S(s) => serde_json::json!(&**s),
     }
 }
 
