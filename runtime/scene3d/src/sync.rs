@@ -291,7 +291,11 @@ pub fn sync_camera(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut placed: L
         let mut seen = None;
         if let Some(mut p) = proj {
             // an orthographic camera (`ortho`: the view's height in metres, keyed; 0 is a perspective one again)
-            if let Some(h) = v.get("ortho").map(|h| h.num() as f32) {
+            // (lane a, live player) a live row is the frame's props alone: a perspective camera after an orthographic one
+            // carries no `ortho` column (a timeline fills it with 0: runtime/look camera.rs), so a row with a `fov` and no
+            // `ortho` is a perspective one again (organism-engine.tsx's iso -> close-up cut stayed orthographic)
+            let ortho = v.get("ortho").map(|h| h.num() as f32).or_else(|| (matches!(p.as_ref(), Projection::Orthographic(_)) && v.get("fov").is_some()).then_some(0.0));
+            if let Some(h) = ortho {
                 if h > 0.0 {
                     if let Projection::Orthographic(o) = p.as_mut() {
                         match &mut o.scaling_mode {

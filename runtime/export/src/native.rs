@@ -982,24 +982,61 @@ fn placed(text: &str, dir: &Path) -> String {
 }
 
 /// Why a kept bake no longer matches the project's files: one it names changed or went (None when all match).
+/// (lane a, 2026-11-17) A shader is compiled live when the set loads, from the project's file: its bodies are not baked
+/// data, so a shader is keyed on its interface alone (shader_interface: structs, @group/@binding and var<...> lines) and
+/// a tuning edit keeps the bake; a layout change still refuses it. A bake kept before this names a shader by its whole
+/// file's hash, which can't tell the two apart: that key is skipped. RAEA_STALE_SHADERS=1 keys whole shader files again.
 fn stale(v: &Value, dir: &Path) -> Option<String> {
     let Some(assets) = v.get("assets").and_then(Value::as_object) else { return Some("it lists no project files".into()) };
-    let names: Vec<String> = assets.keys().cloned().collect();
+    let whole = std::env::var_os("RAEA_STALE_SHADERS").is_some();
+    let names: Vec<String> = assets.keys().filter(|k| whole || !is_shader(k) || assets[*k].as_str().is_some_and(|h| h.starts_with("iface:"))).cloned().collect();
     for (k, (_, h)) in names.iter().zip(hashes(dir, &names)) {
+        let h = if whole && is_shader(k) && !assets[k].as_str().is_some_and(|x| x.starts_with("iface:")) { file_hash(&dir.join(k)) } else { h };
         if h.as_deref() != assets[k].as_str() {
-            return Some(format!("{k} {}", if h.is_none() { "is gone" } else { "changed" }));
+            return Some(format!("{k} {}", if h.is_none() { "is gone" } else if is_shader(k) { "layout changed, re-bake" } else { "changed" }));
         }
     }
     None
+}
+
+fn is_shader(name: &str) -> bool {
+    name.ends_with(".wesl") || name.ends_with(".wgsl")
+}
+
+/// A shader's interface: its struct declarations and its binding lines (@group, @binding, var<...>), whitespace
+/// folded; function bodies, constants and comments left out.
+fn shader_interface(text: &str) -> String {
+    let (mut out, mut depth, mut in_struct) = (String::new(), 0i32, false);
+    for line in text.lines() {
+        let l = line.split("//").next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+        if depth == 0 && l.starts_with("struct ") {
+            in_struct = true;
+        }
+        if in_struct || l.contains("@group") || l.contains("@binding") || (depth == 0 && l.contains("var<")) {
+            out.push_str(&l);
+            out.push('\n');
+        }
+        depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+        if depth <= 0 {
+            depth = 0;
+            in_struct = false;
+        }
+    }
+    out
+}
+
+fn file_hash(p: &Path) -> Option<String> {
+    let mut x = blake3::Hasher::new();
+    std::fs::File::open(p).ok().and_then(|f| x.update_reader(f).ok()).map(|x| x.finalize().to_hex().to_string())
 }
 
 /// Each project file's content hash (blake3), across the cores; None for a name that isn't a file.
 fn hashes(dir: &Path, names: &[String]) -> Vec<(String, Option<String>)> {
     let one = |n: &String| {
         let p = dir.join(n);
-        let h = p.is_file().then(|| {
-            let mut x = blake3::Hasher::new();
-            std::fs::File::open(&p).ok().and_then(|f| x.update_reader(f).ok()).map(|x| x.finalize().to_hex().to_string())
+        let h = p.is_file().then(|| match is_shader(n) {
+            true => std::fs::read_to_string(&p).ok().map(|t| format!("iface:{}", blake3::hash(shader_interface(&t).as_bytes()).to_hex())),
+            false => file_hash(&p),
         });
         (n.clone(), h.flatten())
     };
