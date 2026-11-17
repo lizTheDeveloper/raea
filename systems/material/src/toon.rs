@@ -225,6 +225,11 @@ fn params(s: &ToonSpec, vals: Option<&BTreeMap<String, V>>) -> ToonParams {
         p.shape.z = (size.clamp(0.0, 1.0) * 0.5).cos();
     }
     let n = if s.bands.is_empty() { s.steps.clamp(1, 8) } else { (s.bands.len() as u32).clamp(1, 8) };
+    // past 8 bands the toon shader has no room: said once, the picture as it was
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if (s.steps > 8 || s.bands.len() > 8) && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("raea: toon: a spec asks for {} bands; 8 are drawn (the toon shader takes at most 8)", s.steps.max(s.bands.len() as u32));
+    }
     p.shape.x = n as f32;
     for k in 1..n as usize {
         let start = if s.bands.is_empty() { k as f32 / n as f32 } else { s.bands[k].0 };
