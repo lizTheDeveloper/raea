@@ -191,7 +191,13 @@ pub fn bundle_cache(tsx: &Path, o: &CompOpts) -> Option<PathBuf> {
     for p in [js.join("tsconfig.json"), js.join("package.json"), js.join("bun.lock"), raea_io_home::home().join("sdk").join(raea_io_home::sdk::LIST)].into_iter().chain(file.starts_with('.').then(|| tsx.to_path_buf())) {
         files.extend(stat(&p).map(|(n, t)| (p, n, t)));
     }
-    files.extend(std::env::current_exe().ok().and_then(|p| stat(&p).map(|(n, t)| (p, n, t))));
+    // the code that rewrites and bundles: its source (build.rs RAEA_BUNDLER_SRC_HASH), not this executable, so a pin
+    // that doesn't touch the bundler keeps every bundle (RAEA_BUNDLE_KEY=binary: the executable, as before)
+    if std::env::var("RAEA_BUNDLE_KEY").as_deref() == Ok("binary") {
+        files.extend(std::env::current_exe().ok().and_then(|p| stat(&p).map(|(n, t)| (p, n, t))));
+    } else {
+        eat(concat!("bundler-src:", env!("RAEA_BUNDLER_SRC_HASH")).as_bytes());
+    }
     files.sort();
     for (p, n, t) in &files {
         eat(p.as_os_str().as_encoded_bytes());
@@ -212,6 +218,12 @@ pub fn bundle_cache(tsx: &Path, o: &CompOpts) -> Option<PathBuf> {
 
 /// The newest `keep` files with extension `ext` in `dir` kept, by when they were last written or used.
 pub fn prune_cache(dir: &Path, ext: &str, keep: usize) {
+    prune_cache_capped(dir, ext, keep, u64::MAX);
+}
+
+/// As prune_cache, and the newest held under `max_bytes` too (bundles run 35-50 MB a chapter: 64 of them were 0.7-3.3
+/// GB a raea install, one install a pinned build on every member; Lane E S50). Says once a process what it let go.
+pub fn prune_cache_capped(dir: &Path, ext: &str, keep: usize, max_bytes: u64) {
     let mut all = vec![];
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let (p, t) = (e.path(), e.metadata().and_then(|m| m.modified()).ok());
@@ -223,11 +235,22 @@ pub fn prune_cache(dir: &Path, ext: &str, keep: usize) {
         }
     }
     all.sort_by(|a, b| b.0.cmp(&a.0));
-    // the oldest go, with what an export keeps beside it: its message, manifest and findings
-    for (_, p) in all.into_iter().skip(keep) {
+    // the oldest go (past `keep`, or once the newest fill `max_bytes`), with what an export keeps beside it: its
+    // message, manifest and findings
+    let (mut bytes, mut gone, n) = (0u64, 0usize, all.len());
+    for (i, (_, p)) in all.into_iter().enumerate() {
+        bytes = bytes.saturating_add(std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0));
+        if i < keep && (bytes <= max_bytes || i == 0) {
+            continue;
+        }
         for f in ["said", "manifest", "findings"].map(|s| p.with_extension(s)).into_iter().chain([p]) {
             let _ = std::fs::remove_file(f);
         }
+        gone += 1;
+    }
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if gone > 0 && max_bytes < u64::MAX && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("raea: {}: {n} .{ext} kept, the {gone} oldest let go (past {keep} or {} MB)", dir.display(), max_bytes >> 20);
     }
 }
 

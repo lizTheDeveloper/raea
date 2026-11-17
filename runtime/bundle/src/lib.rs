@@ -220,7 +220,8 @@ pub fn bundle_composition(tsx: &Path, out_js: &Path, o: &CompOpts, portable: Opt
         // written whole, then moved in
         let tmp = c.with_extension(format!("{}.tmp", std::process::id()));
         if let Some(d) = c.parent() && std::fs::create_dir_all(d).is_ok() && std::fs::copy(out_js, &tmp).is_ok() && std::fs::rename(&tmp, &c).is_ok() {
-            prune_cache(d, "js", 64);
+            let mb = std::env::var("RAEA_BUNDLE_CACHE_MAX_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1024);
+            prune_cache_capped(d, "js", 64, mb << 20);
         } else {
             let _ = std::fs::remove_file(&tmp);
         }

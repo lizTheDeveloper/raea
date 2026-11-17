@@ -44,3 +44,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 # tests/mezz.rs writes its long-GOP clip with the soft backend's H.264
 raea-io-media = { path = "../../io/media", default-features = false, features = ["apple", "soft"] }
+
+[build-dependencies]
+# the bundle cache key's source hash (build.rs)
+blake3 = "1"
