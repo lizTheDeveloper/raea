@@ -28,7 +28,8 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
     // --cast CAST.tsx: live characters over the shots (raea-runtime-live cast.rs)
     if let Some(c) = std::env::args().skip_while(|a| a != "--cast").nth(1) {
         let input = std::env::args().skip_while(|a| a != "--cast-input").nth(1);
-        live.add_cast(std::path::Path::new(&c), input.as_deref().map(std::path::Path::new))?;
+        // --no-direct: the bake's camera and lights only (the cast's aren't laid over them)
+        live.add_cast(std::path::Path::new(&c), input.as_deref().map(std::path::Path::new), !std::env::args().any(|a| a == "--no-direct"))?;
     }
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;
     raea_runtime_react::startup_mark("opened");

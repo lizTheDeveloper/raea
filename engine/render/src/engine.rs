@@ -366,6 +366,33 @@ impl Engine {
         }
     }
 
+    /// Values laid over a timeline row's from now on (FrameRows::set_over): the live player's camera and named lights
+    /// from its live cast over a baked shot (`raea play --shots --cast`, cast.rs `direct`), so an edit to the chapter's
+    /// camera or lights shows while the bake plays; the row's other columns stay the timeline's. Until the next load.
+    pub fn set_over(&mut self, kind: &str, id: &str, vals: &BTreeMap<String, V>) -> Result<(), String> {
+        let world = self.app.world_mut();
+        let e = raea_sys_frame::store::find(world, kind, id).ok_or_else(|| format!("{kind} {id}: no such row to lay values over"))?;
+        let r = *world.resource::<FrameRows>().ix.get(&e).ok_or_else(|| format!("{kind} {id}: not a frame row"))?;
+        if !world.resource_mut::<FrameRows>().set_over(r, vals) {
+            return Err(format!("{kind} {id}: a live row, set with set_rows, not laid over"));
+        }
+        // a camera laid on another shot (its shot column changed): the next frame drawn is a cut, as set_rows says
+        if kind == "camera" && vals.contains_key("shot") {
+            world.insert_resource(raea_sys_frame::shots::Moved);
+        }
+        Ok(())
+    }
+
+    /// The id of the `kind` row whose `name` column is `name` (a part's SDK name: a <PointLight name="pell-stage">), if
+    /// the engine holds one. Walks the rows: called once per name and shot, not per frame.
+    pub fn named_row(&self, kind: &str, name: &str) -> Option<String> {
+        let world = self.app.world();
+        raea_sys_frame::store::rows(world).iter().find_map(|&e| {
+            let k = raea_sys_frame::store::key(world, e)?;
+            (k.kind == kind && matches!(raea_sys_frame::store::get(world, e, "name"), Some(V::S(n)) if &*n == name)).then(|| k.id.clone())
+        })
+    }
+
     /// Whether the engine holds row (`kind`, `id`) as its timeline's (not a live row): a live layer over a shot passes
     /// such a row by (set_rows_over refuses it)
     pub fn timeline_row(&self, kind: &str, id: &str) -> bool {

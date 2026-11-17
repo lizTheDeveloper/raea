@@ -205,6 +205,10 @@ pub struct FrameRows {
     /// rows from this place on (row r is `live[r - live_from]`). 0: every row is live, a game's own scene (the first
     /// set_rows took every loaded row over, and with --cast the shot's camera and cuts froze at its first frame)
     pub live_from: usize,
+    /// values laid over a timeline row's (FrameRows::set_over: a live player's camera and lights from its live cast over a
+    /// baked shot, `raea play --shots --cast --direct`), by place; the timeline's other columns stay. Empty: none (one
+    /// branch per row read)
+    pub over: HashMap<usize, BTreeMap<String, V>>,
     /// rows with per-frame tables (tables.rs: the camera's `frame_looks`, and `frame_sets` on any row), each as parsed
     pub looks: HashMap<usize, tables::Tables>,
     /// the edit's timeline the columns came from (which rows never change: `still`)
@@ -240,6 +244,33 @@ impl FrameRows {
     pub fn live_row_mut(&mut self, r: usize) -> Option<&mut BTreeMap<String, V>> {
         let from = self.live_from;
         self.live.as_mut()?.get_mut(r.checked_sub(from)?)
+    }
+
+    /// Whether row `r` has values laid over the timeline's (set_over)
+    #[inline]
+    pub fn has_over(&self, r: usize) -> bool {
+        !self.over.is_empty() && self.over.contains_key(&r)
+    }
+
+    /// Values laid over timeline row `r`'s from now on (merged into those laid before), its made values dropped so the
+    /// next read makes them with these. False when `r` isn't a timeline row (a live row is set by set_rows).
+    pub fn set_over(&mut self, r: usize, vals: &BTreeMap<String, V>) -> bool {
+        if self.is_live(r) || r >= self.ix.len() {
+            return false;
+        }
+        let o = self.over.entry(r).or_default();
+        for (k, v) in vals {
+            match o.get_mut(k) {
+                Some(x) => *x = v.clone(),
+                None => {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        if let Some(m) = self.made.get_mut(r) {
+            drop(m.take());
+        }
+        true
     }
 
     /// Whether the timeline still drives some rows: no live rows, or live rows over it (`live_from`).
@@ -287,7 +318,8 @@ impl FrameRows {
             if timeline.still(r) && !self.looks.contains_key(&r) {
                 continue;
             }
-            if !patch || self.looks.contains_key(&r) {
+            // (a row with values laid over it, set_over: made again, or the patch would put the timeline's back)
+            if !patch || self.looks.contains_key(&r) || (!self.over.is_empty() && self.over.contains_key(&r)) {
                 drop(m.take());
                 continue;
             }
@@ -326,7 +358,7 @@ impl FrameRows {
     /// (tables.rs): its set is laid on by `vals`, not in the row its entity was made from, so a one-frame edit (a play's
     /// first rows) put its sky on only at the first frame drawn, after the warm-up, and opened 2 frames dark (RR1).
     pub fn still(&self, e: Entity) -> bool {
-        self.timeline.as_ref().zip(self.ix.get(&e)).is_some_and(|(t, r)| !self.is_live(*r) && !self.looks.contains_key(r) && t.still(*r))
+        self.timeline.as_ref().zip(self.ix.get(&e)).is_some_and(|(t, r)| !self.is_live(*r) && !self.looks.contains_key(r) && !self.has_over(*r) && t.still(*r))
     }
 
     /// Whether any row may have column `c` this frame (a live scene's or a frame look's rows: always), so a system
@@ -340,7 +372,7 @@ impl FrameRows {
     pub fn moves_only(&self, e: Entity, cols: &[&str]) -> bool {
         let Some(r) = self.ix.get(&e) else { return false };
         let moving = |t: &raea_core_program::timeline::Timeline| { let m = t.moving(*r); !m.is_empty() && m.iter().all(|c| cols.contains(&c.as_str())) };
-        !self.is_live(*r) && !self.looks.contains_key(r) && self.timeline.as_deref().is_some_and(moving)
+        !self.is_live(*r) && !self.looks.contains_key(r) && !self.has_over(*r) && self.timeline.as_deref().is_some_and(moving)
     }
 
     /// A row's transform this frame read straight from the columns (transform_by), the 14 found once: for the rows only
@@ -359,13 +391,16 @@ impl FrameRows {
         if self.is_live(r) {
             return self.live_row(r)?.get(c).cloned();
         }
+        if let Some(v) = self.over.get(&r).filter(|_| !self.over.is_empty()).and_then(|o| o.get(c)) {
+            return Some(v.clone());
+        }
         self.cols.get(r, c)
     }
 
     /// One of a row's values this frame, copying only it (with its frame look laid on, as `vals` has it).
     pub fn get(&self, e: Entity, c: &str) -> Option<V> {
         let r = *self.ix.get(&e)?;
-        if self.looks.contains_key(&r) {
+        if self.looks.contains_key(&r) || self.has_over(r) {
             return self.vals(e)?.get(c).cloned();
         }
         if self.is_live(r) {
@@ -379,7 +414,7 @@ impl FrameRows {
     /// `vals` as before). A live row or one with a table is its `vals`.
     pub fn row(&self, e: Entity) -> Option<Row<'_>> {
         let r = *self.ix.get(&e)?;
-        if !self.is_live(r) && !self.looks.contains_key(&r) && row_read_on() {
+        if !self.is_live(r) && !self.looks.contains_key(&r) && !self.has_over(r) && row_read_on() {
             if r >= self.cols.len() {
                 return None;
             }
@@ -421,6 +456,12 @@ impl FrameRows {
                     };
                     if let Some(t) = self.looks.get(&r) {
                         tables::onto(&mut v, t);
+                    }
+                    // values laid over the timeline's (set_over), last
+                    if let Some(o) = self.over.get(&r) {
+                        for (k, x) in o {
+                            v.insert(k.clone(), x.clone());
+                        }
                     }
                     v
                 };
@@ -756,5 +797,24 @@ mod overlay_tests {
         assert_eq!(fr.at(1, "y"), None, "a timeline row reads the columns (none here)");
         fr.live_row_mut(2).unwrap().insert("y".into(), V::N(8.0));
         assert_eq!(fr.at(2, "y"), Some(V::N(8.0)));
+    }
+
+    /// Values laid over a timeline row (set_over: the live cast's camera over a baked shot's): read in place of the
+    /// timeline's, merged across calls; a live row isn't laid over
+    #[test]
+    fn values_laid_over_a_timeline_row() {
+        let mut fr = FrameRows::default();
+        let (a, b, c) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap(), Entity::from_raw_u32(3).unwrap());
+        let _ = (a, b);
+        fr.ix = [(a, 0), (b, 1), (c, 2)].into_iter().collect();
+        fr.live_from = 2;
+        fr.live = Some(vec![BTreeMap::new()]);
+        assert!(!fr.has_over(0));
+        assert!(fr.set_over(0, &[("x".to_string(), V::N(1.0))].into()));
+        assert!(fr.set_over(0, &[("fov".to_string(), V::N(0.5))].into()));
+        assert!(fr.has_over(0) && !fr.has_over(1));
+        assert_eq!(fr.at(0, "x"), Some(V::N(1.0)));
+        assert_eq!(fr.at(0, "fov"), Some(V::N(0.5)), "merged with what was laid before");
+        assert!(!fr.set_over(2, &[("x".to_string(), V::N(1.0))].into()), "a live row is set, not laid over");
     }
 }

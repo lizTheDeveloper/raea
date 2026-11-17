@@ -8,6 +8,8 @@
 //! The cast's page (its 2D) isn't drawn: the bakes' page is.
 
 use super::*;
+use raea_core_program::ir::V as Value3;
+use std::collections::BTreeMap;
 
 /// the cast's rows are numbered from here (`model1000000`...), a baked Program's from 0. Why a million: a heavy Ch5 shot
 /// has a few thousand rows of a kind. A Program that reaches it is refused loudly at the cut (Cast::clear_of), never
@@ -28,6 +30,18 @@ pub(crate) struct Cast {
     /// them. Each id is looked up once, when it first comes (no per-frame key made)
     seen: std::collections::HashSet<String>,
     shadowed: std::collections::HashSet<String>,
+    /// the director's half live (on unless `--no-direct`): the cast's camera (its place and lens) and its named lights
+    /// laid over the bake's own (Engine::set_over), so an edit to the chapter's camera, cut timing or lights shows while
+    /// the bake plays; the bake's ambient, sky and grade stay. With the chapter unedited they're the bake's values.
+    direct: bool,
+    /// the camera's place and lens as the cast last computed them, and each named light's values (by its name)
+    cam_over: BTreeMap<String, Value3>,
+    light_over: std::collections::HashMap<String, BTreeMap<String, Value3>>,
+    /// the cast's light ids' names, and each name's row in the shot (None: the bake has no light of that name)
+    light_names: std::collections::HashMap<String, String>,
+    light_rows: std::collections::HashMap<String, Option<String>>,
+    /// whether the engine has this shot's laid values yet (a load forgets them: sent whole after each cut)
+    over_sent: bool,
     /// the last step's JS and rows, ms (what a frame of live characters costs)
     pub(crate) cost: (f64, f64),
 }
@@ -35,7 +49,7 @@ pub(crate) struct Cast {
 impl Cast {
     /// `input`: the input file the scenery was baked with (a render's --input: a story's choices), so the cast's story
     /// state is the bake's
-    pub(crate) fn open(tsx: &Path, input: Option<&Path>) -> R<Cast> {
+    pub(crate) fn open(tsx: &Path, input: Option<&Path>, direct: bool) -> R<Cast> {
         let tsx = tsx.canonicalize().map_err(|e| format!("{}: {e}", tsx.display()))?;
         let dir = tsx.parent().unwrap().to_path_buf();
         let js = std::env::temp_dir().join(format!("raea-cast-{}-{:x}.js", std::process::id(), rand_id()));
@@ -55,12 +69,12 @@ impl Cast {
         raea_runtime_react::scene::one_thread(&mut app);
         raea_runtime_react::scene::settle(&mut app, Some(-1), 20.0)?.ok_or("the cast's settings didn't arrive")?;
         eprintln!("raea play --cast: {} opened in {:.0} ms", tsx.display(), t.elapsed().as_secs_f64() * 1e3);
-        Ok(Cast { app, ls: raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS), js, tsx, dir, input: input.map(Path::to_path_buf), warned: false, seen: Default::default(), shadowed: Default::default(), cost: (0.0, 0.0) })
+        Ok(Cast { app, ls: raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS), js, tsx, dir, input: input.map(Path::to_path_buf), warned: false, seen: Default::default(), shadowed: Default::default(), direct, cam_over: BTreeMap::new(), light_over: Default::default(), light_names: Default::default(), light_rows: Default::default(), over_sent: false, cost: (0.0, 0.0) })
     }
 
     /// The same cast opened again from its files (a saved edit): the new one replaces this one only if it opens.
     pub(crate) fn reopen(&self) -> R<Cast> {
-        Cast::open(&self.tsx, self.input.as_deref())
+        Cast::open(&self.tsx, self.input.as_deref(), self.direct)
     }
 
     pub(crate) fn tsx(&self) -> &Path {
@@ -88,6 +102,14 @@ impl Cast {
         self.ls = raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS);
         self.seen.clear();
         self.shadowed.clear();
+        self.cut();
+    }
+
+    /// The engine loaded another shot (kept or not): the laid-over values (set_over) are gone from it, and its rows by
+    /// name are another shot's: sent whole and looked up again at the next step.
+    pub(crate) fn cut(&mut self) {
+        self.over_sent = false;
+        self.light_rows.clear();
     }
 
     /// Frame `f` of the cast: React stepped at it, then what changed in its 3D set into `engine`.
@@ -101,8 +123,35 @@ impl Cast {
         let scene = raea_runtime_react::scene::scene_of(self.app.world_mut());
         raea_runtime_react::scene::edit_dir(&self.dir);
         let (mut rows, mut gone) = self.ls.frame(raea_runtime_react::scene::Shot { scene: &scene, clear: None });
+        // direct: the camera's place and lens and the named lights, kept to lay over the bake's (after the rows below)
+        let mut changed = !self.over_sent;
+        if self.direct {
+            for t in &rows {
+                match t.kind.as_str() {
+                    "camera" if t.id == "cam" => {
+                        for (k, v) in t.vals.iter().filter(|(k, _)| cam_direct(k)) {
+                            self.cam_over.insert(k.clone(), v.clone());
+                            changed = true;
+                        }
+                    }
+                    "light" => {
+                        if let Some(Value3::S(n)) = t.vals.get("name") {
+                            self.light_names.insert(t.id.clone(), n.to_string());
+                        }
+                        if let Some(n) = self.light_names.get(&t.id) {
+                            let o = self.light_over.entry(n.clone()).or_default();
+                            for (k, v) in t.vals.iter().filter(|(k, _)| !matches!(k.as_str(), "id" | "name")) {
+                                o.insert(k.clone(), v.clone());
+                            }
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         // the shot's camera (and its ambient, which the camera row carries), lights and post effects (resources) stay
-        // the bake's: a cast made from its chapter computes them too, and sent they'd light the shot twice
+        // the bake's rows: a cast made from its chapter computes them too, and sent as rows they'd light the shot twice
         rows.retain(|t| !matches!(t.kind.as_str(), "camera" | "light" | "resource"));
         if !self.warned {
             // looked at once, on the first frame with rows (not rebuilt every frame)
@@ -138,9 +187,42 @@ impl Cast {
             // row over at the clock, and the shot's 3D froze at its first frame with the cast on)
             engine.set_rows_over(&rows)?;
         }
+        if self.direct && changed {
+            self.lay_over(engine)?;
+        }
         self.cost = ((t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3);
         Ok(())
     }
+}
+
+impl Cast {
+    /// The camera's place and lens and the named lights laid over the shot's own rows (Engine::set_over). A light the
+    /// bake has no row of that name for is said once a shot (an unnamed light can't be matched: name it in the chapter).
+    fn lay_over(&mut self, engine: &mut raea_render::engine::Engine) -> R<()> {
+        if !self.cam_over.is_empty() {
+            engine.set_over("camera", "cam", &self.cam_over)?;
+        }
+        for (name, vals) in &self.light_over {
+            let row = self.light_rows.entry(name.clone()).or_insert_with(|| {
+                let r = engine.named_row("light", name);
+                if r.is_none() {
+                    eprintln!("raea play --cast: the shot has no light named {name}: the cast's isn't laid over");
+                }
+                r
+            });
+            if let Some(id) = row {
+                engine.set_over("light", id, vals)?;
+            }
+        }
+        self.over_sent = true;
+        Ok(())
+    }
+}
+
+/// The camera columns the cast lays over the bake's (direct): its place, aim and lens, the shot it's on (a cut). Not
+/// its ambient, sky, environment or post effects, which the scenery half sets (the cast half lacks the set's).
+fn cam_direct(k: &str) -> bool {
+    matches!(k, "x" | "y" | "z" | "look_x" | "look_y" | "look_z" | "fov" | "near" | "far" | "focus" | "ortho" | "shot") || ["up_", "lens_", "view_"].iter().any(|p| k.starts_with(p))
 }
 
 impl Drop for Cast {
@@ -151,11 +233,12 @@ impl Drop for Cast {
 
 impl Live {
     /// `--cast CAST.tsx`: live characters drawn into the shots' 3D (cast.rs). Only with `--shots`.
-    pub fn add_cast(&mut self, tsx: &Path, input: Option<&Path>) -> R<()> {
+    /// `direct`: the cast's camera and named lights laid over the bake's (Cast::direct; `--no-direct` turns it off).
+    pub fn add_cast(&mut self, tsx: &Path, input: Option<&Path>, direct: bool) -> R<()> {
         if self.shots.is_none() {
             return Err("--cast plays characters over a chapter's bakes: it needs --shots DIR".into());
         }
-        self.cast = Some(Cast::open(tsx, input)?);
+        self.cast = Some(Cast::open(tsx, input, direct)?);
         // the frame on screen now gets its characters
         let f = self.frame;
         self.step_cast(f);

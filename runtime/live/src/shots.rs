@@ -255,6 +255,9 @@ impl Live {
         if let Some(c) = self.cast.as_mut() {
             if !(kept && cast_kept) {
                 c.reset();
+            } else {
+                // kept: its rows stay, but the values it laid over the last shot's camera and lights went with it
+                c.cut();
             }
             // a shot whose rows reach the cast's ids: the cast is stopped, loudly (never drawn colliding)
             if let Err(why) = super::cast::Cast::clear_of(&prog) {
