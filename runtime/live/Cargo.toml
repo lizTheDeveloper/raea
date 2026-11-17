@@ -12,6 +12,8 @@ raea-runtime-page = { path = "../page" }
 raea-runtime-sound = { path = "../sound", default-features = false }
 raea-runtime-export = { path = "../export" }
 raea-runtime-bake = { path = "../bake" }
+# the shot bakes' first frames read without decompressing them whole (shots.rs)
+zstd = "0.13"
 raea-render = { path = "../../engine/render", default-features = false, features = ["native"] }
 raea-gpu-device = { path = "../../gpu/device" }
 raea-io-net = { path = "../../io/net" }

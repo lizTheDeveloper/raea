@@ -10,10 +10,37 @@ use super::*;
 use std::sync::Arc;
 
 pub(crate) struct Shots {
-    /// each shot's frames (first, last) and its Program, by first frame
-    list: Vec<(i64, i64, Arc<raea_core_program::ir::Program>)>,
+    /// each bake's frames (first, last) and file, by first frame
+    files: Vec<(i64, i64, PathBuf)>,
+    /// the shots read in (their commits are in the timeline, their Program here); at most the one playing and its
+    /// neighbours: a chapter's bakes parsed whole would be tens of GB
+    progs: std::collections::HashMap<usize, Arc<raea_core_program::ir::Program>>,
+    /// the next shot, being read on a thread
+    ahead: Option<(usize, std::sync::mpsc::Receiver<R<raea_runtime_export::ShotBake>>)>,
     /// the shot the engine holds now
     at: Option<usize>,
+}
+
+/// A bake's first stepped frame, from the start of its JSON (the ops follow the assets), without reading it all
+fn first_frame(p: &Path) -> Option<i64> {
+    use std::io::Read;
+    let f = std::fs::File::open(p).ok()?;
+    let mut d = zstd::stream::read::Decoder::new(f).ok()?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut n = 0;
+    while n < buf.len() {
+        let k = d.read(&mut buf[n..]).ok()?;
+        if k == 0 {
+            break;
+        }
+        n += k;
+        if let Some(i) = buf[..n].windows(8).position(|w| w == b"\"ops\":[[") {
+            let rest = &buf[i + 8..n];
+            let end = rest.iter().position(|c| !c.is_ascii_digit() && *c != b'-')?;
+            return std::str::from_utf8(&rest[..end]).ok()?.parse().ok();
+        }
+    }
+    None
 }
 
 impl Live {
@@ -24,56 +51,28 @@ impl Live {
         let dir = tsx.parent().unwrap().to_path_buf();
         *raea_runtime_react::native::ASSET_DIR.lock().unwrap() = Some(dir.clone());
         let t0 = std::time::Instant::now();
-        let mut files: Vec<PathBuf> = std::fs::read_dir(shots).map_err(|e| format!("{}: {e}", shots.display()))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.to_string_lossy().ends_with(".json.zst")).collect();
-        files.sort();
-        let (mut w, mut h, mut fps, mut total) = (0u32, 0u32, 30.0, 0i64);
-        let mut frame_ops: Vec<Vec<String>> = Vec::new();
+        let mut files: Vec<(i64, PathBuf)> = std::fs::read_dir(shots).map_err(|e| format!("{}: {e}", shots.display()))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.to_string_lossy().ends_with(".json.zst")).filter_map(|p| first_frame(&p).map(|f| (f, p))).collect();
+        if files.is_empty() {
+            return Err(format!("no shot bakes in {}", shots.display()));
+        }
+        files.sort_by_key(|f| f.0);
+        // the first one read now: the composition's size, rate and length, and the frames its commits begin
+        let first = raea_runtime_export::read_shot(&files[0].1, &dir)?;
+        let (w, h, fps, total) = (first.w, first.h, first.fps, first.total);
+        // each bake runs to the frame before the next one's first (the last: its own last)
+        let last0 = first.ops.last().map_or(files[0].0, |o| o.0);
+        let spans: Vec<(i64, i64, PathBuf)> = files.iter().enumerate().map(|(i, (lo, p))| (*lo, files.get(i + 1).map_or(if i == 0 { last0 } else { lo + (last0 - files[0].0) }, |n| n.0 - 1), p.clone())).collect();
+        // a jump into a shot needs no keyframe of its own: its first frame is a RESET and its whole tree
         let mut keys: Vec<(i64, Vec<Value>)> = vec![(-1, Vec::new())];
-        let mut list = Vec::new();
-        let mut refused = Vec::new();
-        for p in &files {
-            let b = match raea_export_read(p, &dir) {
-                Ok(b) => b,
-                Err(e) => {
-                    refused.push(e);
-                    continue;
-                }
-            };
-            (w, h, fps, total) = (b.w, b.h, b.fps, total.max(b.total));
-            if frame_ops.len() < total as usize {
-                frame_ops.resize(total as usize, Vec::new());
-            }
-            let (lo, hi) = (b.ops.first().map_or(0, |o| o.0), b.ops.last().map_or(0, |o| o.0));
-            for (f, batches) in b.ops {
-                if f < 0 || f >= total {
-                    continue;
-                }
-                // a piece starts with RESET and its runtime's whole tree: a jump into it needs no keyframe of its own
-                // (an empty one before it, then this frame's commits)
-                if batches.first().is_some_and(|x| x == raea_runtime_bake::RESET) {
-                    keys.push((f - 1, Vec::new()));
-                }
-                frame_ops[f as usize] = batches;
-            }
-            if let Some(prog) = b.prog {
-                list.push((lo, hi, Arc::new(prog)));
-            }
-        }
-        for e in &refused {
-            eprintln!("raea play --shots: {e}");
-        }
-        if list.is_empty() {
-            return Err(format!("no usable shot bakes in {} ({} files, {} refused)", shots.display(), files.len(), refused.len()));
-        }
+        keys.extend(spans.iter().map(|s| (s.0 - 1, Vec::new())));
         keys.sort_by_key(|k| k.0);
         keys.dedup_by_key(|k| k.0);
-        list.sort_by_key(|s| s.0);
-        eprintln!("raea play --shots: {} shots, frames {}-{} of {total}, read in {:.0} ms", list.len(), list[0].0, list[list.len() - 1].1, t0.elapsed().as_secs_f64() * 1e3);
         let mut conf = serde_json::Map::new();
         for (k, v) in [("width", w as f64), ("height", h as f64), ("fps", fps), ("frames", total as f64)] {
             conf.insert(k.into(), serde_json::json!(v));
         }
-        let baked = raea_runtime_bake::Baked { conf, fps, frames: total, w, h, init: Vec::new(), frame_ops, keys, comps: Vec::new(), code: Default::default(), has_3d: true };
+        let baked = raea_runtime_bake::Baked { conf, fps, frames: total, w, h, init: Vec::new(), frame_ops: vec![Vec::new(); total.max(1) as usize], keys, comps: Vec::new(), code: Default::default(), has_3d: true };
+        eprintln!("raea play --shots: {} shots, frames {}-{} of {total}, opened in {:.0} ms", spans.len(), spans[0].0, spans[spans.len() - 1].1, t0.elapsed().as_secs_f64() * 1e3);
         // the brand and the page's stylesheets come from the composition's bundle (made, never run)
         let js = std::env::temp_dir().join(format!("raea-live-{}-{:x}.js", std::process::id(), rand_id()));
         raea_runtime_react::scene::bundle_composition(&tsx, &js, &crate::open::baked_opts(&dir)?, None)?;
@@ -82,10 +81,12 @@ impl Live {
         raea_runtime_react::scene::one_thread(&mut app);
         let page = raea_runtime_page::BevyPage::new(w, h, &dir)?;
         let brand = raea_runtime_react::scene::page_css(&dir, w, &js);
-        let mut live = Live { app, dir: dir.clone(), page, brand, dirty: true, mixer: None, mixer_failed: false, lag: (0.0, std::time::Instant::now()), w, h, fps, frames: total, responsive: false, js, master: None, master_wav: None, game_master: None, game_gain: None, scene_rx: None, scene: None, live3d: None, frame: 0, pads: Vec::new(), pointer: Default::default(), made: Default::default(), sound_buf: Vec::new(), holders: Vec::new(), baked: Some(Arc::new(baked)), applied: -1, session: new_session(), shots: Some(Shots { list, at: None }) };
-        let first = live.shots.as_ref().map_or(0, |s| s.list[0].0);
-        live.frame = first;
-        live.replay(first);
+        let start = spans[0].0;
+        let mut live = Live { app, dir: dir.clone(), page, brand, dirty: true, mixer: None, mixer_failed: false, lag: (0.0, std::time::Instant::now()), w, h, fps, frames: total, responsive: false, js, master: None, master_wav: None, game_master: None, game_gain: None, scene_rx: None, scene: None, live3d: None, frame: 0, pads: Vec::new(), pointer: Default::default(), made: Default::default(), sound_buf: Vec::new(), holders: Vec::new(), baked: Some(Arc::new(baked)), applied: -1, session: new_session(), shots: Some(Shots { files: spans, progs: Default::default(), ahead: None, at: None }) };
+        live.take_shot(0, first);
+        trim();
+        live.frame = start;
+        live.replay(start);
         live.draw()?;
         live.warm_sound();
         Ok(live)
@@ -93,18 +94,74 @@ impl Live {
 
     /// The first frame the bakes cover (a chapter's player starts there)
     pub fn shots_first(&self) -> Option<i64> {
-        self.shots.as_ref().map(|s| s.list[0].0)
+        self.shots.as_ref().map(|s| s.files[0].0)
     }
 
-    /// The engine made to hold the shot that frame `f` is in (draw calls it first).
+    /// A shot read in: its commits laid into the timeline, its Program kept; shots more than one behind or two ahead let go.
+    fn take_shot(&mut self, i: usize, b: raea_runtime_export::ShotBake) {
+        let (Some(s), Some(baked)) = (self.shots.as_mut(), self.baked.as_mut()) else { return };
+        let Some(t) = Arc::get_mut(baked) else { return };
+        for (f, batches) in b.ops {
+            if f >= 0 && (f as usize) < t.frame_ops.len() {
+                t.frame_ops[f as usize] = batches;
+            }
+        }
+        if let Some(p) = b.prog {
+            s.progs.insert(i, Arc::new(p));
+        }
+        let gone: Vec<usize> = s.progs.keys().copied().filter(|&k| k + 1 < i || k > i + 2).collect();
+        for k in gone {
+            s.progs.remove(&k);
+            let (lo, hi, _) = s.files[k];
+            for f in lo.max(0)..=hi.min(t.frame_ops.len() as i64 - 1) {
+                t.frame_ops[f as usize] = Vec::new();
+            }
+        }
+    }
+
+    /// Frame `f`'s shot read in (waited for if it's being read ahead), the next one started on a thread, and the 3D
+    /// engine made to hold it. Called before a frame is replayed and drawn.
     pub(crate) fn follow_shot(&mut self, f: i64) {
+        let Some(s) = self.shots.as_ref() else { return };
+        let Some(i) = s.files.iter().position(|(lo, hi, _)| f >= *lo && f <= *hi) else { return };
+        if !s.progs.contains_key(&i) {
+            let t = std::time::Instant::now();
+            let ahead = self.shots.as_mut().and_then(|s| s.ahead.take());
+            let read = match ahead {
+                Some((k, rx)) if k == i => rx.recv().map_err(|e| e.to_string()).and_then(|r| r),
+                _ => {
+                    let p = self.shots.as_ref().unwrap().files[i].2.clone();
+                    raea_runtime_export::read_shot(&p, &self.dir)
+                }
+            };
+            match read {
+                Ok(b) => self.take_shot(i, b),
+                Err(e) => eprintln!("raea play --shots: shot {i}: {e}"),
+            }
+            trim();
+            raea_io_trace::event("shot_read", serde_json::json!({"shot": i, "waited_ms": t.elapsed().as_secs_f64() * 1e3}));
+            let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0);
+            eprintln!("raea play --shots: shot {i} read (waited {:.0} ms), RSS {:.1} GB", t.elapsed().as_secs_f64() * 1e3, rss as f64 / 1048576.0);
+        }
+        // the next shot read ahead while this one plays
+        let dir = self.dir.clone();
+        if let Some(s) = self.shots.as_mut()
+            && s.ahead.is_none()
+            && i + 1 < s.files.len()
+            && !s.progs.contains_key(&(i + 1))
+        {
+            let p = s.files[i + 1].2.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            if std::thread::Builder::new().name("raea shot ahead".into()).spawn(move || { let _ = tx.send(raea_runtime_export::read_shot(&p, &dir)); }).is_ok() {
+                s.ahead = Some((i + 1, rx));
+            }
+        }
         let Some(s) = self.shots.as_mut() else { return };
-        let Some(i) = s.list.iter().position(|(lo, hi, _)| f >= *lo && f <= *hi) else { return };
         if s.at == Some(i) {
             return;
         }
+        let Some(prog) = s.progs.get(&i).cloned() else { return };
         let t = std::time::Instant::now();
-        let prog = s.list[i].2.clone();
         let inserted = raea_render::inserted_of(&prog);
         let kept = match self.scene.as_mut() {
             Some(e) => match e.reload(&prog, &inserted) {
@@ -123,8 +180,25 @@ impl Live {
                 Err(e) => eprintln!("raea play --shots: shot {i}'s 3D didn't open: {e}"),
             }
         }
-        s.at = Some(i);
-        raea_io_trace::event("shot", serde_json::json!({"shot": i, "from": s.list[i].0, "ms": t.elapsed().as_secs_f64() * 1e3, "reloaded": kept}));
+        if let Some(s) = self.shots.as_mut() {
+            s.at = Some(i);
+        }
+        trim();
+        raea_io_trace::event("shot", serde_json::json!({"shot": i, "ms": t.elapsed().as_secs_f64() * 1e3, "reloaded": kept}));
+        let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).map_or(String::new(), |kb| format!(", RSS {:.1} GB", kb as f64 / 1048576.0));
+        eprintln!("raea play --shots: shot {i} (from frame {}) in {:.0} ms ({}{rss})", self.shots.as_ref().map_or(0, |s| s.files[i].0), t.elapsed().as_secs_f64() * 1e3, if kept { "engine reloaded" } else { "engine opened" });
+    }
+}
+
+/// glibc keeps freed memory in its arenas: a parsed bake's JSON tree (several GB) stays resident after it's dropped
+/// unless it's handed back. (macOS's allocator returns it on its own.)
+fn trim() {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        unsafe { malloc_trim(0) };
     }
 }
 

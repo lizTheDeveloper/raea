@@ -91,6 +91,8 @@ impl Live {
     /// A baked timeline's frame `f` put on the page: the next frame's commits, or (a jump) the keyframe before it with
     /// what's there removed first, then the commits after it.
     fn replay(&mut self, f: i64) {
+        // --shots: the frame's shot read in first (its commits join the timeline)
+        self.follow_shot(f);
         let Some(b) = self.baked.as_ref() else { return };
         let f = f.clamp(0, b.frames - 1);
         if f == self.applied {
