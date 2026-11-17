@@ -42,25 +42,26 @@ const GROUPS_2D: &[&str] = &["constants::MATERIAL_BIND_GROUP", "#{MATERIAL_BIND_
 
 /// One Rust type for every author's Material: eight uniform buffers of 256 bytes, four textures with their samplers,
 /// the shaders that read them, and how it blends and culls.
-#[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
+///
+/// Its eight uniforms go into the bind group as data (`AsBindGroup for OwnMaterial`), not as buffers made each time it's
+/// prepared, so a Material whose uniforms alone changed (a shader's time, each frame) has them written into the buffers
+/// its bind group already holds (vendor/bevy_render's non-bindless fast path), its bind group kept.
+#[derive(Asset, TypePath, Clone, Debug, Deref, DerefMut)]
+pub struct OwnMaterial(pub(crate) OwnFields);
+
+/// OwnMaterial's fields: Bevy's derive makes its textures', samplers' and storage buffers' bindings; the uniforms
+/// (bindings 30 to 37) are OwnMaterial's own.
+#[derive(AsBindGroup, Clone, Debug)]
 #[bind_group_data(OwnKey)]
-pub struct OwnMaterial {
-    #[uniform(30)]
-    u0: [Vec4; 16],
-    #[uniform(31)]
-    u1: [Vec4; 16],
-    #[uniform(32)]
-    u2: [Vec4; 16],
-    #[uniform(33)]
-    u3: [Vec4; 16],
-    #[uniform(34)]
-    u4: [Vec4; 16],
-    #[uniform(35)]
-    u5: [Vec4; 16],
-    #[uniform(36)]
-    u6: [Vec4; 16],
-    #[uniform(37)]
-    u7: [Vec4; 16],
+pub struct OwnFields {
+    pub(crate) u0: [Vec4; 16],
+    pub(crate) u1: [Vec4; 16],
+    pub(crate) u2: [Vec4; 16],
+    pub(crate) u3: [Vec4; 16],
+    pub(crate) u4: [Vec4; 16],
+    pub(crate) u5: [Vec4; 16],
+    pub(crate) u6: [Vec4; 16],
+    pub(crate) u7: [Vec4; 16],
     #[texture(38)]
     #[sampler(39)]
     t0: Option<Handle<Image>>,
@@ -154,12 +155,15 @@ fn intern(c: Vec<(String, f64)>) -> u64 {
     id
 }
 
-impl OwnMaterial {
+impl OwnFields {
     /// Its storage buffers, in slot order.
     pub(crate) fn buffers(&self) -> [Handle<ShaderBuffer>; 2] {
         [self.b0.clone(), self.b1.clone()]
     }
     /// Its uniforms' slots, packed again (own_live.rs patch).
+    pub(crate) fn slots(&self) -> [[Vec4; 16]; 8] {
+        [self.u0, self.u1, self.u2, self.u3, self.u4, self.u5, self.u6, self.u7]
+    }
     pub(crate) fn set_slots(&mut self, s: [[Vec4; 16]; 8]) {
         [self.u0, self.u1, self.u2, self.u3, self.u4, self.u5, self.u6, self.u7] = s;
     }
@@ -177,10 +181,47 @@ pub struct OwnKey {
     layout: u64,
 }
 
-impl From<&OwnMaterial> for OwnKey {
-    fn from(m: &OwnMaterial) -> Self {
-        let &OwnMaterial { shader, vertex, cull, constants, layout, .. } = m;
+impl From<&OwnFields> for OwnKey {
+    fn from(m: &OwnFields) -> Self {
+        let &OwnFields { shader, vertex, cull, constants, layout, .. } = m;
         OwnKey { shader, vertex, cull, constants, layout }
+    }
+}
+
+/// The uniforms' bindings, 30 to 37.
+const UNIFORMS: std::ops::Range<u32> = 30..38;
+
+impl AsBindGroup for OwnMaterial {
+    type Data = OwnKey;
+    type Param = <OwnFields as AsBindGroup>::Param;
+
+    fn label() -> &'static str {
+        "OwnMaterial"
+    }
+
+    fn bind_group_data(&self) -> OwnKey {
+        self.0.bind_group_data()
+    }
+
+    fn build_bind_group(&self, layout: &bevy::render::render_resource::BindGroupLayout, device: &bevy::render::renderer::RenderDevice, param: &mut bevy::ecs::system::SystemParamItem<'_, '_, Self::Param>, force_no_bindless: bool, output: &mut bevy::render::render_resource::BindGroupBuilder) -> Result<(), bevy::render::render_resource::AsBindGroupError> {
+        // each uniform as data, laid out as Bevy's derive lays a `#[uniform]` field (encase), in binding order
+        for (b, u) in UNIFORMS.zip(self.0.slots()) {
+            let mut buf = bevy::render::render_resource::encase::UniformBuffer::new(Vec::new());
+            buf.write(&u).map_err(|_| bevy::render::render_resource::AsBindGroupError::RetryNextUpdate)?;
+            let start = output.data_buffer.len() as u32;
+            output.data_buffer.extend_from_slice(buf.as_ref());
+            output.binding_resources.push((b, bevy::render::render_resource::UnpreparedBindingResource::Data(start..output.data_buffer.len() as u32)));
+        }
+        self.0.build_bind_group(layout, device, param, force_no_bindless, output)
+    }
+
+    fn bind_group_layout_entries(device: &bevy::render::renderer::RenderDevice, force_no_bindless: bool) -> Vec<bevy::render::render_resource::BindGroupLayoutEntry> {
+        use bevy::render::render_resource::{BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages, ShaderType};
+        let mut e: Vec<BindGroupLayoutEntry> = UNIFORMS
+            .map(|binding| BindGroupLayoutEntry { binding, visibility: ShaderStages::FRAGMENT | ShaderStages::VERTEX | ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: Some(<[Vec4; 16] as ShaderType>::min_size()) }, count: None })
+            .collect();
+        e.extend(OwnFields::bind_group_layout_entries(device, force_no_bindless));
+        e
     }
 }
 
@@ -350,7 +391,7 @@ pub fn build(world: &mut World, v: &Value, image: &mut impl FnMut(&mut World, &V
         None => crate::own_images::no_depth(world),
     });
     let [d1, d2a, cube, cube_array, d3] = dims;
-    Ok(OwnMaterial { u0, u1, u2, u3, u4, u5, u6, u7, t0, t1, t2, t3, d1, d2a, cube, cube_array, d3, depth, array, b0: b[0].clone(), b1: b[1].clone(), packing, shader, vertex, alpha, depth_bias, cull, constants, layout: layout_of(own.get("vertex_attributes"))? })
+    Ok(OwnMaterial(OwnFields { u0, u1, u2, u3, u4, u5, u6, u7, t0, t1, t2, t3, d1, d2a, cube, cube_array, d3, depth, array, b0: b[0].clone(), b1: b[1].clone(), packing, shader, vertex, alpha, depth_bias, cull, constants, layout: layout_of(own.get("vertex_attributes"))? }))
 }
 
 /// Bevy's AlphaMode as the SDK writes it: "Opaque", "Blend", {"Mask": cutoff}, "Premultiplied", "AlphaToCoverage",
