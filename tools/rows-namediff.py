@@ -16,7 +16,9 @@ print("only A:", sorted(set(A) - set(B))[:20]); print("only B:", sorted(set(B) -
 agg = collections.defaultdict(list)
 for n in set(A) & set(B):
     if len(A[n]) != len(B[n]): agg[("count", "")].append((n, len(A[n]), len(B[n]))); continue
-    for a, b in zip(A[n], B[n]):
+    # entities sharing a name (each pocket world's pillar-5) paired by where they are, not by dump order
+    at = lambda v: [round(x, 1) for x in (v.get("bevy_transform::components::global_transform::GlobalTransform") or [0] * 12)[9:12]]
+    for a, b in zip(sorted(A[n], key=at), sorted(B[n], key=at)):
         for comp in set(a) | set(b):
             la, lb = dict(leaves(a.get(comp))), dict(leaves(b.get(comp)))
             for k in set(la) | set(lb):

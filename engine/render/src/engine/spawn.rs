@@ -399,7 +399,7 @@ pub(crate) struct ShapeNow {
 /// A mesh whose shape the frame changes (a keyed `shape`: a <BufferMesh> remade every frame, as the multiverse veils'
 /// ripple is) made again from the frame's shape, into a Mesh of its own (never the shared one equal parts hold, so a
 /// changing shape doesn't fill the share with a mesh a frame). It drew the batch's first frame's shape throughout.
-pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
+pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
     for (e, mut now, mut m) in &mut q {
         let Some(v) = frame.vals(e) else { continue };
         let Some(expr) = raea_sys_frame::keyed(|k| v.get(k).cloned(), "shape") else { continue };
@@ -418,6 +418,9 @@ pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>
                     now.own = true;
                 }
                 now.expr = expr;
+                // its bounds made again from the new shape (Bevy keeps an Aabb it computed, so the first shape's would
+                // cull the next)
+                commands.entity(e).remove::<bevy::camera::primitives::Aabb>();
             }
             Err(err) => eprintln!("raea: a mesh's shape for this frame: {err}"),
         }
