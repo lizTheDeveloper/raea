@@ -141,9 +141,11 @@ pub fn install(app: &mut App, fps: f64) {
 /// `install`, for an edit whose rows give no plugin anything to do (`steps` false: a film's shot) when `lean`: the
 /// plugins that only answer rows (physics, particles, tilemaps, UI kits...) are left out, so their hundreds of systems
 /// don't run every update for nothing; `keep` names the ones kept (asset loaders the scene's files may need).
-/// RAEA_LEAN_PLUGINS=0: every plugin, as `install`.
+/// Opt-in (RAEA_LEAN_PLUGINS=1): leaving the plugins out changes the schedule's order of other systems, and Ch1 @22800
+/// came out 22/60 frames identical (worst 69 dB, ~25 pixels a frame) against every plugin, with no single plugin to
+/// blame (pc222's gate). Off, a film shot gets every plugin, as `install`.
 pub fn install_lean(app: &mut App, fps: f64, lean: bool) {
-    let lean = lean && std::env::var("RAEA_LEAN_PLUGINS").as_deref() != Ok("0");
+    let lean = lean && std::env::var("RAEA_LEAN_PLUGINS").as_deref() == Ok("1");
     if !lean {
         return install(app, fps);
     }
