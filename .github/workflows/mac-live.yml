@@ -39,8 +39,8 @@ jobs:
           restore-keys: live-check-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Check and test play's watch
         run: |
-          cargo check --locked -p raea-app-play -p raea-cli
-          cargo test --locked -p raea-app-play watch
+          cargo check -p raea-app-play -p raea-cli
+          cargo test -p raea-app-play watch
   build:
     if: github.ref == 'refs/heads/live'
     runs-on: macos-15
@@ -81,7 +81,7 @@ jobs:
         run: |
           feat=$(bash tools/bevy-plugins.sh features sdk/raea/bench/bevy-plugins)
           s=$SECONDS
-          cargo build --release --locked -p raea-cli --bin raea --no-default-features --features "$feat"
+          cargo build --release -p raea-cli --bin raea --no-default-features --features "$feat"
           echo "::notice::raea built in $(( (SECONDS - s) / 60 )) min"
           mkdir ship && cp target/release/raea target/release/libraea_bundle.dylib ship/
           strip -x ship/raea || true
