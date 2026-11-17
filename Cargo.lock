@@ -3066,8 +3066,6 @@ dependencies = [
 [[package]]
 name = "bevy_pbr"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb760932d1e683e7c00011f5c99e4e1cc893646a3a7b7224da6daf9bfa94853d"
 dependencies = [
  "arrayvec",
  "bevy_app",
@@ -3346,8 +3344,6 @@ dependencies = [
 [[package]]
 name = "bevy_render"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f438a921fd3ef82cc09ccf5e0cd8f1214dcae6286890f9d4acba0409d9a61a8"
 dependencies = [
  "async-channel",
  "bevy_app",
@@ -15121,6 +15117,7 @@ dependencies = [
  "raea-sys-material",
  "raea-sys-mix",
  "raea-sys-page",
+ "raea-sys-shader",
  "serde",
  "serde_json",
  "wgpu",

@@ -1362,7 +1362,9 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         Ok(aov_on(match prep {
             Some(h) => {
                 let mut o = raea_render::engine::Engine::begin_arc(prog.clone(), &inserted, dir, None, true)?;
-                o.prepared(join(h)?);
+                let p = join(h)?;
+                o.preload(&p);
+                o.prepared(p);
                 o.finish()?
             }
             None => raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, dir)?,
@@ -1378,7 +1380,10 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     Some(prog) => Some(match kept {
         Some((_, _, _, mut e)) => {
             let r = match prep {
-                Some(h) => join(h).and_then(|p| e.reload_prepared(p)),
+                Some(h) => join(h).and_then(|p| {
+                    e.preload(&p);
+                    e.reload_prepared(p)
+                }),
                 None => e.reload_arc(prog, &inserted),
             };
             match r {

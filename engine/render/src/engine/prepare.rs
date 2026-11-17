@@ -12,6 +12,8 @@ pub struct Prepared {
     pub inserted: Vec<Tup>,
     pub(crate) timeline: Arc<raea_core_program::timeline::Timeline>,
     pub(crate) maps: raea_sys_material::maps::Prefetched,
+    /// its models' glTF files, once each, in row order (Engine::preload)
+    pub models: Vec<String>,
     /// how long it took to make (ms)
     pub ms: f64,
 }
@@ -36,11 +38,48 @@ impl Prepared {
             (m.join().unwrap_or_default(), tl)
         });
         let timeline = Arc::new(timeline?);
-        Ok(Prepared { prog, inserted, timeline, maps, ms: t.elapsed().as_secs_f64() * 1e3 })
+        let mut models: Vec<String> = Vec::new();
+        for r in inserted.iter().filter(|r| r.kind == "model") {
+            if let Some(V::S(src)) = r.vals.get("src") {
+                if let Ok(p) = raea_sys_frame::resolve_src(&inserted, src, dir) {
+                    let p = p.to_string_lossy().to_string();
+                    if !models.contains(&p) {
+                        models.push(p);
+                    }
+                }
+            }
+        }
+        Ok(Prepared { prog, inserted, timeline, maps, models, ms: t.elapsed().as_secs_f64() * 1e3 })
     }
 }
 
+/// The glTFs a Prepared shot's models name, asked of the asset server ahead of its load (Engine::preload, Opening::preload)
+/// and held until that load is done, so they load while the engine draws the shot before or opens.
+#[derive(Resource, Default)]
+pub(crate) struct Preloaded(pub(crate) Vec<Handle<bevy::gltf::Gltf>>);
+
+fn preload_into(world: &mut World, p: &Prepared) {
+    let server = world.resource::<AssetServer>().clone();
+    let held: Vec<Handle<bevy::gltf::Gltf>> = p.models.iter().map(|m| server.load(m.clone())).collect();
+    world.insert_resource(Preloaded(held));
+}
+
+/// RAEA_PRELOAD=0: a shot's glTFs asked one at a time by its load, in entity order (scene3d::issue_gltf_loads), not
+/// ahead and together. Together is safe for the picture because the opaque draws go in the scene's order (dsort.rs),
+/// not the order their meshes and materials were made.
+pub fn preload_on() -> bool {
+    std::env::var("RAEA_PRELOAD").as_deref() != Ok("0") && std::env::var("RAEA_DRAW_ORDER").as_deref() != Ok("bevy")
+}
+
 impl Engine {
+    /// The next shot's glTFs loading now, while this engine draws the current one (the live player, once a Prepared is
+    /// ready): its reload then finds them loaded. Nothing is spawned, so the shot being drawn is unchanged.
+    pub fn preload(&mut self, p: &Prepared) {
+        if preload_on() {
+            preload_into(self.app.world_mut(), p);
+        }
+    }
+
     /// The map files this engine holds made (source, colour): pass to Prepared::new for the shot after this one.
     pub fn map_sources(&self) -> std::collections::HashSet<(String, bool)> {
         raea_sys_material::maps::held_sources(self.app.world())
@@ -50,6 +89,13 @@ impl Engine {
 impl Opening {
     /// What a Prepared shot made, for this opening's load (its timeline and maps taken, not made again): an engine
     /// opened while the shot was being prepared on another thread.
+    /// Its glTFs asked for now, before the engine's plugins finish (Engine::preload's, for an opening engine).
+    pub fn preload(&mut self, p: &Prepared) {
+        if preload_on() {
+            preload_into(self.app.world_mut(), p);
+        }
+    }
+
     pub fn prepared(&mut self, p: Prepared) {
         raea_sys_material::maps::prefetch_install(p.maps);
         self.timeline = Some(p.timeline);

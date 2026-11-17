@@ -75,9 +75,13 @@ pub use raea_sys_material::clay;
 pub fn issue_gltf_loads(world: &mut World) {
     let server = world.resource::<AssetServer>().clone();
     let parallel = std::env::var_os("RAEA_PARALLEL_GLTF").is_some();
+    // RAEA_GLTF_ORDER=root: the next glTF asked once the last one's root (its file parsed, its meshes and materials
+    // given their ids) has loaded, not once everything it depends on (its images) has: the ids come in the same order,
+    // and the images load alongside the next files
+    let root = std::env::var("RAEA_GLTF_ORDER").as_deref() == Ok("root");
     let mut q = world.query::<(Entity, &mut Model3d)>();
     loop {
-        if !parallel && q.iter(world).any(|(_, m)| m.queued.is_none() && matches!(m.state, ModelState::Loading) && !gltf_done(&server, &m.gltf)) {
+        if !parallel && q.iter(world).any(|(_, m)| m.queued.is_none() && matches!(m.state, ModelState::Loading) && !if root { root_done(&server, &m.gltf) } else { gltf_done(&server, &m.gltf) }) {
             return;
         }
         let Some(path) = q.iter(world).filter_map(|(e, m)| m.queued.as_ref().map(|p| (e, p.clone()))).min_by_key(|(e, _)| *e).map(|(_, p)| p) else { return };
@@ -89,6 +93,10 @@ pub fn issue_gltf_loads(world: &mut World) {
             }
         }
     }
+}
+
+fn root_done(server: &AssetServer, h: &Handle<Gltf>) -> bool {
+    matches!(server.get_load_state(h), Some(bevy::asset::LoadState::Loaded) | Some(bevy::asset::LoadState::Failed(_)))
 }
 
 fn gltf_done(server: &AssetServer, h: &Handle<Gltf>) -> bool {

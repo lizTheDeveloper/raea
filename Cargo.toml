@@ -307,6 +307,10 @@ bevy_ui = { path = "vendor/bevy_ui" }
 # bevy_render 0.20.0 with a fast path for non-bindless materials whose uniform data alone changed: written into the bind
 # group's own buffers, not freed and made again (changes marked "raea:"; Bevy's TODO in material_bind_groups.rs)
 bevy_render = { path = "vendor/bevy_render" }
+# bevy_pbr 0.20.0 with lights ordered by a key the app gives (LightOrderKeys: raea gives each light's row and child
+# path) before their render entity, and each cluster's lights in that order (changes marked "raea:"): the order the
+# shader sums lights in followed entity ids, so a kept engine's shot came out up to 1/255 from the same shot fresh
+bevy_pbr = { path = "vendor/bevy_pbr" }
 # bevy_solari 0.20.0 with alpha-tested and alpha-blended materials traced by their alpha, StandardMaterial's
 # uv_transform, and a panorama's sun sampled as a light rather than found by reflection rays alone (changes marked
 # "raea:", docs/raytracing.feature RT6). Back to upstream once Solari has these.
