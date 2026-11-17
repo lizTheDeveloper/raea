@@ -185,3 +185,10 @@ upstream = "crates.io:0.8.0"
 kind = "patch"
 reason = "text_render's per-glyph random values (RandomPerGlyph/RandomPerVertex) seeded per text from its content, not from a generator that carries every earlier text in the process: a kept engine or a long batch drew a shot's 3D text differently from the shot drawn fresh"
 exit = "an upstream rich_text3d that seeds per text (or a Resource RNG a host can reset); then drop the copy"
+
+[bevy_pbr]
+path = "vendor/bevy_pbr"
+upstream = "crates.io:0.20.0"
+kind = "patch"
+reason = "lights sorted by an app-given key (LightOrderKeys) before the render entity, and each cluster's light indices in that global order: the shader's light sum order followed entity ids (a kept engine against a fresh one, sub-1/255)"
+exit = "an upstream Bevy where light order is stable by something other than Entity (or a hook for it)"

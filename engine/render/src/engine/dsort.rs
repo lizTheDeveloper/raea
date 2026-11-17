@@ -20,34 +20,44 @@ fn fnv(h: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(h, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
 }
 
-/// Keys for meshes new or moved under another parent this update (main world, before extraction).
-#[allow(clippy::type_complexity)]
-pub(crate) fn scene_keys(mut commands: Commands, q: Query<Entity, (With<Mesh3d>, Or<(Added<Mesh3d>, Changed<ChildOf>)>)>, parents: Query<&ChildOf>, children: Query<&Children>, rows: Query<&raea_sys_frame::store::RowKey>, names: Query<&Name>) {
-    for e in &q {
-        let mut h = 0xcbf29ce484222325u64;
-        let mut x = e;
-        loop {
-            if let Ok(r) = rows.get(x) {
-                h = fnv(fnv(fnv(h, r.kind.as_bytes()), b"/"), r.id.as_bytes());
-                break;
+/// An entity's scene key: its row, and the child places from that row down to it.
+fn place_key(e: Entity, parents: &Query<&ChildOf>, children: &Query<&Children>, rows: &Query<&raea_sys_frame::store::RowKey>, names: &Query<&Name>) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    let mut x = e;
+    loop {
+        if let Ok(r) = rows.get(x) {
+            return fnv(fnv(fnv(h, r.kind.as_bytes()), b"/"), r.id.as_bytes());
+        }
+        match parents.get(x) {
+            Ok(p) => {
+                let parent = p.parent();
+                let at = children.get(parent).ok().and_then(|c| c.iter().position(|c| c == x)).unwrap_or(usize::MAX);
+                h = fnv(h, &(at as u64).to_le_bytes());
+                x = parent;
             }
-            match parents.get(x) {
-                Ok(p) => {
-                    let parent = p.parent();
-                    let at = children.get(parent).ok().and_then(|c| c.iter().position(|c| c == x)).unwrap_or(usize::MAX);
-                    h = fnv(h, &(at as u64).to_le_bytes());
-                    x = parent;
-                }
-                Err(_) => {
-                    h = match names.get(x) {
-                        Ok(n) => fnv(fnv(h, b"name:"), n.as_str().as_bytes()),
-                        Err(_) => fnv(fnv(h, b"entity:"), &x.to_bits().to_le_bytes()),
-                    };
-                    break;
-                }
+            Err(_) => {
+                return match names.get(x) {
+                    Ok(n) => fnv(fnv(h, b"name:"), n.as_str().as_bytes()),
+                    Err(_) => fnv(fnv(h, b"entity:"), &x.to_bits().to_le_bytes()),
+                };
             }
         }
-        commands.entity(e).insert(SceneKey(h));
+    }
+}
+
+/// Keys for meshes and lights new or moved under another parent this update (main world, before extraction).
+#[allow(clippy::type_complexity)]
+pub(crate) fn scene_keys(
+    mut commands: Commands,
+    meshes: Query<Entity, (With<Mesh3d>, Or<(Added<Mesh3d>, Changed<ChildOf>)>)>,
+    lights: Query<Entity, (Or<(With<bevy::light::PointLight>, With<bevy::light::SpotLight>, With<bevy::light::DirectionalLight>)>, Or<(Added<bevy::light::PointLight>, Added<bevy::light::SpotLight>, Added<bevy::light::DirectionalLight>, Changed<ChildOf>)>)>,
+    parents: Query<&ChildOf>,
+    children: Query<&Children>,
+    rows: Query<&raea_sys_frame::store::RowKey>,
+    names: Query<&Name>,
+) {
+    for e in meshes.iter().chain(lights.iter()) {
+        commands.entity(e).insert(SceneKey(place_key(e, &parents, &children, &rows, &names)));
     }
 }
 
@@ -55,9 +65,14 @@ pub(crate) fn scene_keys(mut commands: Commands, q: Query<Entity, (With<Mesh3d>,
 #[derive(Resource, Default)]
 pub(crate) struct SceneKeys(pub(crate) HashMap<MainEntity, u64>);
 
-pub(crate) fn extract_scene_keys(mut keys: ResMut<SceneKeys>, q: bevy::render::Extract<Query<(Entity, &SceneKey), Changed<SceneKey>>>) {
-    for (e, k) in &q {
-        keys.0.insert(MainEntity::from(e), k.0);
+/// (and the lights' into bevy_pbr's LightOrderKeys: the order the shader sums them in, vendor/bevy_pbr)
+pub(crate) fn extract_scene_keys(mut keys: ResMut<SceneKeys>, mut light_keys: ResMut<bevy::pbr::LightOrderKeys>, q: bevy::render::Extract<Query<(Entity, &SceneKey, Has<Mesh3d>), Changed<SceneKey>>>) {
+    for (e, k, mesh) in &q {
+        if mesh {
+            keys.0.insert(MainEntity::from(e), k.0);
+        } else {
+            light_keys.0.insert(MainEntity::from(e), k.0);
+        }
     }
 }
 
@@ -100,6 +115,7 @@ pub(crate) fn install(app: &mut App) {
     app.add_systems(PostUpdate, scene_keys.after(bevy::transform::TransformSystems::Propagate));
     app.sub_app_mut(bevy::render::RenderApp)
         .init_resource::<SceneKeys>()
+        .init_resource::<bevy::pbr::LightOrderKeys>()
         .add_systems(bevy::render::ExtractSchedule, extract_scene_keys)
         .add_systems(
             Render,
