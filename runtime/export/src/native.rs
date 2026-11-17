@@ -810,6 +810,8 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     let aov = AOV.load(std::sync::atomic::Ordering::Relaxed);
     let kept = if keeping_engine() { KEPT_ENGINE.with(|k| k.borrow_mut().take()).filter(|k| (k.0, k.1, k.2) == (w, h, aov)) } else { None };
     let reused = kept.is_some();
+    // a film shot's engine without the plugins its rows don't use (raea_runtime_plugins::install_lean)
+    raea_render::engine::plugins::LEAN.store(true, std::sync::atomic::Ordering::Relaxed);
     cx.scene3d = Some(match kept {
         Some((_, _, _, mut e)) => match e.reload(prog, &inserted) {
             Ok(()) => e,
@@ -985,6 +987,19 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             ring.made(),
             t_ms(tw)
         );
+        if let Some(e) = cx.scene3d.as_mut() {
+            let w = e.world_mut();
+            let mut q = w.query::<(Option<&bevy::light::PointLight>, Option<&bevy::light::SpotLight>, Option<&bevy::light::DirectionalLight>)>();
+            let (mut p, mut ps, mut sp, mut sps, mut d, mut ds) = (0, 0, 0, 0, 0, 0);
+            for (a, b, c) in q.iter(w) {
+                if let Some(a) = a { p += 1; ps += a.shadow_maps_enabled as usize; }
+                if let Some(b) = b { sp += 1; sps += b.shadow_maps_enabled as usize; }
+                if let Some(c) = c { d += 1; ds += c.shadow_maps_enabled as usize; }
+            }
+            let meshes = w.query::<&bevy::mesh::Mesh3d>().iter(w).count();
+            let casters = w.query_filtered::<&bevy::mesh::Mesh3d, bevy::prelude::Without<bevy::light::NotShadowCaster>>().iter(w).count();
+            eprintln!("raea native: lights: point {p} ({ps} with shadows), spot {sp} ({sps}), directional {d} ({ds}); meshes {meshes}, {casters} casting shadows");
+        }
         let pc = |i: usize| raea_sys_shader::own_live::PATCHED[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;
         eprintln!("raea native: own:uniforms a frame: {:.1} applied, {:.1} changed, {:.1} storage buffers written", pc(0), pc(1), pc(2));
         let fast = |i: usize| bevy::render::material_bind_groups::RAEA_FAST[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;

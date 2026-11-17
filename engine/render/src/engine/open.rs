@@ -126,7 +126,7 @@ impl Engine {
         }
         // raea's modules as Bevy plugins, in the order they were installed one by one (raea_plugins.rs), then the
         // registered Bevy plugins and the frame clock they step by (plugins.rs; nothing when none are)
-        app.add_plugins((raea_plugins::RaeaPlugins, raea_plugins::RegisteredPlugins { fps: prog.fps }));
+        app.add_plugins((raea_plugins::RaeaPlugins, raea_plugins::RegisteredPlugins { fps: prog.fps, lean: plugins::LEAN.load(std::sync::atomic::Ordering::Relaxed) && !plugins::steps(inserted) }));
         app.sub_app_mut(bevy::render::RenderApp).add_systems(
             bevy::render::Render,
             wait_pipelines.in_set(bevy::render::RenderSystems::Render).before(bevy::render::renderer::render_system),

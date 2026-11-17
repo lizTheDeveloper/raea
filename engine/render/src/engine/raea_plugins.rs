@@ -94,11 +94,14 @@ impl Plugin for FramePlugin {
 /// The registered Bevy plugins (plugins.rs), stepping by a clock at `fps` frames a second. Nothing when none are.
 pub struct RegisteredPlugins {
     pub fps: f64,
+    /// the edit's rows give no plugin anything to do (plugins::steps false): only the asset plugins are added
+    /// (plugins::install_lean)
+    pub lean: bool,
 }
 
 impl Plugin for RegisteredPlugins {
     fn build(&self, app: &mut App) {
-        super::plugins::install(app, self.fps);
+        super::plugins::install_lean(app, self.fps, self.lean);
     }
 }
 
