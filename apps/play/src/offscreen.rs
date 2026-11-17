@@ -27,7 +27,8 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
     let mut live = if let Some(d) = &shots { Live::open_shots(&run.tsx, std::path::Path::new(d))? } else if std::env::args().any(|a| a == "--baked") { Live::open_baked(&run.tsx)? } else { Live::open(&run.tsx, (w, h))? };
     // --cast CAST.tsx: live characters over the shots (raea-runtime-live cast.rs)
     if let Some(c) = std::env::args().skip_while(|a| a != "--cast").nth(1) {
-        live.add_cast(std::path::Path::new(&c))?;
+        let input = std::env::args().skip_while(|a| a != "--cast-input").nth(1);
+        live.add_cast(std::path::Path::new(&c), input.as_deref().map(std::path::Path::new))?;
     }
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;
     raea_runtime_react::startup_mark("opened");

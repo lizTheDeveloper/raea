@@ -1,7 +1,7 @@
 //! `raea play SCENERY.tsx --shots DIR --cast CAST.tsx`: game-time characters over a chapter's baked scenery (the live
 //! player, premature-collapse design/engine-live-loop.md, Lane F). The scenery plays from its native-shot bakes with no
 //! JS (shots.rs). The cast is a composition of its own, its characters only (no camera, set or lights: the shot has
-//! them), run frame by frame as live play runs a game: React steps it at the film's frame, its 3D rows are made from
+//! them; its camera, lights and post effects are never sent), run frame by frame as live play runs a game: React steps it at the film's frame, its 3D rows are made from
 //! that frame's own state (LiveScene, as a game's are) and set into the shot's engine beside the baked Program. Its
 //! rows are numbered clear of the Program's (LiveScene::numbered_from) and its camera row is never sent, so the shot's
 //! camera and ambient stay. Entering another shot reloads the engine, and the whole cast is set into it again.
@@ -18,6 +18,7 @@ pub(crate) struct Cast {
     js: PathBuf,
     tsx: PathBuf,
     dir: PathBuf,
+    input: Option<PathBuf>,
     /// kinds of row the cast made that a baked Program may also name by the render's own ids (said once)
     warned: bool,
     /// the last step's JS and rows, ms (what a frame of live characters costs)
@@ -25,13 +26,19 @@ pub(crate) struct Cast {
 }
 
 impl Cast {
-    pub(crate) fn open(tsx: &Path) -> R<Cast> {
+    /// `input`: the input file the scenery was baked with (a render's --input: a story's choices), so the cast's story
+    /// state is the bake's
+    pub(crate) fn open(tsx: &Path, input: Option<&Path>) -> R<Cast> {
         let tsx = tsx.canonicalize().map_err(|e| format!("{}: {e}", tsx.display()))?;
         let dir = tsx.parent().unwrap().to_path_buf();
         let js = std::env::temp_dir().join(format!("raea-cast-{}-{:x}.js", std::process::id(), rand_id()));
         let mut opts: Vec<String> = Vec::new();
         if std::env::var("RAEA_LIVE_REACT").as_deref() != Ok("1") {
             opts.push("--lite".into());
+        }
+        if let Some(i) = input {
+            opts.push("--input".into());
+            opts.push(i.display().to_string());
         }
         let t = std::time::Instant::now();
         raea_runtime_react::scene::bundle_composition(&tsx, &js, &raea_runtime_react::scene::comp_opts(&opts)?, None)?;
@@ -41,12 +48,12 @@ impl Cast {
         raea_runtime_react::scene::one_thread(&mut app);
         raea_runtime_react::scene::settle(&mut app, Some(-1), 20.0)?.ok_or("the cast's settings didn't arrive")?;
         eprintln!("raea play --cast: {} opened in {:.0} ms", tsx.display(), t.elapsed().as_secs_f64() * 1e3);
-        Ok(Cast { app, ls: raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS), js, tsx, dir, warned: false, cost: (0.0, 0.0) })
+        Ok(Cast { app, ls: raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS), js, tsx, dir, input: input.map(Path::to_path_buf), warned: false, cost: (0.0, 0.0) })
     }
 
     /// The same cast opened again from its files (a saved edit): the new one replaces this one only if it opens.
     pub(crate) fn reopen(&self) -> R<Cast> {
-        Cast::open(&self.tsx)
+        Cast::open(&self.tsx, self.input.as_deref())
     }
 
     pub(crate) fn tsx(&self) -> &Path {
@@ -59,16 +66,19 @@ impl Cast {
     }
 
     /// Frame `f` of the cast: React stepped at it, then what changed in its 3D set into `engine`.
-    pub(crate) fn step(&mut self, f: i64, session: (u32, f64), engine: &mut raea_render::engine::Engine) -> R<()> {
+    /// The frame goes to it as a render's does (a bare number: its input is the file it was bundled with, its dice the
+    /// frame's own), so the cast is the same performance the capture renders.
+    pub(crate) fn step(&mut self, f: i64, engine: &mut raea_render::engine::Engine) -> R<()> {
         let t0 = std::time::Instant::now();
-        self.app.world().resource::<ReactOutbox>().send_raw(frame_event(f, &[], None, Some(session)));
+        self.app.world().resource::<ReactOutbox>().send(json!({"t": "event", "name": "raea-frame", "value": f}));
         raea_runtime_react::scene::settle(&mut self.app, Some(f), 5.0)?;
         let t1 = std::time::Instant::now();
         let scene = raea_runtime_react::scene::scene_of(self.app.world_mut());
         raea_runtime_react::scene::edit_dir(&self.dir);
         let (mut rows, gone) = self.ls.frame(raea_runtime_react::scene::Shot { scene: &scene, clear: None });
-        // the shot's camera (and its ambient, which the camera row carries) stay the bake's
-        rows.retain(|t| t.kind != "camera");
+        // the shot's camera (and its ambient, which the camera row carries), lights and post effects (resources) stay
+        // the bake's: a cast made from its chapter computes them too, and sent they'd light the shot twice
+        rows.retain(|t| !matches!(t.kind.as_str(), "camera" | "light" | "resource"));
         if !self.warned {
             let other: std::collections::BTreeSet<String> = rows.iter().filter(|t| !["light", "mesh", "model", "panel", "decal"].contains(&t.kind.as_str())).map(|t| format!("{} {}", t.kind, t.id)).collect();
             if !other.is_empty() {
@@ -95,11 +105,11 @@ impl Drop for Cast {
 
 impl Live {
     /// `--cast CAST.tsx`: live characters drawn into the shots' 3D (cast.rs). Only with `--shots`.
-    pub fn add_cast(&mut self, tsx: &Path) -> R<()> {
+    pub fn add_cast(&mut self, tsx: &Path, input: Option<&Path>) -> R<()> {
         if self.shots.is_none() {
             return Err("--cast plays characters over a chapter's bakes: it needs --shots DIR".into());
         }
-        self.cast = Some(Cast::open(tsx)?);
+        self.cast = Some(Cast::open(tsx, input)?);
         // the frame on screen now gets its characters
         let f = self.frame;
         self.step_cast(f);
@@ -132,9 +142,8 @@ impl Live {
 
     /// The cast at frame `f`, into the engine the shot holds (an error is said, and the scenery plays on).
     pub(crate) fn step_cast(&mut self, f: i64) {
-        let session = self.session;
         let (Some(c), Some(e)) = (self.cast.as_mut(), self.scene.as_mut()) else { return };
-        if let Err(why) = c.step(f, session, e) {
+        if let Err(why) = c.step(f, e) {
             eprintln!("raea play --cast: frame {f}: {why}");
         }
         if std::env::var_os("RAEA_LIVE_TRACE").is_some() && c.cost.0 + c.cost.1 > 10.0 {

@@ -220,7 +220,7 @@ impl ApplicationHandler for Run {
             let Some(d) = arg("--shots") else { return Live::open(tsx, size) };
             let mut l = Live::open_shots(tsx, std::path::Path::new(&d))?;
             if let Some(c) = arg("--cast") {
-                l.add_cast(std::path::Path::new(&c))?;
+                l.add_cast(std::path::Path::new(&c), arg("--cast-input").as_deref().map(std::path::Path::new))?;
             }
             Ok(l)
         };
