@@ -40,6 +40,9 @@ pub(crate) use target::*;
 
 mod open;
 mod load;
+// the next shot made ready off the draw thread, swapped in at the cut (Engine::reload_prepared)
+pub mod prepare;
+pub use prepare::Prepared;
 mod tsort;
 // RAEA_SCENE_STATS: what each frame hands the GPU (draw calls, instances, meshes, materials, lights, stage times)
 mod stats;
