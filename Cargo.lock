@@ -3439,8 +3439,6 @@ dependencies = [
 [[package]]
 name = "bevy_rich_text3d"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97b3cfe8f7187fb6f8e4889b8e7dcf39ff36bf7a84fcbd4f7b69f7d3b8a7bfe4"
 dependencies = [
  "bevy",
  "cosmic-text",
@@ -15123,6 +15121,7 @@ dependencies = [
  "raea-sys-material",
  "raea-sys-mix",
  "raea-sys-page",
+ "serde",
  "serde_json",
  "wgpu",
  "zstd",
