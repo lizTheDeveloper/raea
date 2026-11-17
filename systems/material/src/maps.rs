@@ -178,6 +178,12 @@ pub fn mip_gltfs_textures(gs: &[&Gltf], mats: &Assets<bevy::gltf::GltfMaterial>,
         let Some(mut img) = images.get_mut(&d.0) else { continue };
         img.data = Some(data);
         img.texture_descriptor.mip_level_count = levels;
+        // uploaded, then its pixels let go on the CPU (render world only): nothing reads a model's texture back, and a
+        // 4096 texture with its mips held 85 MB of RAM beside the GPU's copy (Ch5: 505 MB, Ch2: 773 MB in all).
+        // RAEA_KEEP_CPU_TEXTURES=1 keeps them
+        if std::env::var_os("RAEA_KEEP_CPU_TEXTURES").is_none() {
+            img.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
+        }
         let mut sd = match &img.sampler {
             bevy::image::ImageSampler::Descriptor(sd) => sd.clone(),
             _ => bevy::image::ImageSamplerDescriptor::default(),
