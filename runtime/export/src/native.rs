@@ -81,12 +81,37 @@ fn trace() -> bool {
 fn mem_available_gb() -> Option<f64> {
     let t = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kb: f64 = t.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb / 1048576.0)
+    let host = kb / 1048576.0;
+    // in a container /proc/meminfo is the host's (vast 60948090: 381 GB free under a 196 GB cap): the cgroup's room
+    // (its limit less what it uses) caps it, cgroup v2 then v1
+    Some(cgroup_room_gb().map_or(host, |c| c.min(host)))
 }
 
-/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and one per 1 GB of free
-/// memory (a chapter's runtime held about 0.45 GB: Ch5 @2400, 11 runtimes, 7.7 GB peak against 2.7 drawing), each
-/// with at least RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
+/// The memory this process's cgroup has left (limit - usage), in GB; None with no limit (or none readable).
+fn cgroup_room_gb() -> Option<f64> {
+    let num = |p: &str| std::fs::read_to_string(p).ok().and_then(|t| t.trim().parse::<f64>().ok());
+    // v2: memory.max ("max" when unlimited) and memory.current, at the process's own cgroup path (or the root)
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string())));
+    for dir in own.iter().map(|p| format!("/sys/fs/cgroup{p}")).chain(std::iter::once("/sys/fs/cgroup".to_string())) {
+        if let (Some(max), Some(cur)) = (num(&format!("{dir}/memory.max")), num(&format!("{dir}/memory.current"))) {
+            return Some(((max - cur + stat_key(&format!("{dir}/memory.stat"), "inactive_file")) / 1073741824.0).max(0.0));
+        }
+    }
+    // v1: memory.limit_in_bytes (a huge number when unlimited) and memory.usage_in_bytes
+    let (max, cur) = (num("/sys/fs/cgroup/memory/memory.limit_in_bytes")?, num("/sys/fs/cgroup/memory/memory.usage_in_bytes")?);
+    (max < 1e15).then(|| ((max - cur + stat_key("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file")) / 1073741824.0).max(0.0))
+}
+
+/// A cgroup memory.stat line's value (bytes), 0 when absent. The usage counts the page cache, so the room a bake has
+/// gives back the inactive file cache the kernel reclaims first (Lane G2: 60948090's 35.6 GB "current" was 31.4 GB of
+/// file cache and 3.7 GB anonymous; without it a member whose cache grew after rq batches planned one runtime).
+fn stat_key(path: &str, key: &str) -> f64 {
+    std::fs::read_to_string(path).ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix(' ')).and_then(|v| v.trim().parse::<f64>().ok()))).unwrap_or(0.0)
+}
+
+/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and as many as its share of
+/// the free memory holds at what a runtime of this bundle measured (runtime_gb, plus a quarter), each with at least
+/// RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
 /// raea processes running on this machine now, this one included (a member's lanes, which start together): the
 /// cores and memory a bake takes are its share.
 fn raea_processes() -> usize {
@@ -94,12 +119,71 @@ fn raea_processes() -> usize {
     d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).filter(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim().starts_with("raea"))).count().max(1)
 }
 
-fn workers_for(frames: usize) -> usize {
+/// Freed memory handed back to the system (glibc's malloc_trim): a bake's runtimes free gigabytes on their threads'
+/// arenas, which glibc keeps, so the engine opening after them stacked its own on top (Ch5 2400-2549 cold: 8.3-8.8 GB
+/// still resident after the fold, a 15.5-16.4 GB peak against a warm render's). Returns the RSS it gave back (GB).
+fn trim_heap() -> f64 {
+    let before = proc_gb("VmRSS:").unwrap_or(0.0);
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's malloc_trim takes no pointers; it only releases free pages
+        unsafe { malloc_trim(0) };
+    }
+    (before - proc_gb("VmRSS:").unwrap_or(before)).max(0.0)
+}
+
+/// A process's memory line from /proc/self/status (VmRSS, VmHWM), in GB; None where it can't be read.
+fn proc_gb(key: &str) -> Option<f64> {
+    let t = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: f64 = t.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1048576.0)
+}
+
+/// Where each bundle's measured bake footprint is kept (GB a runtime): beside the kept bakes.
+fn footprints_path() -> Option<PathBuf> {
+    cache_dir().map(|d| d.join("footprints.json"))
+}
+
+/// The bundle's identity for its footprint: a hash of its bytes.
+fn bundle_id(js: &Path) -> Option<String> {
+    std::fs::read(js).ok().map(|b| blake3::hash(&b).to_hex()[..16].to_string())
+}
+
+/// GB a bake runtime of this bundle takes: as measured on its last bake here (footprints.json), else RAEA_BAKE_GB
+/// (default 2: the analyst measured ~1.5 GB a runtime on Ch1, 16.7 GB peak for 11 runtimes, which ran a 31 GB member
+/// out of memory when the old rule assumed 1 GB).
+fn runtime_gb(js: &Path) -> f64 {
+    let default = std::env::var("RAEA_BAKE_GB").ok().and_then(|v| v.parse::<f64>().ok()).filter(|g| *g > 0.05).unwrap_or(2.0);
+    let measured = footprints_path().zip(bundle_id(js)).and_then(|(p, id)| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[&id].as_f64()));
+    measured.filter(|g| *g > 0.05).unwrap_or(default)
+}
+
+/// A bake's measured footprint (GB a runtime) kept for its bundle, for the next bake's sizing.
+fn keep_footprint(js: &Path, gb: f64) {
+    let (Some(p), Some(id)) = (footprints_path(), bundle_id(js)) else { return };
+    let mut v: Map<String, Value> = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if v.len() > 512 {
+        v.clear();
+    }
+    v.insert(id, json!((gb * 1000.0).round() / 1000.0));
+    if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
+        let tmp = d.join(format!("footprints.json.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, Value::Object(v).to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+fn workers_for(frames: usize, gb_each: f64) -> usize {
     // its share of the cores and the free memory, beside the other lanes rendering here (three lanes on a 12-core
-    // member each opened 12 runtimes, a runtime's 3.5 s opening paid three times over)
+    // member each opened 12 runtimes, a runtime's 3.5 s opening paid three times over); memory by what a runtime of
+    // this bundle measured (runtime_gb), with a quarter more kept free
     let lanes = raea_processes();
     let cores = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) / lanes).max(1);
-    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / lanes as f64).floor().max(1.0) as usize);
+    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / lanes as f64 / (gb_each * 1.25)).floor().max(1.0) as usize);
     let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(cores.min(32).min(by_mem)).clamp(1, 64);
     let min = std::env::var("RAEA_BAKE_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).max(1);
     want.min(frames.div_ceil(min)).max(1)
@@ -117,7 +201,9 @@ fn stepped_of(wanted: &[i64]) -> Vec<i64> {
 /// <Compute>: every frame before must be stepped, so the shot isn't native).
 fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>, Piece)>> {
     let t0 = std::time::Instant::now();
-    let workers = workers_for(stepped.len());
+    let gb_each = runtime_gb(js);
+    let workers = workers_for(stepped.len(), gb_each);
+    let rss0 = proc_gb("VmRSS:");
     let per = stepped.len().div_ceil(workers);
     let mut pieces: Vec<(i64, i64)> = Vec::new();
     for (a, b) in raea_runtime_bake::runs(stepped) {
@@ -191,7 +277,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     if trace() {
                         eprintln!("raea native: piece {a}..{b}: runtime open {opened:.0} ms, {} frames stepped in {:.0} ms (flush waits {:.0} ms, {} timed out, every runtime)", b - a, t_ms(t) - opened, (ld(&raea_runtime_react::FLUSH_WAIT_NS) - w0) as f64 / 1e6, ld(&raea_runtime_react::FLUSH_TIMEOUTS) - to0);
                     }
-                    page_commits(&mut out, off);
+                    page_commits(&mut out, off)?;
                     kept = Some(app);
                     Ok((conf, out))
                     })();
@@ -221,8 +307,15 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
         }
     }
     all.sort_by_key(|p| p.0);
+    // what a runtime took here (the process's peak over its size before the bake, shared by the pieces), kept for
+    // this bundle's next bake (runtime_gb). The peak is the process's since it began, and nothing before the bake
+    // comes near it (the engine opens after)
+    let measured = proc_gb("VmHWM:").zip(rss0).map(|(hwm, r0)| ((hwm - r0) / pieces.len().max(1) as f64).max(0.1));
+    if let Some(gb) = measured {
+        keep_footprint(js, gb);
+    }
     if trace() {
-        eprintln!("raea native: {} frames baked on {} runtimes in {:.0} ms", all.len(), pieces.len(), t_ms(t0));
+        eprintln!("raea native: {} frames baked on {} runtimes in {:.0} ms ({:.2} GB a runtime planned, {} measured)", all.len(), pieces.len(), t_ms(t0), gb_each, measured.map_or("not".into(), |g| format!("{g:.2} GB")));
     }
     if all.iter().any(|p| raea_runtime_scene::carries_state(&p.2)) {
         return Ok(None);
@@ -246,28 +339,28 @@ fn drop3d() -> bool {
 ///  - text under an element left out goes with it;
 ///  - an insert before a sibling left out goes before the next sibling kept, else to the end (the page's replay skips
 ///    an insert whose `before` it doesn't know, and the node never hung anywhere).
-fn page_commits(piece: &mut Piece, off: u64) {
+fn page_commits(piece: &mut Piece, off: u64) -> R<()> {
     use std::collections::HashSet;
     let moved = |ops: Vec<Value>| -> String { ids_moved_ops(ops, off) };
-    let parse = |j: &str| serde_json::from_str::<Vec<Value>>(j).ok();
+    // a commit that isn't an op array is an error, not a RESET: left as it was it kept its runtime's own ids (colliding
+    // with another piece's) and, with DROP3D, cleared the replay's state as a RESET does
+    let parse = |f: i64, j: &str| serde_json::from_str::<Vec<Value>>(j).map_err(|e| format!("frame {f}'s commit isn't an op array ({e})"));
     if !drop3d() {
-        for (_, ops, _, _) in piece.iter_mut() {
+        for (f, ops, _, _) in piece.iter_mut() {
             for j in ops.iter_mut().filter(|j| j.as_str() != raea_runtime_bake::RESET) {
-                if let Some(v) = parse(j) {
-                    *j = moved(v);
-                }
+                *j = moved(parse(*f, j)?);
             }
         }
-        return;
+        return Ok(());
     }
     let n = |o: &Value, k: &str| o.get(k).and_then(Value::as_u64);
     // what the whole piece says: each node's parent, its 3D elements, its page elements and its text
     let (mut parent, mut d3, mut page, mut text) = (HashMap::<u64, u64>::new(), HashSet::<u64>::new(), Vec::<u64>::new(), Vec::<u64>::new());
     let mut all: Vec<Vec<Option<Vec<Value>>>> = Vec::with_capacity(piece.len());
-    for (_, ops, _, _) in piece.iter() {
+    for (f, ops, _, _) in piece.iter() {
         let mut frame = Vec::with_capacity(ops.len());
         for j in ops {
-            let v = if j.as_str() == raea_runtime_bake::RESET { None } else { parse(j) };
+            let v = if j.as_str() == raea_runtime_bake::RESET { None } else { Some(parse(*f, j)?) };
             for o in v.iter().flatten() {
                 match o.get("op").and_then(Value::as_str) {
                     Some("create") => {
@@ -374,6 +467,7 @@ fn page_commits(piece: &mut Piece, off: u64) {
             *j = moved(keep);
         }
     }
+    Ok(())
 }
 
 /// A commit's node ids moved up by `off` (the root's, 0, stays): a piece's ids kept apart from every other piece's.
@@ -596,8 +690,39 @@ impl<'a> Cur<'a> {
 }
 
 /// The Program from a native-4 header's meta and strings and its binary section.
+/// The most a kept bake may hold once unpacked (RAEA_BAKE_MAX_BYTES; 1 GiB: a heavy native-4 shot is ~30 MB, a native-3
+/// one up to ~230 MB). A larger one is refused before it's parsed (a zstd bomb can't make it allocate past this).
+fn bake_max_bytes() -> u64 {
+    std::env::var("RAEA_BAKE_MAX_BYTES").ok().and_then(|v| v.parse().ok()).filter(|n: &u64| *n > 0).unwrap_or(1 << 30)
+}
+
+/// A kept bake's bytes unpacked, refused past `max` (a bounded decoder: nothing past the limit is allocated).
+fn unzstd_capped(b: &[u8], max: u64) -> R<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    zstd::stream::read::Decoder::new(b).map_err(|e| e.to_string())?.take(max + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    if out.len() as u64 > max {
+        return Err(format!("unpacks past {max} bytes (RAEA_BAKE_MAX_BYTES)"));
+    }
+    Ok(out)
+}
+
+/// The most a native-4 reader copies out of the string table into the Program (2 GiB): each cell and ease naming a
+/// string takes its own copy (V::S holds a String here), so a crafted bake naming one big string from many cells would
+/// multiply it; past this it's refused. (On Arc<str> strings every cell shares one, and this only counts.)
+const STRING_COPY_BUDGET: usize = 2 << 30;
+
 fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
-    let s = |i: usize| strings.get(i).cloned().ok_or_else(|| format!("the bake's 3D names string {i} of {}", strings.len()));
+    prog_from_bin_capped(meta, strings, bin, STRING_COPY_BUDGET)
+}
+
+fn prog_from_bin_capped(meta: &Value, strings: &[String], bin: &[u8], budget: usize) -> R<Program> {
+    let left = std::cell::Cell::new(budget);
+    let s = |i: usize| -> R<String> {
+        let t = strings.get(i).ok_or_else(|| format!("the bake's 3D names string {i} of {}", strings.len()))?;
+        left.set(left.get().checked_sub(t.len()).ok_or("the bake's 3D copies more string bytes than a bake may hold")?);
+        Ok(t.clone())
+    };
     let mut c = Cur { b: bin, at: 0 };
     let mut p = Program {
         fps: meta["fps"].as_f64().ok_or("no fps")?,
@@ -634,7 +759,12 @@ fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
         let fs: Vec<i64> = (0..n).map(|_| c.u64().map(|x| x as i64)).collect::<R<_>>()?;
         let vs: Vec<f64> = (0..n).map(|_| c.u64().map(f64::from_bits)).collect::<R<_>>()?;
         let eases: Vec<String> = match c.u8()? {
-            0 => vec![s(c.u32()?)?; n],
+            0 => {
+                let e = s(c.u32()?)?;
+                // n copies of it: counted against the budget as copies
+                left.set(left.get().checked_sub(e.len().saturating_mul(n.saturating_sub(1))).ok_or("the bake's 3D copies more string bytes than a bake may hold")?);
+                vec![e; n]
+            }
             1 => (0..n).map(|_| c.u32().and_then(&s)).collect::<R<_>>()?,
             t => return Err(format!("the bake's 3D has an ease table of kind {t}")),
         };
@@ -755,15 +885,35 @@ fn cache_dir() -> Option<PathBuf> {
 
 /// The bake's key: the bundle's bytes (the edit, everything it imports, its --input, the runtime bundled in), this
 /// build, the frames stepped, and the settings that change what a frame steps to.
+/// What made a bake, for its key: the source that can change it (build.rs RAEA_BAKE_SRC_HASH), or with
+/// RAEA_BAKE_KEY=binary the whole binary's hash (`binary_id`), and in either case the JS engine it ran on (a V8 bake and
+/// a JavaScriptCore one of the same shot are different bakes: Lane G2 found them sharing a key).
+fn made_by(binary_id: u64, binary: bool, engine: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if binary {
+        h.write_u64(binary_id);
+    } else {
+        h.write(env!("RAEA_BAKE_SRC_HASH").as_bytes());
+    }
+    h.write(b"|engine=");
+    h.write(engine.as_bytes());
+    h.finish()
+}
+
 fn key_of(js: &Path, stepped: &[i64]) -> R<u64> {
-    let mut key: u64 = 0xcbf2_9ce4_8422_2325 ^ build_id();
+    // what made the bake: the source that can change it (build.rs RAEA_BAKE_SRC_HASH: drawing-, capture- and GPU-only
+    // pins keep every kept bake) and the JS engine it ran on; RAEA_BAKE_KEY=binary keys by the whole binary as before
+    let binary = std::env::var("RAEA_BAKE_KEY").as_deref() == Ok("binary");
+    let made = made_by(if binary { build_id() } else { 0 }, binary, &std::env::var("BEVY_TSX_ENGINE").unwrap_or_default());
+    let mut key: u64 = 0xcbf2_9ce4_8422_2325 ^ made;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
             key = (key ^ *b as u64).wrapping_mul(0x100_0000_01b3);
         }
     };
     eat(&std::fs::read(js).map_err(|e| format!("{}: {e}", js.display()))?);
-    eat(format!("native-4|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
+    eat(format!("native-4s|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
     for v in ["RAEA_NATIVE_DROP3D", "RAEA_HIDE_LAYERS", "RAEA_CAMERA", "RAEA_ENGINE_READS", "RAEA_SOURCE_STAMPS", "RAEA_LAYERS"] {
         eat(format!("|{v}={:?}", std::env::var(v).ok()).as_bytes());
     }
@@ -982,7 +1132,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         let mut bin: Option<Vec<u8>> = None;
         let read = std::fs::read(p)
             .map_err(|e| e.to_string())
-            .and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string()))
+            .and_then(|b| unzstd_capped(&b[..], bake_max_bytes()))
             .and_then(split_kept)
             .map(|(t, b)| {
                 mark("zstd");
@@ -1075,7 +1225,23 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         eprintln!("raea native: the Program folded over {} frames in {:.0} ms", piece.len(), t_ms(t1));
     }
     raea_runtime_react::startup_mark("the shot's bake: Program folded");
+    // the stepped frames' scenes go with the fold (only the ops are kept below); what the runtimes and the scenes
+    // freed is handed back before the engine opens
     let ops: Vec<(i64, Vec<String>)> = piece.into_iter().map(|(f, o, _, _)| (f, o)).collect();
+    // the runtimes' JS threads end after their Apps go, on their own; their engines' memory is freed as they end,
+    // so wait for them (up to 3 s) before handing it back (V8's isolates took longer than the fold: 3 GB stayed)
+    let waited = std::time::Instant::now();
+    while raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst) > 0 && waited.elapsed() < std::time::Duration::from_secs(3) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let left = raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst);
+    if left > 0 {
+        eprintln!("WARN  native: {left} bake runtimes' JS threads still running 3 s after the bake; their memory is handed back as they end (later), not before the engine opens");
+    }
+    let trimmed = trim_heap();
+    if trace() {
+        eprintln!("raea native: {trimmed:.2} GB handed back after the bake (malloc_trim; JS threads ended in {:.0} ms, {} still running)", t_ms(waited), raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst));
+    }
     let shot = Shot { w, h, fps, total, ops, prog: prog.map(std::sync::Arc::new) };
     if let Some(p) = path {
         // kept on a thread of its own while the engine opens (1.6-2.1 s on Ch5 that frame one waited for); the render
@@ -1712,6 +1878,71 @@ mod bin_tests {
         let mut huge = bin.clone();
         huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(prog_from_bin(&meta, &st.list, &huge).is_err(), "a count past the bytes");
+    }
+
+    #[test]
+    fn a_big_string_named_many_times_is_refused() {
+        // one 1 MB string named by 2,000 cells: 2 GB of copies against a 64 MB budget
+        let mut p = Program { fps: 30.0, width: 8, height: 8, frames: 1, ..Default::default() };
+        let big = "x".repeat(1 << 20);
+        let rows: Vec<BTreeMap<String, V>> = (0..2000).map(|i| [("id".to_string(), V::S(format!("m{i}"))), ("shape".to_string(), V::S(big.clone()))].into_iter().collect()).collect();
+        p.spawns.push(("mesh".into(), rows));
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        let meta = json!({"fps": 30, "width": 8, "height": 8, "frames": 1});
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, 64 << 20).is_err(), "an oversized copy refused");
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, usize::MAX).is_ok());
+    }
+
+    #[test]
+    fn a_huge_ease_count_is_refused() {
+        // a track claiming 1e9 keys with one ease string for all: refused by the bytes it holds, never allocated
+        let mut b: Vec<u8> = Vec::new();
+        let u = |b: &mut Vec<u8>, x: u32| b.extend_from_slice(&x.to_le_bytes());
+        u(&mut b, 0); // no spawns
+        u(&mut b, 1); // one track
+        u(&mut b, 0); u(&mut b, 0); u(&mut b, 1_000_000_000);
+        let meta = json!({"fps": 30, "width": 8, "height": 8, "frames": 1});
+        assert!(prog_from_bin(&meta, &["a".to_string()], &b).is_err());
+        // an honest count whose one ease would be copied past the budget
+        let mut p = Program { fps: 30.0, width: 8, height: 8, frames: 1, ..Default::default() };
+        let ease = "e".repeat(1 << 16);
+        p.keys.insert(("a".into(), "x".into()), (0..4096).map(|f| (f as i64, 0.0, ease.clone())).collect());
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, 64 << 20).is_err(), "4096 copies of a 64 KB ease past 64 MB");
+    }
+
+    #[test]
+    fn a_zstd_bomb_is_refused() {
+        let bomb = zstd::encode_all(&vec![0u8; 64 << 20][..], 19).unwrap();
+        assert!(bomb.len() < 1 << 16, "a small file");
+        assert!(unzstd_capped(&bomb, 8 << 20).is_err(), "unpacking past the cap refused");
+        assert_eq!(unzstd_capped(&bomb, 64 << 20).unwrap().len(), 64 << 20);
+    }
+
+    #[test]
+    fn a_commit_that_isnt_ops_fails_the_bake() {
+        // (a piece: a RESET and the tree, then a frame whose commit is cut short)
+        let mut piece: Piece = vec![
+            (10, vec![raea_runtime_bake::RESET.to_string(), "[]".to_string()], Vec::new(), None),
+            (11, vec!["[{\"op\":\"update\",\"id\":3".to_string()], Vec::new(), None),
+        ];
+        let e = page_commits(&mut piece, 1 << 36).unwrap_err();
+        assert!(e.contains("frame 11"), "{e}");
+        let mut fine: Piece = vec![(10, vec![raea_runtime_bake::RESET.to_string(), "[]".to_string()], Vec::new(), None)];
+        assert!(page_commits(&mut fine, 1 << 36).is_ok());
+    }
+
+    #[test]
+    fn the_engine_is_in_the_key() {
+        // a V8 bake and a JavaScriptCore one never share a key, in either key mode
+        for binary in [false, true] {
+            let (jsc, v8, qjs) = (made_by(7, binary, "jsc"), made_by(7, binary, "v8"), made_by(7, binary, ""));
+            assert!(jsc != v8 && jsc != qjs && v8 != qjs, "binary={binary}");
+            assert_eq!(jsc, made_by(7, binary, "jsc"));
+        }
+        assert_ne!(made_by(7, true, "jsc"), made_by(8, true, "jsc"), "the binary's hash counts in binary mode");
     }
 
     #[test]

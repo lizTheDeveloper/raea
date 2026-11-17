@@ -184,7 +184,9 @@ impl Plugin for ReactPlugin {
                 layout::ASK.with(|a| *a.borrow_mut() = Some(js_ask));
                 // JavaScriptCore on Apple (the system's engine, the JIT on with the entitlement tools/link-jit.sh signs in),
                 // QuickJS elsewhere
-                js_thread(bundle, tx, out_rx)
+                JS_LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                js_thread(bundle, tx, out_rx);
+                JS_LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             })
             .expect("the JS thread");
         app.insert_resource(ask);
@@ -228,6 +230,8 @@ pub static JS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// names it
 static JS_CALL_WHO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static JS_RUNTIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// JS threads running now (each runtime's; a bake waits for its runtimes' to end before it hands their memory back)
+pub static JS_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 thread_local! {
     static JS_RUNTIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }

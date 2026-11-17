@@ -55,3 +55,7 @@ serde = { version = "1", features = ["derive"] }
 # the frames' pages written as assets, on workers
 raea-runtime-pagestore = { path = "../../runtime/pagestore" }
 wgpu = "=30.0.1"
+
+[build-dependencies]
+# the bake key's source hash (build.rs)
+blake3 = "1"

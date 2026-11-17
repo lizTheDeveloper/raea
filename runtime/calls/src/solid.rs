@@ -70,6 +70,23 @@ fn bake(m: &Manifold) -> R<String> {
     Ok(format!("obj({:?})", path.display().to_string()))
 }
 
+/// Expressions `solid.make` has built in this process (each built without error and not empty), so a repeat can skip
+/// the build (solid.make). Bounded: cleared past 65,536 (a scene's primitives are far fewer).
+static MADE: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+fn made_before(expr: &str) -> bool {
+    MADE.lock().unwrap().as_ref().is_some_and(|m| m.contains(expr))
+}
+
+fn remember_made(expr: &str) {
+    let mut g = MADE.lock().unwrap();
+    let m = g.get_or_insert_with(Default::default);
+    if m.len() >= 65_536 {
+        m.clear();
+    }
+    m.insert(expr.to_string());
+}
+
 /// Polygons given as [[[x, y], ...], ...] in the polygon string raea-render's shape language reads.
 fn polygons_text(v: &Value) -> R<String> {
     let polys = v.get("polygons").and_then(Value::as_array).ok_or("polygons: [[[x, y], ...], ...]")?;
@@ -122,7 +139,15 @@ pub(super) fn call(st: &mut State, name: &str, v: &Value) -> R<Value> {
         "solid.make" => {
             let fun = s(v, "fn")?;
             let expr = format!("{fun}({})", args(v).iter().map(arg_text).collect::<Vec<_>>().join(", "));
+            // an expression this process has built before is known good: its solid is held as the expression and built
+            // only if something asks for the solid itself (a query, a mesh, an export), as a boolean's is. A scene
+            // remaking its primitives every frame built each one every frame: Ch1 @22800's bake made 49,227 solids in
+            // 150 frames, 26.5 s of its 69 s of JavaScript. A new expression is built now, so a bad one still fails here.
+            if made_before(&expr) {
+                return Ok(st.put_later(expr));
+            }
             let m = raea_core_shape::solid(&expr)?;
+            remember_made(&expr);
             Ok(st.put(m, expr))
         }
         "solid.combine" => {
