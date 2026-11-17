@@ -165,6 +165,8 @@ pub fn live_scene(world: &mut World, ls: &mut LiveScene, engine: &mut Option<rae
             }
             if !rows.is_empty() {
                 e.set_rows(&rows)?;
+                // the textures these rows started loading, loaded before the frame draws (Engine::await_new_loads)
+                e.await_new_loads()?;
             }
         }
     }

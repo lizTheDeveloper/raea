@@ -186,6 +186,8 @@ impl Cast {
             // over the shot's timeline: its camera, cuts and keyed parts keep moving under the cast (set_rows took every
             // row over at the clock, and the shot's 3D froze at its first frame with the cast on)
             engine.set_rows_over(&rows)?;
+            // the textures the cast's rows started loading, loaded before the frame draws (Engine::await_new_loads)
+            engine.await_new_loads()?;
         }
         if self.direct && changed {
             self.lay_over(engine)?;

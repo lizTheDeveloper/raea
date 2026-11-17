@@ -12,6 +12,24 @@ impl Engine {
     /// Another program of the same size loaded into this engine as a fresh one opens it: the World's rows replaced
     /// (load_shared) and warmed up by the same 8 updates (finish_build), its device, pipelines, models and textures
     /// kept. A served process's next native shot (docs/native-shots.md).
+    /// (lane a, 2026-11-17) The assets a live frame's rows started loading by path (a material's textures: a
+    /// <StandardMaterial base_color_texture>), loaded before that frame draws, as a game's loading step: a row that
+    /// first appears mid-run (a cold seek straight to it, a cut to a new shot) drew without its textures, and a seek
+    /// to the same frame again applied nothing new, so it stayed bare (butterfly-v3-live cold f291/645/1005). Loads
+    /// already done are dropped from the list, so a frame that starts none waits for nothing.
+    pub fn await_new_loads(&mut self) -> Result<(), String> {
+        {
+            let world = self.app.world_mut();
+            let server = world.resource::<AssetServer>().clone();
+            let Some(mut l) = world.get_resource_mut::<plugins::Loading>() else { return Ok(()) };
+            l.0.retain(|(_, h)| !matches!(server.get_recursive_dependency_load_state(h.id()), Some(bevy::asset::RecursiveDependencyLoadState::Loaded)));
+            if l.0.is_empty() {
+                return Ok(());
+            }
+        }
+        plugins::await_loads(&mut self.app)
+    }
+
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
         self.reload_with(&std::sync::Arc::new(prog.clone()), inserted, None, false)
     }
