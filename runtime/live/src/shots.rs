@@ -99,7 +99,8 @@ impl Live {
         self.shots.as_ref().map(|s| s.files[0].0)
     }
 
-    /// A shot read in: its commits laid into the timeline, its Program kept; shots more than one behind or two ahead let go.
+    /// A shot read in: its commits laid into the timeline, its Program kept; every other shot but the next let go (a
+    /// Program holds its shot's every frame: about 42 MB a frame held on Ch5, Lane C; a bake is ~2 MB to read again).
     fn take_shot(&mut self, i: usize, b: raea_runtime_export::ShotBake) {
         let (Some(s), Some(baked)) = (self.shots.as_mut(), self.baked.as_mut()) else { return };
         let Some(t) = Arc::get_mut(baked) else { return };
@@ -111,7 +112,7 @@ impl Live {
         if let Some(p) = b.prog {
             s.progs.insert(i, Arc::new(p));
         }
-        let gone: Vec<usize> = s.progs.keys().copied().filter(|&k| k + 1 < i || k > i + 2).collect();
+        let gone: Vec<usize> = s.progs.keys().copied().filter(|&k| k != i && k != i + 1).collect();
         for k in gone {
             s.progs.remove(&k);
             let (lo, hi, _) = s.files[k];
