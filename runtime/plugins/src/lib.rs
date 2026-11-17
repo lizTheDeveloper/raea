@@ -138,6 +138,46 @@ pub fn install(app: &mut App, fps: f64) {
     install_list(app, fps, list);
 }
 
+/// `install`, for an edit whose rows give no plugin anything to do (`steps` false: a film's shot) when `lean`: the
+/// plugins that only answer rows (physics, particles, tilemaps, UI kits...) are left out, so their hundreds of systems
+/// don't run every update for nothing; `keep` names the ones kept (asset loaders the scene's files may need).
+/// RAEA_LEAN_PLUGINS=0: every plugin, as `install`.
+pub fn install_lean(app: &mut App, fps: f64, lean: bool) {
+    let lean = lean && std::env::var("RAEA_LEAN_PLUGINS").as_deref() != Ok("0");
+    if !lean {
+        return install(app, fps);
+    }
+    let keep: Vec<String> = std::env::var("RAEA_LEAN_KEEP").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_else(|_| LEAN_KEEP.iter().map(|s| s.to_string()).collect());
+    let names: Vec<&'static str> = PLUGINS.lock().unwrap().iter().filter(|r| !r.on_demand && keep.iter().any(|k| k == r.name)).map(|r| r.name).collect();
+    install_some(app, fps, &names);
+}
+
+/// Whether engines opened from now on may be lean (`install_lean`): a native shot's draw sets it; live play, which may
+/// take input and run a game's plugins, doesn't.
+pub static LEAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The plugins a lean engine keeps: the asset plugins, and trenchbroom, which changes a film's pixels (Ch5 @2400 is
+/// 53.6 dB without it, identical with it; found by leaving out each plugin in turn).
+const LEAN_KEEP: &[&str] = &["bevy", "common_assets", "trenchbroom"];
+
+/// `install` with only the plugins named (each registered and not on demand).
+fn install_some(app: &mut App, fps: f64, names: &[&str]) {
+    app.register_type::<ButtonInput<KeyCode>>();
+    app.register_type::<ButtonInput<MouseButton>>();
+    app.register_type::<raea_sys_frame::layer::LayerKey>();
+    app.register_type_data::<core::ops::Range<f32>, ReflectDeserialize>();
+    app.register_type_data::<core::ops::Range<f32>, ReflectSerialize>();
+    raea_bevy_world::register_natives();
+    raea_bevy_world::claim();
+    app.add_systems(First, raea_bevy_world::drain);
+    world_methods(app);
+    character::register(app);
+    shader_material::install(app);
+    keyed(app);
+    let list: Vec<fn(&mut App)> = PLUGINS.lock().unwrap().iter().filter(|r| names.contains(&r.name)).map(|r| r.install).collect();
+    install_list(app, fps, list);
+}
+
 /// Adds the plugins named, in that order, and the frame clock: a host's own headless App (raea-bevy-plugins' bridge,
 /// which TypeScript drives) gets exactly the plugins it asks for. An unregistered name is an error that lists the
 /// registered ones.
