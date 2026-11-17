@@ -37,9 +37,11 @@ fn imports(src: &str) -> Vec<String> {
     out
 }
 
-/// The composition's own files: it and its relative imports, followed.
+/// The composition's own files: it and its relative imports, followed. A data file it imports (a .json: story data,
+/// the gait tables, lip-sync; any other non-code file) is watched too, but not read for imports.
 pub(crate) fn closure(entry: &Path) -> Vec<PathBuf> {
     let mut seen: Vec<PathBuf> = Vec::new();
+    let mut data: Vec<PathBuf> = Vec::new();
     let mut todo = vec![entry.to_path_buf()];
     while let Some(f) = todo.pop() {
         let f = f.canonicalize().unwrap_or(f);
@@ -54,9 +56,16 @@ pub(crate) fn closure(entry: &Path) -> Vec<PathBuf> {
             let cands = [b.clone(), b.with_extension("ts"), b.with_extension("tsx"), PathBuf::from(format!("{}.ts", b.display())), PathBuf::from(format!("{}.tsx", b.display())), b.join("index.ts"), b.join("index.tsx")];
             if let Some(hit) = cands.into_iter().find(|c| c.is_file() && c.extension().is_some_and(|e| e == "ts" || e == "tsx")) {
                 todo.push(hit);
+            } else if b.is_file() {
+                let b = b.canonicalize().unwrap_or(b);
+                if !data.contains(&b) {
+                    data.push(b);
+                }
             }
         }
     }
+    let extra: Vec<PathBuf> = data.into_iter().filter(|d| !seen.contains(d)).collect();
+    seen.extend(extra);
     seen
 }
 
@@ -96,6 +105,23 @@ impl Watch {
 
 #[cfg(test)]
 mod tests {
+    /// An imported .json is watched (S44: an edit to story data or a gait table reloaded nothing), and isn't read for
+    /// imports; code imports are followed as before.
+    #[test]
+    fn data_imports_watched() {
+        let d = std::env::temp_dir().join(format!("raea-watch-test-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("fx")).unwrap();
+        std::fs::write(d.join("a.tsx"), "import x from \"./story.json\";\nimport { b } from \"./fx/b\";").unwrap();
+        std::fs::write(d.join("fx/b.ts"), "import g from \"../gaits.json\";\nexport const b = 1;").unwrap();
+        std::fs::write(d.join("story.json"), "{\"from\": \"./not-followed\"}").unwrap();
+        std::fs::write(d.join("gaits.json"), "{}").unwrap();
+        let got: Vec<String> = super::closure(&d.join("a.tsx")).iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
+        let _ = std::fs::remove_dir_all(&d);
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["a.tsx", "b.ts", "gaits.json", "story.json"]);
+    }
+
     #[test]
     fn imports_found() {
         let src = "import React from \"react\";\nimport { a } from './fx/a';\nimport \"../side\";\nconst m = await import(\"./lazy\");\nconst s = \"./not-an-import\";\nexport { b } from \"./b\";";
