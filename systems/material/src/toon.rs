@@ -515,15 +515,25 @@ pub struct ToonPartOf {
 /// materials it made, where the spec gives one: they were the colour of the frame the model's materials were swapped
 /// on, for the whole batch. Written only when it moves past the columns' rounding (1e-4), so a colour that never changes
 /// stays exactly the one spawned; its alpha (opacity, sync_surfaces) is kept.
-pub fn sync_model_toons(frame: Res<FrameRows>, mut mats: ResMut<Assets<ToonMaterial>>, parts: Query<(&ToonPartOf, &MeshMaterial3d<ToonMaterial>), With<ToonOwnColour>>, mut roots: Local<HashMap<Entity, Option<std::collections::BTreeMap<String, V>>>>) {
-    // each root's row read once a frame (a model has many toon parts), and none for a root whose row is still
-    roots.clear();
+pub fn sync_model_toons(frame: Res<FrameRows>, mut mats: ResMut<Assets<ToonMaterial>>, parts: Query<(&ToonPartOf, &MeshMaterial3d<ToonMaterial>), With<ToonOwnColour>>, mut names: Local<Vec<[String; 3]>>) {
+    // each part's root read where its values are (FrameRows::row), none for a root whose row is still; the column names
+    // made once per spec (a model has many toon parts: each copied its root's whole row and formatted four names a frame,
+    // 17 ms a frame on Ch1 @22800)
     for (of, h) in &parts {
-        let v = roots.entry(of.root).or_insert_with(|| if frame.still(of.root) { None } else { frame.vals(of.root).map(|v| v.into_owned()) });
-        let Some(v) = v.as_ref() else { continue };
-        let p = format!("tc{}_", of.spec);
-        let Some(r) = v.get(&format!("{p}col_r")).map(|x| x.num() as f32) else { continue };
-        let (g, b) = (num(v, &format!("{p}col_g"), r), num(v, &format!("{p}col_b"), r));
+        if frame.still(of.root) {
+            continue;
+        }
+        while names.len() <= of.spec {
+            let i = names.len();
+            names.push(["col_r", "col_g", "col_b"].map(|k| format!("tc{i}_{k}")));
+        }
+        let Some(v) = frame.row(of.root) else { continue };
+        let ks = &names[of.spec];
+        if !v.contains_key(&ks[0]) {
+            continue;
+        }
+        let r = v.num(&ks[0], 0.0);
+        let (g, b) = (v.num(&ks[1], r), v.num(&ks[2], r));
         let Some(cur) = mats.get(&h.0) else { continue };
         let have = cur.base.base_color.to_srgba();
         if (have.red - r).abs() > 1e-4 || (have.green - g).abs() > 1e-4 || (have.blue - b).abs() > 1e-4 {

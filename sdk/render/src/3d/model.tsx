@@ -262,7 +262,7 @@ function flattenGraph(root: AnimGraphNode, time: number): Record<string, unknown
     if (!(w >= 0 && Number.isFinite(w))) throw new RangeError(`Model: graph${path}.weight is 0 or more, got ${w}`);
     if (n.mask !== undefined && !(Array.isArray(n.mask) && n.mask.every((m) => typeof m === "string"))) throw new TypeError(`Model: graph${path}.mask is a list of bone names`);
     const i = out.length;
-    if (i >= 16) throw new RangeError("Model: graph has at most 16 nodes");
+    if (i >= 64) throw new RangeError("Model: graph has at most 64 nodes");
     if ("clip" in n) {
       if (!(typeof n.clip === "string" || (Number.isInteger(n.clip) && (n.clip as number) >= 0))) throw new TypeError(`Model: graph${path}.clip is a clip's name or index`);
       const t = n.time ?? time;
