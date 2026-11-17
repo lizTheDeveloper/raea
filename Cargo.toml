@@ -291,6 +291,9 @@ opt-level = "z"
 split-debuginfo = "packed"
 
 [patch.crates-io]
+# bevy_rich_text3d 0.8.0 with each text's random per-glyph values seeded from its own content (changes marked "raea:"):
+# a kept engine's or a long batch's earlier text changed them
+bevy_rich_text3d = { path = "vendor/bevy_rich_text3d" }
 # the MP4 muxer, vendored
 muxide = { path = "vendor/muxide" }
 # usvg 0.48.1 spacing a chunk's last letter as Chrome does (changes marked "raea:", docs/layout-reads.feature LR10)

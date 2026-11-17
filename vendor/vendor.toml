@@ -178,3 +178,10 @@ upstream = "crates.io:0.48.1"
 kind = "patch"
 reason = "letter-spacing after a text chunk's last letter too, as Chrome spaces it (an anchored svg text was drawn half a spacing off and measured a spacing wide)"
 exit = "a usvg release that spaces the last cluster, or none: usvg drops it on purpose"
+
+[bevy_rich_text3d]
+path = "vendor/bevy_rich_text3d"
+upstream = "crates.io:0.8.0"
+kind = "patch"
+reason = "text_render's per-glyph random values (RandomPerGlyph/RandomPerVertex) seeded per text from its content, not from a generator that carries every earlier text in the process: a kept engine or a long batch drew a shot's 3D text differently from the shot drawn fresh"
+exit = "an upstream rich_text3d that seeds per text (or a Resource RNG a host can reset); then drop the copy"
