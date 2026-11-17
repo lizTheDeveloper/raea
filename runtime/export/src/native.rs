@@ -71,9 +71,9 @@ fn mem_available_gb() -> Option<f64> {
     Some(kb / 1048576.0)
 }
 
-/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and one per 1 GB of free
-/// memory (a chapter's runtime held about 0.45 GB: Ch5 @2400, 11 runtimes, 7.7 GB peak against 2.7 drawing), each
-/// with at least RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
+/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and as many as its share of
+/// the free memory holds at what a runtime of this bundle measured (runtime_gb, plus a quarter), each with at least
+/// RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
 /// raea processes running on this machine now, this one included (a member's lanes, which start together): the
 /// cores and memory a bake takes are its share.
 fn raea_processes() -> usize {
@@ -81,12 +81,55 @@ fn raea_processes() -> usize {
     d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).filter(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim().starts_with("raea"))).count().max(1)
 }
 
-fn workers_for(frames: usize) -> usize {
+/// A process's memory line from /proc/self/status (VmRSS, VmHWM), in GB; None where it can't be read.
+fn proc_gb(key: &str) -> Option<f64> {
+    let t = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: f64 = t.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1048576.0)
+}
+
+/// Where each bundle's measured bake footprint is kept (GB a runtime): beside the kept bakes.
+fn footprints_path() -> Option<PathBuf> {
+    cache_dir().map(|d| d.join("footprints.json"))
+}
+
+/// The bundle's identity for its footprint: a hash of its bytes.
+fn bundle_id(js: &Path) -> Option<String> {
+    std::fs::read(js).ok().map(|b| blake3::hash(&b).to_hex()[..16].to_string())
+}
+
+/// GB a bake runtime of this bundle takes: as measured on its last bake here (footprints.json), else RAEA_BAKE_GB
+/// (default 2: the analyst measured ~1.5 GB a runtime on Ch1, 16.7 GB peak for 11 runtimes, which ran a 31 GB member
+/// out of memory when the old rule assumed 1 GB).
+fn runtime_gb(js: &Path) -> f64 {
+    let default = std::env::var("RAEA_BAKE_GB").ok().and_then(|v| v.parse::<f64>().ok()).filter(|g| *g > 0.05).unwrap_or(2.0);
+    let measured = footprints_path().zip(bundle_id(js)).and_then(|(p, id)| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[&id].as_f64()));
+    measured.filter(|g| *g > 0.05).unwrap_or(default)
+}
+
+/// A bake's measured footprint (GB a runtime) kept for its bundle, for the next bake's sizing.
+fn keep_footprint(js: &Path, gb: f64) {
+    let (Some(p), Some(id)) = (footprints_path(), bundle_id(js)) else { return };
+    let mut v: Map<String, Value> = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if v.len() > 512 {
+        v.clear();
+    }
+    v.insert(id, json!((gb * 1000.0).round() / 1000.0));
+    if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
+        let tmp = d.join(format!("footprints.json.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, Value::Object(v).to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+fn workers_for(frames: usize, gb_each: f64) -> usize {
     // its share of the cores and the free memory, beside the other lanes rendering here (three lanes on a 12-core
-    // member each opened 12 runtimes, a runtime's 3.5 s opening paid three times over)
+    // member each opened 12 runtimes, a runtime's 3.5 s opening paid three times over); memory by what a runtime of
+    // this bundle measured (runtime_gb), with a quarter more kept free
     let lanes = raea_processes();
     let cores = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) / lanes).max(1);
-    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / lanes as f64).floor().max(1.0) as usize);
+    let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / lanes as f64 / (gb_each * 1.25)).floor().max(1.0) as usize);
     let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(cores.min(32).min(by_mem)).clamp(1, 64);
     let min = std::env::var("RAEA_BAKE_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).max(1);
     want.min(frames.div_ceil(min)).max(1)
@@ -104,7 +147,9 @@ fn stepped_of(wanted: &[i64]) -> Vec<i64> {
 /// <Compute>: every frame before must be stepped, so the shot isn't native).
 fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>, Piece)>> {
     let t0 = std::time::Instant::now();
-    let workers = workers_for(stepped.len());
+    let gb_each = runtime_gb(js);
+    let workers = workers_for(stepped.len(), gb_each);
+    let rss0 = proc_gb("VmRSS:");
     let per = stepped.len().div_ceil(workers);
     let mut pieces: Vec<(i64, i64)> = Vec::new();
     for (a, b) in raea_runtime_bake::runs(stepped) {
@@ -208,8 +253,15 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
         }
     }
     all.sort_by_key(|p| p.0);
+    // what a runtime took here (the process's peak over its size before the bake, shared by the pieces), kept for
+    // this bundle's next bake (runtime_gb). The peak is the process's since it began, and nothing before the bake
+    // comes near it (the engine opens after)
+    let measured = proc_gb("VmHWM:").zip(rss0).map(|(hwm, r0)| ((hwm - r0) / pieces.len().max(1) as f64).max(0.1));
+    if let Some(gb) = measured {
+        keep_footprint(js, gb);
+    }
     if trace() {
-        eprintln!("raea native: {} frames baked on {} runtimes in {:.0} ms", all.len(), pieces.len(), t_ms(t0));
+        eprintln!("raea native: {} frames baked on {} runtimes in {:.0} ms ({:.2} GB a runtime planned, {} measured)", all.len(), pieces.len(), t_ms(t0), gb_each, measured.map_or("not".into(), |g| format!("{g:.2} GB")));
     }
     if all.iter().any(|p| raea_runtime_scene::carries_state(&p.2)) {
         return Ok(None);
