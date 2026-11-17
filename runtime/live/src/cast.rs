@@ -9,7 +9,9 @@
 
 use super::*;
 
-/// the cast's rows are numbered from here (`model1000000`...), a baked Program's from 0
+/// the cast's rows are numbered from here (`model1000000`...), a baked Program's from 0. Why a million: a heavy Ch5 shot
+/// has a few thousand rows of a kind. A Program that reaches it is refused loudly at the cut (Cast::clear_of), never
+/// drawn with ids that collide.
 const CAST_IDS: usize = 1_000_000;
 
 pub(crate) struct Cast {
@@ -60,6 +62,22 @@ impl Cast {
         &self.tsx
     }
 
+    /// Whether a shot's Program numbers any row at or past CAST_IDS (the cast's own ids would then collide with it):
+    /// looked at once a cut, the spawns' ids only.
+    pub(crate) fn clear_of(prog: &raea_core_program::ir::Program) -> Result<(), String> {
+        for (kind, rows) in &prog.spawns {
+            for r in rows {
+                if let Some(raea_core_program::ir::V::S(id)) = r.get("id")
+                    && let Ok(n) = id.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<usize>()
+                    && n >= CAST_IDS
+                {
+                    return Err(format!("the shot's {kind} row {id} is numbered past the cast's first id ({CAST_IDS}): the cast would draw over it"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The engine was reloaded or made again (another shot): every cast row is set into it afresh next step.
     pub(crate) fn reset(&mut self) {
         self.ls = raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS);
@@ -80,9 +98,10 @@ impl Cast {
         // the bake's: a cast made from its chapter computes them too, and sent they'd light the shot twice
         rows.retain(|t| !matches!(t.kind.as_str(), "camera" | "light" | "resource"));
         if !self.warned {
+            // looked at once, on the first frame with rows (not rebuilt every frame)
+            self.warned = !rows.is_empty();
             let other: std::collections::BTreeSet<String> = rows.iter().filter(|t| !["light", "mesh", "model", "panel", "decal"].contains(&t.kind.as_str())).map(|t| format!("{} {}", t.kind, t.id)).collect();
             if !other.is_empty() {
-                self.warned = true;
                 eprintln!("raea play --cast: rows by the render's own ids, which a bake may name too: {}", other.into_iter().take(12).collect::<Vec<_>>().join(", "));
             }
         }

@@ -236,6 +236,11 @@ impl Live {
         // the engine holds only the new shot's rows now: the cast is set into it whole at its next step
         if let Some(c) = self.cast.as_mut() {
             c.reset();
+            // a shot whose rows reach the cast's ids: the cast is stopped, loudly (never drawn colliding)
+            if let Err(why) = super::cast::Cast::clear_of(&prog) {
+                eprintln!("raea play --cast: {why}; the cast is off from here");
+                self.cast = None;
+            }
         }
         trim();
         raea_io_trace::event("shot", serde_json::json!({"shot": i, "ms": t.elapsed().as_secs_f64() * 1e3, "reloaded": kept, "prepared": was_prepared}));
