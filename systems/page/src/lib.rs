@@ -218,6 +218,17 @@ pub fn paint(mut docs: NonSendMut<Docs>, pages: Query<(Entity, &Page, &PageImage
         let print_now = painter.print();
         if let Some(s) = painter.split.as_mut() {
             s.finish(print_now);
+            // each piece's print from what it draws alone (its encoding), so a change in one piece (a sky gradient
+            // under the slot) leaves the others' renders kept; the page's blend space in each
+            let linear_bit = (doc.query_selector("[data-raea-blend=linear]").ok().flatten().is_some() as u64) << 63;
+            let mut prints = vec![s.prefix.encoding().fingerprint() ^ linear_bit];
+            for seg in &s.segments {
+                prints.push(match seg {
+                    raea_sys_filters::split::Segment::Fills(sc) => sc.encoding().fingerprint(),
+                    raea_sys_filters::split::Segment::Layer { scene, mask } => scene.encoding().fingerprint() ^ mask.encoding().fingerprint().rotate_left(1),
+                } ^ linear_bit);
+            }
+            s.prints = prints;
         }
         let split = painter.split.take().filter(|s| {
             if !s.usable() && std::env::var_os("RAEA_SLOT_CACHE_WHY").is_some() {
