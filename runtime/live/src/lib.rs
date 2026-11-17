@@ -19,6 +19,7 @@ mod pick3d;
 pub use pick3d::want_wire;
 pub use sound::warm_audio;
 mod draw;
+mod shots;
 
 type R<T> = Result<T, String>;
 
@@ -75,6 +76,8 @@ pub struct Live {
     /// this session's seed and the time (ms) its frame 0 is at: its Math.random and Date (motion/pure.ts), sent with each
     /// frame and kept in an input log, so a replay draws what was played
     session: (u32, f64),
+    /// `--shots`: a chapter played from its native-shot bakes, the 3D engine following the shot (shots.rs)
+    shots: Option<shots::Shots>,
 }
 
 /// A live session's seed and start: RAEA_SEED when it's set (a test), else from the clock and the process

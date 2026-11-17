@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 concurrency:
   group: mac-live
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   # the play crate checked and its watch test run on Linux first: a compile error shows in minutes, not after the Mac's build
   check:

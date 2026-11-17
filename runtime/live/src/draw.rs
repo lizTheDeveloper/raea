@@ -118,6 +118,7 @@ impl Live {
     /// layered slot (its engine opened when its rows arrive, each <Screen>'s picture as the page last drew it copied in,
     /// this frame drawn) and the elements holding the 3D see-through, as a render draws them. Its picture is `texture`.
     pub fn draw(&mut self) -> R<()> {
+        self.follow_shot(self.frame);
         self.open_scene();
         let slot = if self.scene.is_some() { raea_runtime_react::scene::scene_slot(self.app.world_mut()) } else { None };
         // a camera in a box of the page (docs/sdk.feature S3a; it was at the last frame): the page laid out first, the

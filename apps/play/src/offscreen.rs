@@ -22,7 +22,9 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
     // --baked: a timeline played from its bake (React stepped through every frame once, then no JS while playing)
     raea_runtime_react::startup_mark("stage made");
     let t_open = Instant::now();
-    let mut live = if std::env::args().any(|a| a == "--baked") { Live::open_baked(&run.tsx)? } else { Live::open(&run.tsx, (w, h))? };
+    // --shots DIR: a chapter from its native-shot bakes (no JS per frame: raea-runtime-live shots.rs)
+    let shots = std::env::args().skip_while(|a| a != "--shots").nth(1);
+    let mut live = if let Some(d) = &shots { Live::open_shots(&run.tsx, std::path::Path::new(d))? } else if std::env::args().any(|a| a == "--baked") { Live::open_baked(&run.tsx)? } else { Live::open(&run.tsx, (w, h))? };
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;
     raea_runtime_react::startup_mark("opened");
     // --master: a timeline's sound mastered as its render's (what the legacy app's stage does for an edit)
@@ -149,7 +151,10 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
     live.settle_mixer();
     let start = Instant::now();
     run.start = Some(start);
-    let mut f: i64 = -1;
+    // the frame the play starts from: 0, or the first frame the shot bakes cover; the clock and the snapshots count
+    // from there
+    let f0 = live.shots_first().unwrap_or(0);
+    let mut f: i64 = f0 - 1;
     // --input: a thread presses and releases the arrow keys at random moments (50-250 ms apart), as a player's hand
     // would, stamping each change; the time from a change to the end of the present that first carries it is the
     // input-to-photon latency short of the display's own scan-out
@@ -192,7 +197,7 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
     };
     // a snapshot's frame is played even when the seconds pass first (under load fewer frames fit in them: a 0.6 s
     // snapshot in a 0.9 s play was never taken at load 76, 10-27); a frame that doesn't come is the step's to refuse
-    let snapping = |f: i64| snaps.iter().any(|(at, _)| (*at * fps).round() as i64 > f);
+    let snapping = |f: i64| snaps.iter().any(|(at, _)| (*at * fps).round() as i64 > f - f0);
     while start.elapsed().as_secs_f64() < seconds || snapping(f) {
         let t0 = Instant::now();
         let elapsed = start.elapsed().as_secs_f64();
@@ -229,7 +234,7 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
         let (j0, a0, b0) = (ld(&raea_runtime_react::JS_NS), ld(&raea_runtime_react::APPLY_NS), ld(&raea_runtime_react::FLUSH_BYTES));
         let (n0, nb0, fl0) = (ld(&raea_runtime_react::APPLY_ALLOCS), ld(&raea_runtime_react::APPLY_ALLOC_BYTES), ld(&raea_runtime_react::FLUSH_ALLOCS));
         let all0 = raea_core_alloc::all();
-        let lag = start.elapsed().as_secs_f64() - f as f64 / fps;
+        let lag = start.elapsed().as_secs_f64() - (f - f0) as f64 / fps;
         live.step_at(f, &run.keys, run.pointer, lag)?;
         if input_log.is_some() {
             // marked live as the game saw it (isLive), so a render of the log plays the same match, not its script
@@ -249,12 +254,12 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
         run.allocs.push(((ld(&raea_runtime_react::APPLY_ALLOCS) - n0) as f64, (ld(&raea_runtime_react::APPLY_ALLOC_BYTES) - nb0) as f64, (ld(&raea_runtime_react::FLUSH_ALLOCS) - fl0) as f64));
         run.stepped += 1;
         let t1 = Instant::now();
-        if layer.is_some() && snaps.iter().any(|(at, _)| (*at * fps).round() as i64 == f) {
+        if layer.is_some() && snaps.iter().any(|(at, _)| (*at * fps).round() as i64 == f - f0) {
             raea_gpu_device::present::read_next_present();
         }
         live.present(&mut stage, true)?;
         let presented = if layer.is_some() { raea_gpu_device::present::take_present() } else { None };
-        for (at, out) in snaps.iter().filter(|(at, _)| (*at * fps).round() as i64 == f) {
+        for (at, out) in snaps.iter().filter(|(at, _)| (*at * fps).round() as i64 == f - f0) {
             let (w, h, px) = match presented.clone() {
                 Some(p) => p,
                 None => live.snapshot()?,
@@ -289,7 +294,7 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
             run.last_rss = Some(Instant::now());
         }
         if !flat_out {
-            let next = start + Duration::from_secs_f64((f + 1) as f64 / fps);
+            let next = start + Duration::from_secs_f64((f + 1 - f0) as f64 / fps);
             if let Some(d) = next.checked_duration_since(Instant::now()) {
                 std::thread::sleep(d);
             }

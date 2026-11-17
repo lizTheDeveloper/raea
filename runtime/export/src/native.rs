@@ -1104,6 +1104,43 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     Ok(Some(shot))
 }
 
+/// A kept shot bake read back by its path, for the live player (`raea play --shots`, Lane F): the reader a render
+/// uses (native-4's binary 3D or native-3's JSON, root placed, assets checked for staleness, the carried solids written
+/// out, the Program made), without the render's key. The format is this module's own; nothing here changes it.
+pub struct ShotBake {
+    pub w: u32,
+    pub h: u32,
+    pub fps: f64,
+    pub total: i64,
+    /// each stepped frame's commits (a piece's first frame: RESET, then its runtime's whole tree)
+    pub ops: Vec<(i64, Vec<String>)>,
+    pub prog: Option<Program>,
+}
+
+pub fn read_shot(p: &Path, dir: &Path) -> R<ShotBake> {
+    let at = |e: String| format!("{}: {e}", p.display());
+    let b = std::fs::read(p).map_err(|e| at(e.to_string()))?;
+    let (t, bin) = split_kept(zstd::decode_all(&b[..]).map_err(|e| at(e.to_string()))?).map_err(at)?;
+    let v: Value = serde_json::from_str(&placed(&t, dir)).map_err(|e| at(e.to_string()))?;
+    drop(t);
+    if let Some(why) = stale(&v, dir) {
+        return Err(at(format!("stale: {why}")));
+    }
+    let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
+    let prog = if v["prog"].is_null() {
+        None
+    } else if let Some(b) = bin.as_deref() {
+        let strings: Vec<String> = v["strings"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+        Some(prog_from_bin(&v["prog"], &strings, b).map_err(at)?)
+    } else {
+        Some(prog_of(&v["prog"]).ok_or_else(|| at("its 3D didn't read".into()))?)
+    };
+    // the solids it carries, written where its Program names them (a bake made on another machine draws them)
+    unpack_solids_into(&v, &solids_dir());
+    let num = |k: &str| v[k].as_f64().unwrap_or(0.0);
+    Ok(ShotBake { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog })
+}
+
 /// The frames' commits fed to a ReplayPlugin app: a RESET removes what's under the root first (another runtime's tree
 /// follows), as a baked timeline's replay does (raea-runtime-live).
 fn feed(app: &mut App, batches: &[String]) {
