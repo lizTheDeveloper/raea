@@ -171,7 +171,7 @@ impl Live {
         if let Some(rx) = &self.master {
             match rx.try_recv() {
                 Ok(Ok(wav)) => {
-                    if std::env::var_os("RAEA_LIVE_TRACE").is_some() {
+                    if crate::live_trace() {
                         eprintln!("raea live: the mastered sound is in at frame {f}");
                     }
                     self.master_wav = wav;
@@ -231,7 +231,7 @@ impl Live {
         if let Some(rx) = &self.game_master {
             match rx.try_recv() {
                 Ok(Ok(g)) => {
-                    if std::env::var_os("RAEA_LIVE_TRACE").is_some() {
+                    if crate::live_trace() {
                         eprintln!("raea live: the game's master is in at frame {f}: {g:?}");
                     }
                     self.game_gain = g;

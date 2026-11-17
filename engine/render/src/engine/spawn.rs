@@ -23,8 +23,9 @@ pub(crate) const OVERLAY_Z: i32 = 1000;
 
 /// The frame's state onto the entities: one relational step, pure.
 pub(crate) fn relational(edit: Res<Edit>, clock: Res<Clock>, mut err: ResMut<Error>, mut st: ResMut<Stages>, mut frame: ResMut<FrameRows>) {
-    // a live scene's rows are its frame's values already (Engine::set_rows)
-    if frame.live.is_some() {
+    // a live scene's rows are its frame's values already (Engine::set_rows); live rows over a timeline (set_rows_over)
+    // leave the rows before them to it
+    if !frame.timeline_on() {
         return;
     }
     let t0 = bevy::platform::time::Instant::now();
@@ -88,6 +89,26 @@ pub(crate) fn spawn_camera(world: &mut World, e: Entity, vals: &BTreeMap<String,
 /// A live scene's rows applied to a World (Engine::set_rows, or a plain App's: docs/sdk.feature S6a): each row's values
 /// merged into its latest ones, a row not seen before spawned as a load spawns it, and the component and resource rows
 /// set through the registry. True when a glTF model was spawned, which the caller loads before the frame that shows it.
+/// Live rows over the loaded timeline (Engine::set_rows_over: `raea play --shots --cast`, a live player's characters
+/// over a baked shot): the rows loaded so far keep following the timeline frame by frame, and rows set from now on are
+/// live, numbered after them. Nothing when rows are live already (either way).
+pub fn begin_overlay(world: &mut World) -> Result<(), String> {
+    if world.resource::<FrameRows>().live.is_some() {
+        return Ok(());
+    }
+    let n = store::rows(world).len();
+    let fr = world.resource::<FrameRows>();
+    // the store's rows are the timeline's, in its order (FrameRows.ix): checked, as a live row numbered among the
+    // timeline's would read another row's values
+    if fr.ix.len() != n || fr.ix.values().any(|&r| r >= n) {
+        return Err(format!("live rows over a timeline: the store holds {n} rows but the frame indexes {} (rows set live already?)", fr.ix.len()));
+    }
+    let mut fr = world.resource_mut::<FrameRows>();
+    fr.live_from = n;
+    fr.live = Some(Vec::new());
+    Ok(())
+}
+
 pub fn apply_rows(world: &mut World, dir: &Path, rows: &[Tup]) -> Result<bool, String> {
     if world.resource::<FrameRows>().live.is_none() {
         // the loaded rows' values as the timeline has them at the clock, in the store's order
@@ -107,7 +128,12 @@ pub fn apply_rows(world: &mut World, dir: &Path, rows: &[Tup]) -> Result<bool, S
             Some(e) => {
                 let mut fr = world.resource_mut::<FrameRows>();
                 let r = fr.ix.get(&e).copied();
-                if let Some(row) = r.and_then(|r| fr.live.as_mut().and_then(|l| l.get_mut(r))) {
+                // a timeline's row under live rows (set_rows_over) isn't set live: its values are the timeline's frame
+                // by frame, so a value set here would be lost the next frame. Said, not dropped
+                if let Some(r) = r.filter(|r| !fr.is_live(*r)) {
+                    return Err(format!("{} {}: a row of the timeline under live rows (row {r} of {}): it follows the timeline and can't be set live", t.kind, t.id, fr.live_from));
+                }
+                if let Some(row) = r.and_then(|r| fr.live_row_mut(r)) {
                     for (k, v) in &t.vals {
                         match row.get_mut(k) {
                             Some(x) => *x = v.clone(),
@@ -157,15 +183,28 @@ pub fn remove_rows_from(world: &mut World, rows: &[(String, String)]) {
     // to make their meshes, dropped together on its third frame: its body gone and other parts drawn huge,
     // 2026-10-20)
     let mut places = Vec::new();
+    let mut kept = 0usize;
     for (kind, id) in rows {
         let Some(e) = store::find(world, kind, id) else { continue };
         let Some(r) = world.resource::<FrameRows>().ix.get(&e).copied() else { continue };
+        // under live rows (set_rows_over) the timeline's own rows stay: one dropped would move every place after it,
+        // and the timeline's columns are by place
+        if world.resource::<FrameRows>().live.is_some() && !world.resource::<FrameRows>().is_live(r) {
+            kept += 1;
+            continue;
+        }
         store::despawn(world, e);
         places.push(r);
     }
+    if kept > 0 {
+        eprintln!("raea: remove_rows: {kept} of {} rows named are the timeline's, under live rows: kept (only live rows are removed)", rows.len());
+    }
     let any = !places.is_empty();
-    if let Some(l) = world.resource_mut::<FrameRows>().live.as_mut() {
-        drop_places(l, places);
+    let mut fr = world.resource_mut::<FrameRows>();
+    let from = fr.live_from;
+    if let Some(l) = fr.live.as_mut() {
+        // live rows over a timeline hold only the rows from live_from on (a timeline row isn't dropped here: see above)
+        drop_places(l, places.into_iter().filter_map(|r| r.checked_sub(from)).collect());
     }
     if any {
         // the rows after a dropped one moved up: their places again, from the store's order

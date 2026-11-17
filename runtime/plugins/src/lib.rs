@@ -213,7 +213,7 @@ pub fn apply_live_rows(world: &mut World, rows: &[(String, String)]) -> Result<(
         let Some(e) = raea_sys_frame::store::find(world, kind, id) else { continue };
         let vals = {
             let fr = world.resource::<FrameRows>();
-            match fr.ix.get(&e).and_then(|r| fr.live.as_ref().and_then(|l| l.get(*r))) {
+            match fr.ix.get(&e).and_then(|r| fr.live_row(*r)) {
                 Some(v) => v.clone(),
                 None => continue,
             }

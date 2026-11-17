@@ -256,7 +256,7 @@ impl Live {
             if let Some(ls) = self.live3d.as_mut() {
                 let t = std::time::Instant::now();
                 raea_runtime_export::live_scene(self.app.world_mut(), ls, &mut self.scene, (self.w, self.h), self.fps, &self.dir)?;
-                if std::env::var_os("RAEA_LIVE_TRACE").is_some() && t.elapsed().as_secs_f64() > 0.002 {
+                if live_trace() && t.elapsed().as_secs_f64() > 0.002 {
                     eprintln!("raea live: frame {f}: its 3D rows {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
                 }
             }
@@ -266,7 +266,7 @@ impl Live {
         if sound {
             self.sound(f);
         }
-        if std::env::var_os("RAEA_LIVE_TRACE").is_some() && t0.elapsed().as_secs_f64() > 0.02 {
+        if live_trace() && t0.elapsed().as_secs_f64() > 0.02 {
             eprintln!("raea live: frame {f}: settle {:.1} ms, sound {:.1} ms", (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3);
         }
         Ok(())
@@ -461,4 +461,11 @@ mod frame_event_tests {
             assert_eq!(got, want);
         }
     }
+}
+
+/// RAEA_LIVE_TRACE set (to anything): the live player's per-frame timings said on stderr. Read once: the env was read on
+/// every frame (an OsString each time), and a script passing it empty turned the trace on in every run
+pub(crate) fn live_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAEA_LIVE_TRACE").is_some_and(|v| !v.is_empty()))
 }

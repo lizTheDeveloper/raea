@@ -349,6 +349,22 @@ impl Engine {
         environment::live_rows(&mut self.app, rows, &self.dir)
     }
 
+    /// Live rows over this engine's timeline (`raea play --shots DIR --cast`: a live player's characters over a baked
+    /// shot): as set_rows, except the loaded Program's rows keep following its timeline frame by frame (its camera, cuts
+    /// and keyed parts move as a render's do), where set_rows takes every row over at the clock. The rows set here are
+    /// numbered after the Program's; one naming a Program row is refused.
+    pub fn set_rows_over(&mut self, rows: &[Tup]) -> Result<(), String> {
+        spawn::begin_overlay(self.app.world_mut())?;
+        self.set_rows(rows)
+    }
+
+    /// Whether the engine holds row (`kind`, `id`) as its timeline's (not a live row): a live layer over a shot passes
+    /// such a row by (set_rows_over refuses it)
+    pub fn timeline_row(&self, kind: &str, id: &str) -> bool {
+        let world = self.app.world();
+        raea_sys_frame::store::find(world, kind, id).and_then(|e| world.resource::<FrameRows>().ix.get(&e).copied()).is_some_and(|r| !world.resource::<FrameRows>().is_live(r))
+    }
+
     /// A live scene's rows dropped, by kind and id: their entities go (and the meshes and surfaces only they held).
     pub fn remove_rows(&mut self, rows: &[(String, String)]) {
         rows.iter().for_each(|r| drop(self.kept.remove(r)));

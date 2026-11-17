@@ -200,6 +200,11 @@ pub struct FrameRows {
     /// so each row's latest values are kept here (in the store's order), changed in place where a frame changes them,
     /// and lent to the systems as they are (no columns made, nothing copied per frame)
     pub live: Option<Vec<BTreeMap<String, V>>>,
+    /// live rows over a timeline (`Engine::set_rows_over`: a live player's characters over a baked shot, `raea play
+    /// --shots --cast`): the rows at places before this follow the timeline as a render's do, and `live` holds only the
+    /// rows from this place on (row r is `live[r - live_from]`). 0: every row is live, a game's own scene (the first
+    /// set_rows took every loaded row over, and with --cast the shot's camera and cuts froze at its first frame)
+    pub live_from: usize,
     /// rows with per-frame tables (tables.rs: the camera's `frame_looks`, and `frame_sets` on any row), each as parsed
     pub looks: HashMap<usize, tables::Tables>,
     /// the edit's timeline the columns came from (which rows never change: `still`)
@@ -218,6 +223,31 @@ impl FrameRows {
         FrameRows { ix, ..Default::default() }
     }
 
+    /// Whether row `r` is a live row (its values set by Engine::set_rows), not the timeline's.
+    #[inline]
+    pub fn is_live(&self, r: usize) -> bool {
+        self.live.is_some() && r >= self.live_from
+    }
+
+    /// Row `r`'s values as a live frame set them (a live row only).
+    #[inline]
+    pub fn live_row(&self, r: usize) -> Option<&BTreeMap<String, V>> {
+        self.live.as_ref()?.get(r.checked_sub(self.live_from)?)
+    }
+
+    /// Row `r`'s live values, to change in place (a live row only).
+    #[inline]
+    pub fn live_row_mut(&mut self, r: usize) -> Option<&mut BTreeMap<String, V>> {
+        let from = self.live_from;
+        self.live.as_mut()?.get_mut(r.checked_sub(from)?)
+    }
+
+    /// Whether the timeline still drives some rows: no live rows, or live rows over it (`live_from`).
+    #[inline]
+    pub fn timeline_on(&self) -> bool {
+        self.live.is_none() || self.live_from > 0
+    }
+
     /// This frame's columns.
     pub fn set_cols(&mut self, cols: eval::Cols) {
         self.made.clear();
@@ -230,7 +260,7 @@ impl FrameRows {
     /// The next frame's columns from `timeline` (at the clock): a still row's values made on an earlier frame are kept,
     /// being the same on every frame (each frame made and dropped thousands of rows' maps; RAEA_KEEP_STILL=0: not).
     pub fn next_frame(&mut self, cols: eval::Cols, timeline: &std::sync::Arc<raea_core_program::timeline::Timeline>) {
-        let same = keep_still_on() && self.live.is_none() && self.made.len() == cols.len() && self.timeline.as_ref().is_some_and(|t| std::sync::Arc::ptr_eq(t, timeline));
+        let same = keep_still_on() && self.timeline_on() && self.made.len() == cols.len() && self.timeline.as_ref().is_some_and(|t| std::sync::Arc::ptr_eq(t, timeline));
         if !same {
             self.timeline = Some(timeline.clone());
             self.set_cols(cols);
@@ -296,7 +326,7 @@ impl FrameRows {
     /// (tables.rs): its set is laid on by `vals`, not in the row its entity was made from, so a one-frame edit (a play's
     /// first rows) put its sky on only at the first frame drawn, after the warm-up, and opened 2 frames dark (RR1).
     pub fn still(&self, e: Entity) -> bool {
-        self.live.is_none() && self.timeline.as_ref().zip(self.ix.get(&e)).is_some_and(|(t, r)| !self.looks.contains_key(r) && t.still(*r))
+        self.timeline.as_ref().zip(self.ix.get(&e)).is_some_and(|(t, r)| !self.is_live(*r) && !self.looks.contains_key(r) && t.still(*r))
     }
 
     /// Whether any row may have column `c` this frame (a live scene's or a frame look's rows: always), so a system
@@ -310,7 +340,7 @@ impl FrameRows {
     pub fn moves_only(&self, e: Entity, cols: &[&str]) -> bool {
         let Some(r) = self.ix.get(&e) else { return false };
         let moving = |t: &raea_core_program::timeline::Timeline| { let m = t.moving(*r); !m.is_empty() && m.iter().all(|c| cols.contains(&c.as_str())) };
-        self.live.is_none() && !self.looks.contains_key(r) && self.timeline.as_deref().is_some_and(moving)
+        !self.is_live(*r) && !self.looks.contains_key(r) && self.timeline.as_deref().is_some_and(moving)
     }
 
     /// A row's transform this frame read straight from the columns (transform_by), the 14 found once: for the rows only
@@ -326,10 +356,10 @@ impl FrameRows {
     /// A row's value this frame by its place (`cols.id`'s): a live row's as a live frame set it, else the timeline's at the
     /// clock. A system following a row's keyed column reads it here: `cols` alone holds a live render's first frame.
     pub fn at(&self, r: usize, c: &str) -> Option<V> {
-        match &self.live {
-            Some(rows) => rows.get(r)?.get(c).cloned(),
-            None => self.cols.get(r, c),
+        if self.is_live(r) {
+            return self.live_row(r)?.get(c).cloned();
         }
+        self.cols.get(r, c)
     }
 
     /// One of a row's values this frame, copying only it (with its frame look laid on, as `vals` has it).
@@ -338,10 +368,10 @@ impl FrameRows {
         if self.looks.contains_key(&r) {
             return self.vals(e)?.get(c).cloned();
         }
-        match &self.live {
-            Some(rows) => rows.get(r)?.get(c).cloned(),
-            None => self.cols.get(r, c),
+        if self.is_live(r) {
+            return self.live_row(r)?.get(c).cloned();
         }
+        self.cols.get(r, c)
     }
 
     /// A row's values this frame read where they are, nothing copied but the values asked for (`Row`): a system
@@ -349,7 +379,7 @@ impl FrameRows {
     /// `vals` as before). A live row or one with a table is its `vals`.
     pub fn row(&self, e: Entity) -> Option<Row<'_>> {
         let r = *self.ix.get(&e)?;
-        if self.live.is_none() && !self.looks.contains_key(&r) && row_read_on() {
+        if !self.is_live(r) && !self.looks.contains_key(&r) && row_read_on() {
             if r >= self.cols.len() {
                 return None;
             }
@@ -362,10 +392,10 @@ impl FrameRows {
     #[track_caller]
     pub fn vals(&self, e: Entity) -> Option<std::borrow::Cow<'_, BTreeMap<String, V>>> {
         let r = *self.ix.get(&e)?;
-        match &self.live {
+        match self.is_live(r) {
             // a live row as it is, unless it has per-frame tables: then a copy with this frame's sets laid on
-            Some(rows) => {
-                let row = rows.get(r)?;
+            true => {
+                let row = self.live_row(r)?;
                 Some(match self.looks.get(&r) {
                     Some(t) => {
                         let mut v = row.clone();
@@ -375,7 +405,7 @@ impl FrameRows {
                     None => std::borrow::Cow::Borrowed(row),
                 })
             }
-            None => {
+            false => {
                 if sys_timing() {
                     let l = std::panic::Location::caller();
                     let mut v = VALS_BY.lock().unwrap();
@@ -411,7 +441,7 @@ impl FrameRows {
     pub fn parse_looks(&mut self) -> bool {
         // a row's sets are laid on as `vals` makes it: a live row's values made again, and on a timeline the rows with a
         // table (still rows' made values are kept across frames: `next_frame`)
-        if self.live.is_some() || !keep_still_on() {
+        if !self.timeline_on() || !keep_still_on() {
             self.made.iter_mut().for_each(|m| drop(m.take()));
         } else {
             for r in self.looks.keys() {
@@ -422,25 +452,24 @@ impl FrameRows {
         }
         let mut found: HashMap<usize, [Option<String>; 2]> = HashMap::new();
         for (i, (list, _)) in tables::TABLES.iter().enumerate() {
-            match &self.live {
-                Some(rows) => {
-                    for (r, v) in rows.iter().enumerate() {
-                        if let Some(V::S(s)) = v.get(*list) {
-                            found.entry(r).or_default()[i] = Some(s.to_string());
-                        }
+            // the live rows (from live_from on), and the timeline's beneath them (all rows when nothing is live)
+            if let Some(rows) = &self.live {
+                for (k, v) in rows.iter().enumerate() {
+                    if let Some(V::S(s)) = v.get(*list) {
+                        found.entry(self.live_from + k).or_default()[i] = Some(s.to_string());
                     }
                 }
-                None => {
-                    let Some(col) = self.cols.cols.get(*list) else { continue };
-                    for r in 0..self.cols.len() {
-                        if let Some(V::S(s)) = col.get(r) {
-                            found.entry(r).or_default()[i] = Some(s.to_string());
-                        }
+            }
+            if self.timeline_on() {
+                let Some(col) = self.cols.cols.get(*list) else { continue };
+                for r in 0..self.cols.len().min(if self.live.is_some() { self.live_from } else { usize::MAX }) {
+                    if let Some(V::S(s)) = col.get(r) {
+                        found.entry(r).or_default()[i] = Some(s.to_string());
                     }
                 }
             }
         }
-        if self.live.is_none() {
+        if self.timeline_on() {
             for r in found.keys() {
                 if let Some(m) = self.made.get_mut(*r) {
                     drop(m.take());

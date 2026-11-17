@@ -23,6 +23,11 @@ pub(crate) struct Cast {
     input: Option<PathBuf>,
     /// kinds of row the cast made that a baked Program may also name by the render's own ids (said once)
     warned: bool,
+    /// the cast's row ids looked at against the shot's Program since the engine was (re)made, and those of them the
+    /// Program draws itself (its 3D text's glyphs, a part outside the chapter's layer tags): passed by, the bake has
+    /// them. Each id is looked up once, when it first comes (no per-frame key made)
+    seen: std::collections::HashSet<String>,
+    shadowed: std::collections::HashSet<String>,
     /// the last step's JS and rows, ms (what a frame of live characters costs)
     pub(crate) cost: (f64, f64),
 }
@@ -50,7 +55,7 @@ impl Cast {
         raea_runtime_react::scene::one_thread(&mut app);
         raea_runtime_react::scene::settle(&mut app, Some(-1), 20.0)?.ok_or("the cast's settings didn't arrive")?;
         eprintln!("raea play --cast: {} opened in {:.0} ms", tsx.display(), t.elapsed().as_secs_f64() * 1e3);
-        Ok(Cast { app, ls: raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS), js, tsx, dir, input: input.map(Path::to_path_buf), warned: false, cost: (0.0, 0.0) })
+        Ok(Cast { app, ls: raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS), js, tsx, dir, input: input.map(Path::to_path_buf), warned: false, seen: Default::default(), shadowed: Default::default(), cost: (0.0, 0.0) })
     }
 
     /// The same cast opened again from its files (a saved edit): the new one replaces this one only if it opens.
@@ -81,6 +86,8 @@ impl Cast {
     /// The engine was reloaded or made again (another shot): every cast row is set into it afresh next step.
     pub(crate) fn reset(&mut self) {
         self.ls = raea_runtime_react::scene::LiveScene::numbered_from(CAST_IDS);
+        self.seen.clear();
+        self.shadowed.clear();
     }
 
     /// Frame `f` of the cast: React stepped at it, then what changed in its 3D set into `engine`.
@@ -93,7 +100,7 @@ impl Cast {
         let t1 = std::time::Instant::now();
         let scene = raea_runtime_react::scene::scene_of(self.app.world_mut());
         raea_runtime_react::scene::edit_dir(&self.dir);
-        let (mut rows, gone) = self.ls.frame(raea_runtime_react::scene::Shot { scene: &scene, clear: None });
+        let (mut rows, mut gone) = self.ls.frame(raea_runtime_react::scene::Shot { scene: &scene, clear: None });
         // the shot's camera (and its ambient, which the camera row carries), lights and post effects (resources) stay
         // the bake's: a cast made from its chapter computes them too, and sent they'd light the shot twice
         rows.retain(|t| !matches!(t.kind.as_str(), "camera" | "light" | "resource"));
@@ -105,11 +112,31 @@ impl Cast {
                 eprintln!("raea play --cast: rows by the render's own ids, which a bake may name too: {}", other.into_iter().take(12).collect::<Vec<_>>().join(", "));
             }
         }
+        // a row the shot's Program holds too (by the render's own ids) is the Program's: it follows the bake's timeline,
+        // and the cast passes it by (set_rows_over refuses it)
+        let before = self.shadowed.len();
+        for t in &rows {
+            if !self.seen.contains(t.id.as_str()) {
+                self.seen.insert(t.id.clone());
+                if engine.timeline_row(&t.kind, &t.id) {
+                    self.shadowed.insert(t.id.clone());
+                }
+            }
+        }
+        if self.shadowed.len() > before {
+            eprintln!("raea play --cast: frame {f}: {} of the cast's rows are the shot's own (the bake draws them): passed by", self.shadowed.len() - before);
+        }
+        if !self.shadowed.is_empty() {
+            rows.retain(|t| !self.shadowed.contains(t.id.as_str()));
+            gone.retain(|(_, id)| !self.shadowed.contains(id.as_str()));
+        }
         if !gone.is_empty() {
             engine.remove_rows(&gone);
         }
         if !rows.is_empty() {
-            engine.set_rows(&rows)?;
+            // over the shot's timeline: its camera, cuts and keyed parts keep moving under the cast (set_rows took every
+            // row over at the clock, and the shot's 3D froze at its first frame with the cast on)
+            engine.set_rows_over(&rows)?;
         }
         self.cost = ((t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3);
         Ok(())
@@ -147,7 +174,7 @@ impl Live {
         let new = old.reopen()?;
         // the old cast's rows are dropped from the engine with it: the new one's are set afresh
         if let Some(e) = self.scene.as_mut() {
-            let ids = old.ls.row_ids();
+            let ids: Vec<(String, String)> = old.ls.row_ids().into_iter().filter(|(_, id)| !old.shadowed.contains(id.as_str())).collect();
             if !ids.is_empty() {
                 e.remove_rows(&ids);
             }
@@ -165,7 +192,7 @@ impl Live {
         if let Err(why) = c.step(f, e) {
             eprintln!("raea play --cast: frame {f}: {why}");
         }
-        if std::env::var_os("RAEA_LIVE_TRACE").is_some() && c.cost.0 + c.cost.1 > 10.0 {
+        if crate::live_trace() && c.cost.0 + c.cost.1 > 10.0 {
             eprintln!("raea play --cast: frame {f}: JS {:.1} ms, rows {:.1} ms", c.cost.0, c.cost.1);
         }
     }
