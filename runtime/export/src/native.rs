@@ -615,7 +615,7 @@ fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
                 let col = s(c.u32()?)?;
                 let v = match c.u8()? {
                     0 => V::N(f64::from_bits(c.u64()?)),
-                    1 => V::S(s(c.u32()?)?),
+                    1 => V::S(s(c.u32()?)?.into()),
                     t => return Err(format!("the bake's 3D has a value of kind {t}")),
                 };
                 r.insert(col, v);
