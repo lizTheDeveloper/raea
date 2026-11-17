@@ -41,7 +41,8 @@ pub(crate) struct Shot {
     fps: f64,
     total: i64,
     ops: Vec<(i64, Vec<String>)>,
-    prog: Option<Program>,
+    /// shared with the engine that draws it (Engine::new_live_arc) and the thread that keeps it
+    prog: Option<std::sync::Arc<Program>>,
 }
 
 /// One runtime's piece of a shot: each frame's commits, scene and clear.
@@ -1040,7 +1041,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
                         let (rows, keys) = prog.as_ref().map_or((0, 0), |p| (p.spawns.iter().map(|s| s.1.len()).sum::<usize>(), p.keys.values().map(Vec::len).sum::<usize>()));
                         return Err(format!("NATIVE  read only: {} read in {:.0} ms; peak RSS {hwm} kB; {rows} spawn rows, {keys} keys, {} page frames", p.display(), t_ms(t0), ops.len()));
                     }
-                    return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog }));
+                    return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog: prog.map(std::sync::Arc::new) }));
                 }
             }
             Err(e) => eprintln!("raea native: the kept bake {} can't be used ({e}); baking again", p.display()),
@@ -1075,7 +1076,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     }
     raea_runtime_react::startup_mark("the shot's bake: Program folded");
     let ops: Vec<(i64, Vec<String>)> = piece.into_iter().map(|(f, o, _, _)| (f, o)).collect();
-    let shot = Shot { w, h, fps, total, ops, prog };
+    let shot = Shot { w, h, fps, total, ops, prog: prog.map(std::sync::Arc::new) };
     if let Some(p) = path {
         // kept on a thread of its own while the engine opens (1.6-2.1 s on Ch5 that frame one waited for); the render
         // joins it before it returns (KEEPING)
@@ -1085,7 +1086,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
             let t2 = std::time::Instant::now();
             if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
                 let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-                let packed = zstd::encode_all(&kept_bytes(sw, sh, sfps, stotal, &ops, prog.as_ref(), &dir)[..], 3).unwrap_or_default();
+                let packed = zstd::encode_all(&kept_bytes(sw, sh, sfps, stotal, &ops, prog.as_deref(), &dir)[..], 3).unwrap_or_default();
                 if !packed.is_empty() && std::fs::write(&tmp, packed).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
                     prune_cache(d, "zst", 64);
                 } else {
@@ -1161,7 +1162,7 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     one_thread(&mut app);
     raea_gpu_device::check::mem_fits(w, h, None)?;
     // the 3D's rows, and their map files decoded and mipped beside the page's and the engine's opening
-    let inserted = prog.map(raea_render::inserted_of).unwrap_or_default();
+    let inserted = prog.map(|p| raea_render::inserted_of(p)).unwrap_or_default();
     if prog.is_some() {
         raea_sys_material::maps::prefetch_start(inserted.clone(), dir.to_path_buf());
     }
@@ -1186,10 +1187,10 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             Err(why) => {
                 eprintln!("raea native: the kept engine didn't take this shot ({why}); a fresh one");
                 drop(e);
-                aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?)
+                aov_on(raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, dir)?)
             }
         },
-        None => aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?),
+        None => aov_on(raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, dir)?),
     }),
     };
     raea_runtime_react::startup_mark(&format!("native: the 3D's engine {} ({:.0} ms)", if reused { "reloaded" } else { "open" }, t_ms(t_open)));

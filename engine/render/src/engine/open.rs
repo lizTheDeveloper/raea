@@ -6,7 +6,7 @@ use super::*;
 /// browser the GPU device comes asynchronously, so the page asks `ready` each animation frame before `finish`.
 pub struct Opening {
     app: App,
-    prog: Program,
+    prog: std::sync::Arc<Program>,
     inserted: Vec<Tup>,
     dir: PathBuf,
     timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>,
@@ -39,6 +39,11 @@ impl Engine {
     /// An Engine started, its plugins added: finished by `Opening::finish` once `ready` (a browser's GPU device comes
     /// asynchronously). `live` as `new_live`'s (raea-web passes no timeline and true).
     pub fn begin(prog: &Program, inserted: &[Tup], dir: &Path, timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>, live: bool) -> Result<Opening, String> {
+        Engine::begin_arc(std::sync::Arc::new(prog.clone()), inserted, dir, timeline, live)
+    }
+
+    /// As begin, the program shared rather than copied (a caller that holds it in an Arc: the native render's shot).
+    pub fn begin_arc(prog: std::sync::Arc<Program>, inserted: &[Tup], dir: &Path, timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>, live: bool) -> Result<Opening, String> {
         mem_mark("engine: new");
         let mut app = App::new();
         let group = DefaultPlugins
@@ -63,7 +68,7 @@ impl Engine {
         // a registered Bevy plugin may change the group (plugins.rs: one that brings bevy_winit turns WinitPlugin off)
         app.add_plugins(plugins::group(group));
         #[cfg(feature = "raytracing")]
-        if raea_render_raytrace::wanted(prog) {
+        if raea_render_raytrace::wanted(&prog) {
             raea_render_raytrace::add(&mut app);
         }
         app
@@ -199,10 +204,10 @@ impl Engine {
         }
         raea_sys_hold::install(&mut app, live); // a part held by a hand, and wireframe (docs/scene-feed.feature SF4c, SF3e)
         mem_mark("engine: plugins built (DefaultPlugins, the render device)");
-        Ok(Opening { app, prog: prog.clone(), inserted: inserted.to_vec(), dir: dir.to_path_buf(), timeline, live })
+        Ok(Opening { app, prog, inserted: inserted.to_vec(), dir: dir.to_path_buf(), timeline, live })
     }
 
-    fn finish_build(mut app: App, prog: &Program, inserted: &[Tup], dir: &Path, timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>, live: bool) -> Result<Engine, String> {
+    fn finish_build(mut app: App, prog: &std::sync::Arc<Program>, inserted: &[Tup], dir: &Path, timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>, live: bool) -> Result<Engine, String> {
         let ss = supersampling(live);
         let (w, h) = (prog.width * ss, prog.height * ss);
         app.finish();
@@ -269,7 +274,7 @@ impl Engine {
         }
         let mut e = Engine { app, target, w, h, ss, dir: dir.to_path_buf(), #[cfg(feature = "native")] warm: false, #[cfg(feature = "native")] serial: std::env::var_os("RAEA_SERIAL").is_some(), nv12, packed, replay: None, live, prestep: false, pipe: Default::default(), drawn: None, warm_next: false, kept: Default::default() };
         mem_mark("engine: target and readback made");
-        e.load_shared(prog, inserted, timeline)?;
+        e.load_shared_arc(prog, inserted, timeline)?;
         mem_mark("engine: edit loaded into the World");
         for i in 0..8 {
             e.app.update();

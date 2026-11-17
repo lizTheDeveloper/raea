@@ -182,7 +182,9 @@ pub struct ModelReady;
 /// r-th row) and its media rows (for resolving sources).
 #[derive(Resource, Clone)]
 pub struct Edit {
-    pub prog: Program,
+    /// shared with the Engine's opening and the caller's shot (a Ch5 batch's Program is hundreds of MB; it was copied
+    /// into the opening and again here, beside the caller's)
+    pub prog: std::sync::Arc<Program>,
     /// every frame, evaluated once per load from the base gathered out of the store (row r is the store's r-th row)
     pub timeline: std::sync::Arc<raea_core_program::timeline::Timeline>,
     pub media: Vec<Tup>,

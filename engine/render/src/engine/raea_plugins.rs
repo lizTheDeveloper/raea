@@ -86,7 +86,7 @@ impl Plugin for FramePlugin {
         if !app.world().contains_resource::<super::Edit>() {
             let prog = raea_core_program::ir::Program::default();
             let timeline = raea_core_program::timeline::Timeline::new(&prog, &[]).expect("an empty timeline");
-            app.insert_resource(super::Edit { prog, timeline: std::sync::Arc::new(timeline), media: Vec::new() });
+            app.insert_resource(super::Edit { prog: std::sync::Arc::new(prog), timeline: std::sync::Arc::new(timeline), media: Vec::new() });
         }
     }
 }

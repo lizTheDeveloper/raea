@@ -122,7 +122,7 @@ pub struct Engine {
     pub packed: bool,
     /// with a Bevy plugin installed, the last load (a frame before the last stepped one replays it from frame 0 in a
     /// new App), and whether this Engine draws live
-    replay: Option<(Program, Vec<Tup>)>,
+    replay: Option<(std::sync::Arc<Program>, Vec<Tup>)>,
     live: bool,
     /// the edit has MotionBlur: each update of frame f is preceded by one of frame f - 1 (its readback ignored), so the
     /// previous poses Bevy blurs by are always frame f - 1's, however many updates a frame takes (motion_blur.rs)
@@ -238,6 +238,11 @@ impl Engine {
     /// `texture`), nothing read back. A live 3D scene draws through this, the same rows and code as its render.
     pub fn new_live(prog: &Program, inserted: &[Tup], dir: &Path) -> Result<Engine, String> {
         Engine::build(prog, inserted, dir, None, true)
+    }
+
+    /// As new_live, the program shared (not copied) with the caller.
+    pub fn new_live_arc(prog: std::sync::Arc<Program>, inserted: &[Tup], dir: &Path) -> Result<Engine, String> {
+        Engine::begin_arc(prog, inserted, dir, None, true)?.finish()
     }
 
     /// The next frame drawn warms up first, as a frame across a cut does (8 updates at it): a timeline engine's first

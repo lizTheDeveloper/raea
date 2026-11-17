@@ -38,6 +38,11 @@ impl Engine {
     }
 
     pub fn load_shared(&mut self, prog: &Program, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>) -> Result<(), String> {
+        self.load_shared_arc(&std::sync::Arc::new(prog.clone()), inserted, timeline)
+    }
+
+    /// As load_shared, the program shared with the caller (the Edit holds this Arc, not a copy).
+    pub fn load_shared_arc(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>) -> Result<(), String> {
         if (prog.width, prog.height) != self.size() {
             return Err("the edit's size changed: make a new Engine".into());
         }
