@@ -405,7 +405,7 @@ pub(crate) struct ShapeNow {
 /// A mesh whose shape the frame changes (a keyed `shape`: a <BufferMesh> remade every frame, as the multiverse veils'
 /// ripple is) made again from the frame's shape, into a Mesh of its own (never the shared one equal parts hold, so a
 /// changing shape doesn't fill the share with a mesh a frame). It drew the batch's first frame's shape throughout.
-pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
+pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
     // the meshes whose shape this frame changes, made across the cores (Ch2's shore: 478 meshes a frame, one by one
     // about 50 ms), then set
     let mut todo: Vec<(Entity, String, bool, bool, String, bool)> = Vec::new();
@@ -443,9 +443,8 @@ pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut commands: Commands, mut mes
                     now.own = true;
                 }
                 now.expr = expr;
-                // its bounds made again from the new shape (Bevy keeps an Aabb it computed, so the first shape's would
-                // cull the next)
-                commands.entity(e).remove::<bevy::camera::primitives::Aabb>();
+                // its bounds: Bevy's calculate_bounds remakes them from the changed asset (AssetChanged<Mesh3d>); taking
+                // the Aabb off moved the entity between archetypes twice a frame (Ch2's 409 legs: about 10 ms a frame)
             }
             Err(err) => eprintln!("raea: a mesh's shape for this frame: {err}"),
         }
