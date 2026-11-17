@@ -43,7 +43,7 @@ pub(crate) fn install(app: &mut App) {
         eprintln!("raea: RAEA_SCENE_STATS: can't open {}", path.to_string_lossy());
     }
     let s = Stats(Arc::new(Mutex::new(Shared { out, ..Default::default() })));
-    app.insert_resource(s.clone()).init_resource::<MainStart>().add_systems(First, main_start).add_systems(Last, main_stats);
+    app.insert_resource(s.clone()).init_resource::<MainStart>().add_systems(First, main_start).add_systems(Last, (main_stats, census));
     fn mark(name: &'static str) -> impl FnMut(Res<Stats>) {
         move |s: Res<Stats>| {
             let mut g = s.0.lock().unwrap();
@@ -69,6 +69,36 @@ pub(crate) fn install(app: &mut App) {
             mark("render").after(RS::Render).before(RS::Cleanup),
         ),
     );
+}
+
+/// Once, at the 12th update (the shot's first frames drawn): the mesh entities by their material component types and
+/// shadow flags, by archetype, as a `census` line.
+fn census(world: &mut World, mut n: Local<u32>) {
+    *n += 1;
+    if *n != 12 {
+        return;
+    }
+    let Some(mesh) = world.components().component_id::<Mesh3d>() else { return };
+    let no_cast = world.components().component_id::<bevy::light::NotShadowCaster>();
+    let mut by: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for a in world.archetypes().iter() {
+        if a.is_empty() || !a.contains(mesh) {
+            continue;
+        }
+        let casts = no_cast.is_none_or(|c| !a.contains(c));
+        let mut names: Vec<String> = a.components().iter().filter_map(|c| world.components().get_info(*c)).map(|i| format!("{}", i.name())).filter(|n| n.contains("MeshMaterial3d")).collect();
+        names.sort();
+        let key = if names.is_empty() { "(no material)".to_string() } else { names.join(" + ") };
+        let e = by.entry(key).or_default();
+        e.0 += a.len() as usize;
+        if casts {
+            e.1 += a.len() as usize;
+        }
+    }
+    let line = serde_json::json!({"census": by.into_iter().map(|(k, (n, c))| serde_json::json!({"material": k, "entities": n, "casting": c})).collect::<Vec<_>>()});
+    if let Some(f) = world.resource::<Stats>().0.lock().unwrap().out.as_mut() {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 fn main_start(mut m: ResMut<MainStart>) {
@@ -168,6 +198,7 @@ fn phase_counts(
     trans: Option<Res<ViewSortedRenderPhases<bevy::core_pipeline::core_3d::Transparent3d>>>,
 ) {
     let mut m = serde_json::Map::new();
+    let mut shadow_keys = None;
     let mut put = |k: &str, p: Ph| {
         if p.views > 0 {
             m.insert(k.into(), serde_json::json!({"views": p.views, "bins": p.bins, "draws": p.draws, "instances": p.instances}));
@@ -176,8 +207,32 @@ fn phase_counts(
     if let Some(p) = opaque { put("opaque", binned(&p)); }
     if let Some(p) = mask { put("alpha_mask", binned(&p)); }
     if let Some(p) = pre { put("prepass", binned(&p)); }
-    if let Some(p) = shadow { put("shadow", binned(&p)); }
+    if let Some(p) = shadow {
+        put("shadow", binned(&p));
+        // what splits the shadow phase's batches: its batch sets' distinct pipelines, material bind groups and mesh
+        // slabs, and the meshes binned
+        let (mut pipes, mut groups, mut slabs, mut meshes, mut sets) = (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new());
+        let mut per_set: Vec<usize> = Vec::new();
+        for ph in p.0.values() {
+            let mut count: HashMap<String, usize> = HashMap::new();
+            for (set, bin) in ph.batchable_meshes.keys().chain(ph.unbatchable_meshes.keys()) {
+                pipes.insert(format!("{:?}", set.pipeline));
+                groups.insert(set.material_bind_group_index);
+                slabs.insert(format!("{:?}", set.slabs));
+                meshes.insert(format!("{:?}", bin.asset_id));
+                let k = format!("{:?}{:?}{:?}{:?}", set.pipeline, set.draw_function, set.material_bind_group_index, set.slabs);
+                *count.entry(k.clone()).or_default() += 1;
+                sets.insert(k);
+            }
+            per_set.extend(count.values());
+        }
+        per_set.sort_unstable_by(|a, b| b.cmp(a));
+        shadow_keys = Some(serde_json::json!({"batch_sets": sets.len(), "pipelines": pipes.len(), "material_bind_groups": groups.len(), "slabs": slabs.len(), "meshes": meshes.len(), "unbatchable_bins": p.0.values().map(|v| v.unbatchable_meshes.len()).sum::<usize>(), "largest_sets_in_bins": per_set.iter().take(6).collect::<Vec<_>>()}));
+    }
     if let Some(p) = trans { put("transparent", sorted(&p)); }
+    if let Some(k) = shadow_keys {
+        m.insert("shadow_keys".into(), k);
+    }
     s.0.lock().unwrap().phases = m;
 }
 
