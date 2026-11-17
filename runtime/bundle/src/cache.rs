@@ -191,13 +191,7 @@ pub fn bundle_cache(tsx: &Path, o: &CompOpts) -> Option<PathBuf> {
     for p in [js.join("tsconfig.json"), js.join("package.json"), js.join("bun.lock"), raea_io_home::home().join("sdk").join(raea_io_home::sdk::LIST)].into_iter().chain(file.starts_with('.').then(|| tsx.to_path_buf())) {
         files.extend(stat(&p).map(|(n, t)| (p, n, t)));
     }
-    // the code that rewrites and bundles: its source (build.rs RAEA_BUNDLER_SRC_HASH), not this executable, so a pin
-    // that doesn't touch the bundler keeps every bundle (RAEA_BUNDLE_KEY=binary: the executable, as before)
-    if std::env::var("RAEA_BUNDLE_KEY").as_deref() == Ok("binary") {
-        files.extend(std::env::current_exe().ok().and_then(|p| stat(&p).map(|(n, t)| (p, n, t))));
-    } else {
-        eat(concat!("bundler-src:", env!("RAEA_BUNDLER_SRC_HASH")).as_bytes());
-    }
+    files.extend(std::env::current_exe().ok().and_then(|p| stat(&p).map(|(n, t)| (p, n, t))));
     files.sort();
     for (p, n, t) in &files {
         eat(p.as_os_str().as_encoded_bytes());

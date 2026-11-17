@@ -201,19 +201,22 @@ pub fn tris(m: &Manifold) -> Tris {
 /// The mesh for an expression, built once per expression (a re-cut or a key that doesn't change the shape costs nothing).
 /// Kept on disk (kept.rs) once it's asked for a second time or took 50 ms or more to make: an expression made once,
 /// as a shape that changes every frame makes each of its, never reaches the disk. The map holds 8192 expressions,
-/// then starts again (it grew without end: Lane E S50).
+/// then starts again (it grew without end: Lane E S50). 8192: a chapter shot names ~2,300 (a render member's kept
+/// folder after a day of one pinned build: 2,289 files), so a shot never restarts it; past it the meshes come back
+/// from the disk or are made again, the same meshes.
 pub fn cached(expr: &str) -> Result<std::sync::Arc<Tris>, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, (std::sync::Arc<Tris>, bool)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some((t, kept)) = cache.lock().unwrap().get_mut(expr) {
-        // its second time: kept now, if it wasn't
-        if !*kept {
-            *kept = true;
+    let hit = cache.lock().unwrap().get_mut(expr).map(|(t, kept)| (t.clone(), !std::mem::replace(kept, true)));
+    if let Some((t, second)) = hit {
+        // its second time: kept now, if it wasn't (written with the map's lock let go, so other threads' shapes don't
+        // wait on the file)
+        if second {
             if let Some(p) = kept::place(expr).filter(|p| !p.exists()) {
-                kept::write(&p, expr, t);
+                kept::write(&p, expr, &t);
             }
         }
-        return Ok(t.clone());
+        return Ok(t);
     }
     // made by this build before, on disk (kept.rs): read back as it was written
     let kept = kept::place(expr);
