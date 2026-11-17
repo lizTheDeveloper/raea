@@ -5,7 +5,7 @@ use super::*;
 /// An Engine half made: its App's plugins added, the renderer not yet known to be up. Natively it always is; in a
 /// browser the GPU device comes asynchronously, so the page asks `ready` each animation frame before `finish`.
 pub struct Opening {
-    app: App,
+    pub(crate) app: App,
     prog: std::sync::Arc<Program>,
     inserted: Vec<Tup>,
     dir: PathBuf,
@@ -142,6 +142,8 @@ impl Engine {
         );
         // transparent draws in one order, frame to frame and batch to batch (tsort.rs)
         super::tsort::install(&mut app);
+        // opaque, alpha-masked, prepass and shadow draws in the scene's own order (dsort.rs)
+        super::dsort::install(&mut app);
         // overlapping fog volumes composited in one order whatever frames came before (raea-sys-fog's FogRank)
         app.sub_app_mut(bevy::render::RenderApp)
             .init_resource::<scene3d::FogOrder>()
@@ -274,12 +276,15 @@ impl Engine {
         }
         let mut e = Engine { app, target, w, h, ss, dir: dir.to_path_buf(), #[cfg(feature = "native")] warm: false, #[cfg(feature = "native")] serial: std::env::var_os("RAEA_SERIAL").is_some(), nv12, packed, replay: None, live, prestep: false, pipe: Default::default(), drawn: None, warm_next: false, kept: Default::default() };
         mem_mark("engine: target and readback made");
+        // the fonts before any program's text loads faces into them, for a kept engine's next program (Engine::reload)
+        text3d::fonts_take(e.app.world_mut());
         e.load_shared_arc(prog, inserted, timeline)?;
         mem_mark("engine: edit loaded into the World");
         for i in 0..8 {
             e.app.update();
             mem_mark(&format!("engine: warm-up update {i}"));
         }
+        e.app.world_mut().remove_resource::<super::prepare::Preloaded>();
         // the warm-up drew the clock's frame: a first draw across a cut from it warms up again (Engine::draw)
         e.drawn = Some(e.app.world().resource::<Clock>().0);
         // updates pipelined from here on (raea_sys_frame::pipe), but for a live draw's own

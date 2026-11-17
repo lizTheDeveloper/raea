@@ -44,6 +44,8 @@ mod load;
 pub mod prepare;
 pub use prepare::Prepared;
 mod tsort;
+// opaque draws in the scene's own order, not the engine's history (dsort.rs)
+mod dsort;
 // RAEA_SCENE_STATS: what each frame hands the GPU (draw calls, instances, meshes, materials, lights, stage times)
 mod stats;
 mod output;

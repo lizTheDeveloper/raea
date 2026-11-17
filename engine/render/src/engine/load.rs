@@ -37,6 +37,8 @@ impl Engine {
         // the text atlas emptied before the new program's text is spawned, as a fresh engine's is (emptied after the
         // spawn, the new text was never drawn into it: a kept engine's repeat of Ch5 lost its clock's numerals)
         text3d::reset_atlas(self.app.world_mut());
+        // and its fonts as a fresh engine's (no faces an earlier shot's text loaded)
+        text3d::fonts_restore(self.app.world_mut());
         let t_reset = t.elapsed().as_secs_f64() * 1e3;
         // what the last shot loaded, kept for the next one's load (its models' glTFs, its maps), then let go
         let held = scene3d::model_handles(self.app.world_mut());
@@ -53,6 +55,7 @@ impl Engine {
             ups.push(u.elapsed().as_secs_f64() * 1e3);
         }
         drop(held);
+        self.app.world_mut().remove_resource::<super::prepare::Preloaded>();
         if std::env::var_os("RAEA_NATIVE_TRACE").is_some() {
             eprintln!("raea native: reload {:.0} ms: restore {t_reset:.0}, load {:.0}, warm-up updates {}", t.elapsed().as_secs_f64() * 1e3, t_load - t_reset, ups.iter().map(|u| format!("{u:.0}")).collect::<Vec<_>>().join(" "));
         }
@@ -302,7 +305,18 @@ type Cast = fn(*mut ()) -> *mut dyn bevy::reflect::Reflect;
 
 /// Those resources' values as the engine's build left them (Engine::build), for `pristine_restore`.
 #[derive(Resource, Default)]
-pub(crate) struct Pristine(Vec<(bevy::ecs::component::ComponentId, Cast, Box<dyn bevy::reflect::PartialReflect>)>);
+pub(crate) struct Pristine(Vec<(bevy::ecs::component::ComponentId, Cast, Box<dyn bevy::reflect::PartialReflect>)>, Steps);
+
+/// What steps the clocks, as the build left it (not reflected, so kept by hand): raea's frame clock, how Bevy's Time
+/// advances on an update (TimeUpdateStrategy), and the plugin clock's steps. A shot's last drawn frame left Time
+/// advancing by a frame on every update (plugins::arm), so a kept engine's warm-up updates ran its clocks 11 frames
+/// on (0.37 s) where a fresh engine's held them at zero, at raea's clock of the last shot's last frame, not 0.
+#[derive(Default)]
+pub(crate) struct Steps {
+    clock: i64,
+    manual: Option<std::time::Duration>,
+    plugin_steps: u64,
+}
 
 pub(crate) fn pristine_take(world: &mut World) {
     let reg = world.resource::<AppTypeRegistry>().clone();
@@ -320,7 +334,15 @@ pub(crate) fn pristine_take(world: &mut World) {
             out.push((cid, cast, d));
         }
     }
-    world.insert_resource(Pristine(out));
+    let steps = Steps {
+        clock: world.resource::<Clock>().0,
+        manual: match world.get_resource::<bevy::time::TimeUpdateStrategy>() {
+            Some(bevy::time::TimeUpdateStrategy::ManualDuration(d)) => Some(*d),
+            _ => None,
+        },
+        plugin_steps: world.get_resource::<plugins::PluginClock>().map_or(0, |c| c.steps),
+    };
+    world.insert_resource(Pristine(out, steps));
 }
 
 pub(crate) fn pristine_restore(world: &mut World) {
@@ -331,6 +353,13 @@ pub(crate) fn pristine_restore(world: &mut World) {
             let r: &mut dyn bevy::reflect::Reflect = unsafe { &mut *cast(m.as_mut().as_ptr() as *mut ()) };
             let _ = r.as_partial_reflect_mut().try_apply(v.as_ref());
         }
+    }
+    world.resource_mut::<Clock>().0 = p.1.clock;
+    if let Some(d) = p.1.manual {
+        world.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(d));
+    }
+    if let Some(mut c) = world.get_resource_mut::<plugins::PluginClock>() {
+        c.steps = p.1.plugin_steps;
     }
     world.insert_resource(p);
 }

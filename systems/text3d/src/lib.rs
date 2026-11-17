@@ -44,6 +44,38 @@ pub fn reset_atlas(world: &mut World) {
     let _ = world.resource_mut::<Assets<TextAtlas>>().insert(AssetId::default(), TextAtlas::new(TextAtlas::DEFAULT_IMAGE));
 }
 
+/// The fonts as an engine's build left them, before any program's text loaded faces into them: what a kept engine's
+/// next program starts from (fonts_restore). A kept engine's font system held the faces its earlier shots loaded, so
+/// the same text laid out with other matches and advances (Ch5 2460 after 2400: 176 glyphs up to 1.7 mm off, the
+/// clock's numerals 44 dB from the shot drawn fresh).
+#[derive(Resource)]
+pub struct PristineFonts {
+    db: cosmic_text::fontdb::Database,
+    locale: String,
+    faces: Faces,
+}
+
+/// Taken once the engine is built, before its first program is loaded.
+pub fn fonts_take(world: &mut World) {
+    let Some(mut r) = world.get_resource::<TextRenderer>().cloned() else { return };
+    let (db, locale) = {
+        let fs = r.lock();
+        (fs.db().clone(), fs.locale().to_string())
+    };
+    let faces = world.get_resource::<Faces>().cloned().unwrap_or_default();
+    world.insert_resource(PristineFonts { db, locale, faces });
+}
+
+/// The font system (its faces, and the matches and shapes it has cached) and the faces raea loaded, as fonts_take found them.
+pub fn fonts_restore(world: &mut World) {
+    let Some(p) = world.get_resource::<PristineFonts>() else { return };
+    let (db, locale, faces) = (p.db.clone(), p.locale.clone(), p.faces.clone());
+    if let Some(mut r) = world.get_resource::<TextRenderer>().cloned() {
+        *r.lock() = FontSystem::new_with_locale_and_db(locale, db);
+    }
+    world.insert_resource(faces);
+}
+
 pub fn install(app: &mut App) {
     if !app.is_plugin_added::<Text3dPlugin>() {
         // the window's scale factor isn't the raster's (renders have no window): glyphs are drawn at RES an em
@@ -70,7 +102,7 @@ fn follow_atlas(mut images: MessageReader<AssetEvent<Image>>, mut materials: Res
 }
 
 /// The faces loaded into the plugin's FontSystem, by (family, weight, italic), and whether the system's were.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 struct Faces {
     loaded: std::collections::HashSet<(String, u16, bool)>,
     system: bool,

@@ -34,13 +34,28 @@ pub(crate) fn extract_tie_keys(mut keys: ResMut<TieKeys>, q: bevy::render::Extra
     }
 }
 
-pub(crate) fn stable_transparent_order(keys: Res<TieKeys>, mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>) {
+/// Then, past the name, the mesh's place in the scene (dsort.rs's SceneKey: its row and child path), and only then the
+/// entity: two parts of one glTF share a name (Ch2's glass plates), and an entity's bits differ between a kept engine
+/// and a fresh one, and between two fresh ones whose worlds made one more resource first (sub-1/255 on Ch2 @14189).
+fn tie(keys: &TieKeys, scene: &super::dsort::SceneKeys, e: &MainEntity) -> (u64, u64, u64) {
+    (keys.0.get(e).copied().unwrap_or(0), scene.0.get(e).copied().unwrap_or(0), e.id().to_bits())
+}
+
+pub(crate) fn stable_transparent_order(keys: Res<TieKeys>, scene: Option<Res<super::dsort::SceneKeys>>, mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>) {
+    let empty = super::dsort::SceneKeys::default();
+    let scene = scene.as_deref().unwrap_or(&empty);
     for phase in phases.values_mut() {
-        phase.items.sort_by(|_, a, _, b| {
-            a.distance.total_cmp(&b.distance)
-                .then_with(|| keys.0.get(&a.entity.1).copied().unwrap_or(0).cmp(&keys.0.get(&b.entity.1).copied().unwrap_or(0)))
-                .then_with(|| a.entity.1.id().to_bits().cmp(&b.entity.1.id().to_bits()))
-        });
+        phase.items.sort_by(|_, a, _, b| a.distance.total_cmp(&b.distance).then_with(|| tie(&keys, scene, &a.entity.1).cmp(&tie(&keys, scene, &b.entity.1))));
+    }
+}
+
+/// Transmissive draws (glass that refracts what's behind it) the same way: Bevy sorts them by distance alone, ties in
+/// the order they were queued.
+pub(crate) fn stable_transmissive_order(keys: Res<TieKeys>, scene: Option<Res<super::dsort::SceneKeys>>, mut phases: ResMut<ViewSortedRenderPhases<bevy::pbr::Transmissive3d>>) {
+    let empty = super::dsort::SceneKeys::default();
+    let scene = scene.as_deref().unwrap_or(&empty);
+    for phase in phases.values_mut() {
+        phase.items.sort_by(|_, a, _, b| a.distance.total_cmp(&b.distance).then_with(|| tie(&keys, scene, &a.entity.1).cmp(&tie(&keys, scene, &b.entity.1))));
     }
 }
 
@@ -52,5 +67,5 @@ pub(crate) fn install(app: &mut App) {
     app.sub_app_mut(bevy::render::RenderApp)
         .init_resource::<TieKeys>()
         .add_systems(bevy::render::ExtractSchedule, extract_tie_keys)
-        .add_systems(bevy::render::Render, stable_transparent_order.after(bevy::render::RenderSystems::PhaseSort).before(bevy::render::RenderSystems::Prepare));
+        .add_systems(bevy::render::Render, (stable_transparent_order, stable_transmissive_order).after(bevy::render::RenderSystems::PhaseSort).before(bevy::render::RenderSystems::Prepare));
 }
