@@ -91,12 +91,32 @@ impl Sink {
     fn piped(pipe: &Path, w: u32, h: u32, total: usize, queue: usize) -> R<Sink> {
         // appended to: a FIFO's reader sees one stream however many renders write into it, and a file grows
         let file = std::fs::OpenOptions::new().append(true).create(true).open(pipe).map_err(|e| format!("{PIPE_VAR} {}: {e}", pipe.display()))?;
+        bigger_pipe(&file);
         let (tx, rx) = sync_channel::<(usize, Box<dyn Frame>)>(queue);
         let meter = Arc::new(Mutex::new(Some(raea_sys_light_meter::exposure::Meter::new(total))));
+        // the sampled frames measured on a thread of their own, so the pipe's thread only writes
+        let (mtx, mrx) = sync_channel::<(usize, usize, Box<dyn Frame>)>(2);
         let m = meter.clone();
+        let mt = std::thread::Builder::new()
+            .name("raea frame meter".into())
+            .spawn(move || -> R<()> {
+                for (n, i, frame) in mrx {
+                    frame.pixels(&mut |px| {
+                        if let Some(m) = m.lock().unwrap().as_mut().filter(|m| m.wants(n)) {
+                            m.add(&format!("frame-{i:05}.png"), px);
+                        }
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+        // (which frames it takes, known to the pipe's thread without the meter's lock)
+        let wants = raea_sys_light_meter::exposure::Meter::new(total);
         let pipe = pipe.to_path_buf();
-        let t = std::thread::Builder::new().name("raea frame pipe".into()).spawn(move || send_all(file, &pipe, rx, w, h, &m)).map_err(|e| e.to_string())?;
-        Ok(Sink { tx: Some(tx), threads: vec![t], piped: true, meter: Some(meter) })
+        let t = std::thread::Builder::new().name("raea frame pipe".into()).spawn(move || send_all(file, &pipe, rx, w, h, mtx, wants)).map_err(|e| e.to_string())?;
+        // (the pipe's thread first: the meter's ends once the pipe's has dropped its sender)
+        Ok(Sink { tx: Some(tx), threads: vec![t, mt], piped: true, meter: Some(meter) })
     }
 
     /// Whether the frames go to a pipe (no files are written).
@@ -140,9 +160,25 @@ impl Drop for Sink {
     }
 }
 
+/// A FIFO's buffer made 1 MB (Linux's default most a user may set) from 64 KB: a frame goes through in 8 writes and
+/// wake-ups of the encoder, not 128. Anything else (a file) is left as it is.
+#[cfg(target_os = "linux")]
+fn bigger_pipe(file: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileTypeExt;
+    if file.metadata().is_ok_and(|m| m.file_type().is_fifo()) {
+        let size = std::fs::read_to_string("/proc/sys/fs/pipe-max-size").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(1 << 20).min(1 << 20);
+        // SAFETY: fcntl on a descriptor this File owns; a refusal leaves the pipe as it was
+        unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETPIPE_SZ, size) };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bigger_pipe(_: &std::fs::File) {}
+
 /// The pipe's thread: each frame as one PAM image, in the order put (the draw's order), checked; each frame of_pngs
-/// would sample measured once it's sent.
-fn send_all(mut file: std::fs::File, pipe: &Path, rx: Receiver<(usize, Box<dyn Frame>)>, w: u32, h: u32, meter: &Mutex<Option<raea_sys_light_meter::exposure::Meter>>) -> R<()> {
+/// would sample handed to the meter's thread once it's sent.
+fn send_all(mut file: std::fs::File, pipe: &Path, rx: Receiver<(usize, Box<dyn Frame>)>, w: u32, h: u32, meter: SyncSender<(usize, usize, Box<dyn Frame>)>, wants: raea_sys_light_meter::exposure::Meter) -> R<()> {
     let head = format!("P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n");
     let size = w as usize * h as usize * 4;
     let mut last: Option<usize> = None;
@@ -156,13 +192,11 @@ fn send_all(mut file: std::fs::File, pipe: &Path, rx: Receiver<(usize, Box<dyn F
                 return Err(format!("{PIPE_VAR}: frame {i} has {} bytes, not {w}x{h}x4", px.len()));
             }
             // header and pixels in one write where the platform allows (a reader never sees a header alone)
-            file.write_all(head.as_bytes()).and_then(|()| file.write_all(px)).map_err(|e| format!("{PIPE_VAR} {}: frame {i}: {e}", pipe.display()))?;
-            let mut m = meter.lock().unwrap();
-            if let Some(m) = m.as_mut().filter(|m| m.wants(n)) {
-                m.add(&format!("frame-{i:05}.png"), px);
-            }
-            Ok(())
+            file.write_all(head.as_bytes()).and_then(|()| file.write_all(px)).map_err(|e| format!("{PIPE_VAR} {}: frame {i}: {e}", pipe.display()))
         })?;
+        if wants.wants(n) {
+            let _ = meter.send((n, i, frame));
+        }
     }
     file.flush().map_err(|e| e.to_string())
 }

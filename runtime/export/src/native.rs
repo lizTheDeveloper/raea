@@ -836,9 +836,11 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         Some(_) => Some(bevy_fed_buffer(w, h)?),
         None => None,
     };
-    // the frames being read back, oldest first: each frame's copy is waited for only once RAEA_READBACK_DEPTH (2) newer
-    // frames are queued behind it, so the draw never waits on the GPU for the frame it just drew; the copies go into
-    // staging buffers that are reused, each handed mapped to the writer and given back once its frame is written
+    // the frames being read back, oldest first: each frame's copy is waited for once RAEA_READBACK_DEPTH (2) newer
+    // frames are queued behind it, and then only up to its own submission, so the draw doesn't wait for the GPU to
+    // finish the frames after it; the copies go into staging buffers that are reused, each handed mapped to the writer
+    // and given back once its frame is written. RAEA_READBACK_DEPTH=1 waits as pc215 did (the whole device). (Ch4
+    // @5186-5189 come out one of two ways, 85-92 dB apart, from run to run on pc215 itself, at either depth)
     let depth = std::env::var("RAEA_READBACK_DEPTH").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).max(1);
     let mut copying: std::collections::VecDeque<(usize, i64, Copy)> = std::collections::VecDeque::new();
     let ring = Ring::new();
@@ -898,7 +900,7 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             while copying.len() > depth {
                 let (pi, pf, prev) = copying.pop_front().ok_or("no readback")?;
                 let tr = std::time::Instant::now();
-                let px = finish_copy(&g.device, prev, &ring)?;
+                let px = finish_copy(&g.device, prev, &ring, depth == 1)?;
                 t_read += t_ms(tr);
                 check_black(&mut cx, pg, pi, pf, &px)?;
                 let ts = std::time::Instant::now();
@@ -951,7 +953,7 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     }
     if let Some(g) = &dev {
         while let Some((pi, pf, prev)) = copying.pop_front() {
-            let px = finish_copy(&g.device, prev, &ring)?;
+            let px = finish_copy(&g.device, prev, &ring, depth == 1)?;
             check_black(&mut cx, pg, pi, pf, &px)?;
             send(pi, Box::new(px))?;
         }
@@ -1062,11 +1064,15 @@ fn start_copy(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, ri
     Copy { staging, rx, sub }
 }
 
-/// A copy's frame, once mapped: the device polled without blocking, then (if it still isn't) waited for up to this
-/// copy's own submission, never the frames queued after it.
-fn finish_copy(device: &wgpu::Device, c: Copy, ring: &Ring) -> R<Staged> {
+/// A copy's frame, once mapped. `whole`: if it isn't yet, the device is waited for (all its work, as pc215 did);
+/// else it's polled without blocking, then waited for up to this copy's own submission, never the frames after it.
+fn finish_copy(device: &wgpu::Device, c: Copy, ring: &Ring, whole: bool) -> R<Staged> {
     let mapped = match c.rx.try_recv() {
         Ok(m) => m,
+        Err(_) if whole => {
+            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) }).map_err(|e| format!("the frame's readback: {e}"))?;
+            c.rx.recv().map_err(|e| e.to_string())?
+        }
         Err(_) => {
             let _ = device.poll(wgpu::PollType::Poll);
             match c.rx.try_recv() {
