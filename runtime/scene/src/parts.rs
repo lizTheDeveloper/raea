@@ -449,6 +449,11 @@ mod light_rotation_tests {
 /// shore cones taper by 1e-5 to 6e-5 a frame (about 0.1 mm), and each change made the engine build the mesh again
 /// (350 meshes a frame); kept within 1e-4 they're never more than 0.12 mm (on a 1.2 m cone) from their own shape and
 /// are made again every few frames. A bigger change (a plane growing 0.3% a frame) is kept every frame.
+/// How far (relative) a frame's shape may be from the one kept and still be it: float formatting only. A coarser one
+/// (1e-4, pc217) kept Ch2's glass cones' bounds a few frames, which moved a near-tie in their translucent draw order
+/// (Bevy sorts by the bounds' centre) and changed the picture from pc213's (49 dB on 9 of 24 frames at @6000).
+const SETTLE: f64 = 1e-9;
+
 pub(crate) fn settle_shapes(shapes: Vec<String>) -> Vec<String> {
     fn split(s: &str) -> (String, Vec<f64>) {
         let (mut tpl, mut nums, mut cur) = (String::with_capacity(s.len()), Vec::new(), String::new());
@@ -490,7 +495,7 @@ pub(crate) fn settle_shapes(shapes: Vec<String>) -> Vec<String> {
                     return s;
                 }
                 let (t, n) = split(&s);
-                if t == *kt && n.len() == kn.len() && n.iter().zip(kn).all(|(a, b)| (a - b).abs() <= 1e-4 * a.abs().max(b.abs()).max(1e-3)) {
+                if t == *kt && n.len() == kn.len() && n.iter().zip(kn).all(|(a, b)| (a - b).abs() <= SETTLE * a.abs().max(b.abs()).max(1e-3)) {
                     return ks.clone();
                 }
                 kept = Some((s.clone(), t, n));
@@ -512,12 +517,12 @@ mod settle_tests {
         let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let a = "rotate(cone(1.2429999999999999, 1.2429965861953773, 1.1999999999999995), -90, 0, 0)";
         let b = "rotate(cone(1.2429999999999999, 1.2429962642174277, 1.1999999999999995), -90, 0, 0)";
-        assert_eq!(settle_shapes(v(&[a, b])), v(&[a, a]));
+        // different numbers are different shapes (only the same numbers, written differently, are one)
+        assert_eq!(settle_shapes(v(&[a, b])), v(&[a, b]));
+        assert_eq!(settle_shapes(v(&["torus(1.0, 0.5)", "torus(1, 0.50)"])), v(&["torus(1.0, 0.5)", "torus(1.0, 0.5)"]));
         let p = "plane(0, 0, 1, 1.451171835074451, 1.451171835074451)";
         let q = "plane(0, 0, 1, 1.4558055717374923, 1.4558055717374923)";
         assert_eq!(settle_shapes(v(&[p, q])), v(&[p, q]));
-        let c = "rotate(cone(1.2429999999999999, 1.2429879787444014, 1.1999999999999995), -90, 0, 0)";
-        assert_eq!(settle_shapes(v(&[a, b, c])), v(&[a, a, a]), "the bake's own cone");
         // a different expression is never merged
         assert_eq!(settle_shapes(v(&["box(1, 1, 1)", "sphere(1)"])), v(&["box(1, 1, 1)", "sphere(1)"]));
         // drift is measured from the shape kept, so many tiny steps still add up to a change
