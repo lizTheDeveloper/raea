@@ -264,7 +264,7 @@ fn bake(js: &Path, dir: &Path, stepped: &[i64]) -> R<Option<(Map<String, Value>,
                     if trace() {
                         eprintln!("raea native: piece {a}..{b}: runtime open {opened:.0} ms, {} frames stepped in {:.0} ms (flush waits {:.0} ms, {} timed out, every runtime)", b - a, t_ms(t) - opened, (ld(&raea_runtime_react::FLUSH_WAIT_NS) - w0) as f64 / 1e6, ld(&raea_runtime_react::FLUSH_TIMEOUTS) - to0);
                     }
-                    page_commits(&mut out, off);
+                    page_commits(&mut out, off)?;
                     kept = Some(app);
                     Ok((conf, out))
                     })();
@@ -326,28 +326,28 @@ fn drop3d() -> bool {
 ///  - text under an element left out goes with it;
 ///  - an insert before a sibling left out goes before the next sibling kept, else to the end (the page's replay skips
 ///    an insert whose `before` it doesn't know, and the node never hung anywhere).
-fn page_commits(piece: &mut Piece, off: u64) {
+fn page_commits(piece: &mut Piece, off: u64) -> R<()> {
     use std::collections::HashSet;
     let moved = |ops: Vec<Value>| -> String { ids_moved_ops(ops, off) };
-    let parse = |j: &str| serde_json::from_str::<Vec<Value>>(j).ok();
+    // a commit that isn't an op array is an error, not a RESET: left as it was it kept its runtime's own ids (colliding
+    // with another piece's) and, with DROP3D, cleared the replay's state as a RESET does
+    let parse = |f: i64, j: &str| serde_json::from_str::<Vec<Value>>(j).map_err(|e| format!("frame {f}'s commit isn't an op array ({e})"));
     if !drop3d() {
-        for (_, ops, _, _) in piece.iter_mut() {
+        for (f, ops, _, _) in piece.iter_mut() {
             for j in ops.iter_mut().filter(|j| j.as_str() != raea_runtime_bake::RESET) {
-                if let Some(v) = parse(j) {
-                    *j = moved(v);
-                }
+                *j = moved(parse(*f, j)?);
             }
         }
-        return;
+        return Ok(());
     }
     let n = |o: &Value, k: &str| o.get(k).and_then(Value::as_u64);
     // what the whole piece says: each node's parent, its 3D elements, its page elements and its text
     let (mut parent, mut d3, mut page, mut text) = (HashMap::<u64, u64>::new(), HashSet::<u64>::new(), Vec::<u64>::new(), Vec::<u64>::new());
     let mut all: Vec<Vec<Option<Vec<Value>>>> = Vec::with_capacity(piece.len());
-    for (_, ops, _, _) in piece.iter() {
+    for (f, ops, _, _) in piece.iter() {
         let mut frame = Vec::with_capacity(ops.len());
         for j in ops {
-            let v = if j.as_str() == raea_runtime_bake::RESET { None } else { parse(j) };
+            let v = if j.as_str() == raea_runtime_bake::RESET { None } else { Some(parse(*f, j)?) };
             for o in v.iter().flatten() {
                 match o.get("op").and_then(Value::as_str) {
                     Some("create") => {
@@ -454,6 +454,7 @@ fn page_commits(piece: &mut Piece, off: u64) {
             *j = moved(keep);
         }
     }
+    Ok(())
 }
 
 /// A commit's node ids moved up by `off` (the root's, 0, stays): a piece's ids kept apart from every other piece's.
@@ -1813,6 +1814,19 @@ mod bin_tests {
         assert!(bomb.len() < 1 << 16, "a small file");
         assert!(unzstd_capped(&bomb, 8 << 20).is_err(), "unpacking past the cap refused");
         assert_eq!(unzstd_capped(&bomb, 64 << 20).unwrap().len(), 64 << 20);
+    }
+
+    #[test]
+    fn a_commit_that_isnt_ops_fails_the_bake() {
+        // (a piece: a RESET and the tree, then a frame whose commit is cut short)
+        let mut piece: Piece = vec![
+            (10, vec![raea_runtime_bake::RESET.to_string(), "[]".to_string()], Vec::new(), None),
+            (11, vec!["[{\"op\":\"update\",\"id\":3".to_string()], Vec::new(), None),
+        ];
+        let e = page_commits(&mut piece, 1 << 36).unwrap_err();
+        assert!(e.contains("frame 11"), "{e}");
+        let mut fine: Piece = vec![(10, vec![raea_runtime_bake::RESET.to_string(), "[]".to_string()], Vec::new(), None)];
+        assert!(page_commits(&mut fine, 1 << 36).is_ok());
     }
 
     #[test]
