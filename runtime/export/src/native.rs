@@ -552,6 +552,43 @@ fn key_of(js: &Path, stepped: &[i64]) -> R<u64> {
 /// runs, so they were in the bake as the copy's own, and once that copy was pruned the bake's models "didn't exist".
 const ROOT_MARK: &str = "@@raea-project@@";
 
+/// Where a kept bake's generated solids stand: raea-calls writes a solid no expression describes (a mesh, a level set, a
+/// warp) as `obj("<temp>/raea-solids/<hash>.obj")`, a file only the machine that baked it has. A bake carries each one
+/// it names ("solids": name -> OBJ text) and marks their folder, so it opens anywhere: another member, the shared cache,
+/// the Mac's player (Lane F found Ch5's "mesh175" failing to open off its baking member).
+const SOLIDS_MARK: &str = "@@raea-solids@@";
+
+/// The solids folder as raea-calls names it (runtime/calls/src/solid.rs), as given and as it resolves (macOS's /var).
+fn solids_dirs() -> Vec<String> {
+    let d = std::env::temp_dir().join("raea-solids");
+    let mut r = vec![d.to_string_lossy().trim_end_matches('/').to_string()];
+    if let Ok(c) = d.canonicalize() {
+        let c = c.to_string_lossy().trim_end_matches('/').to_string();
+        if !r.contains(&c) {
+            r.insert(0, c);
+        }
+    }
+    r
+}
+
+/// A read bake's solids written into this machine's solids folder (each named by its content's hash, so one already
+/// there is the same file and is left alone).
+fn unpack_solids(v: &Value) {
+    let Some(m) = v.get("solids").and_then(Value::as_object) else { return };
+    let d = std::env::temp_dir().join("raea-solids");
+    let _ = std::fs::create_dir_all(&d);
+    for (name, body) in m {
+        let (Some(text), true) = (body.as_str(), !name.contains('/') && !name.contains("..")) else { continue };
+        let p = d.join(name);
+        if !p.exists() {
+            let tmp = d.join(format!("{name}.{}.tmp", std::process::id()));
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, &p);
+            }
+        }
+    }
+}
+
 /// The project's root as a bake's paths start: as given and as the files resolve (a link to a snapshot).
 fn roots(dir: &Path) -> Vec<String> {
     let mut r = vec![dir.to_string_lossy().trim_end_matches('/').to_string()];
@@ -589,13 +626,31 @@ fn portable(doc: &Value, dir: &Path) -> String {
     named.sort();
     named.dedup();
     let assets: Map<String, Value> = hashes(dir, &named).into_iter().filter_map(|(k, h)| Some((k, Value::String(h?)))).collect();
+    // the generated solids it names, carried along (SOLIDS_MARK)
+    for r in solids_dirs() {
+        text = text.replace(&format!("{}/", escaped(&r)), &format!("{SOLIDS_MARK}/"));
+    }
+    let mut solids = Map::new();
+    let mut at = 0;
+    while let Some(i) = text[at..].find(SOLIDS_MARK) {
+        let a = at + i + SOLIDS_MARK.len() + 1;
+        let end = text[a..].find(|c: char| matches!(c, '"' | '\\' | ')' | '\'')).map_or(text.len(), |e| a + e);
+        let name = text[a..end].to_string();
+        if !solids.contains_key(&name) {
+            if let Ok(body) = std::fs::read_to_string(std::env::temp_dir().join("raea-solids").join(&name)) {
+                solids.insert(name, Value::String(body));
+            }
+        }
+        at = end;
+    }
     let body = text.strip_prefix('{').unwrap_or(&text);
-    format!("{{\"assets\":{},{body}", Value::Object(assets))
+    format!("{{\"assets\":{},\"solids\":{},{body}", Value::Object(assets), Value::Object(solids))
 }
 
 /// A kept bake's marked paths placed at this project's root.
 fn placed(text: &str, dir: &Path) -> String {
-    text.replace(&format!("{ROOT_MARK}/"), &format!("{}/", escaped(roots(dir).last().map(String::as_str).unwrap_or(""))))
+    let solids = std::env::temp_dir().join("raea-solids");
+    text.replace(&format!("{ROOT_MARK}/"), &format!("{}/", escaped(roots(dir).last().map(String::as_str).unwrap_or("")))).replace(&format!("{SOLIDS_MARK}/"), &format!("{}/", escaped(solids.to_string_lossy().trim_end_matches('/'))))
 }
 
 /// Why a kept bake no longer matches the project's files: one it names changed or went (None when all match).
@@ -663,6 +718,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
             .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
             .and_then(|v| {
                 mark("parsed");
+                unpack_solids(&v);
                 let s = stale(&v, dir);
                 mark("files hashed");
                 match s {
