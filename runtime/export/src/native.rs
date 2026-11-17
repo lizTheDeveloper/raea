@@ -454,10 +454,192 @@ fn v_of(j: &Value) -> V {
     }
 }
 
+/// The Program as native-3 wrote it (JSON): kept for the tests comparing native-4 with it.
+#[cfg_attr(not(test), allow(dead_code))]
 fn prog_json(p: &Program) -> Value {
     let spawns: Vec<Value> = p.spawns.iter().map(|(k, rows)| json!([k, rows.iter().map(|r| Value::Object(r.iter().map(|(c, v)| (c.clone(), v_json(v))).collect())).collect::<Vec<_>>()])).collect();
     let keys: Vec<Value> = p.keys.iter().map(|((id, c), ks)| json!([id, c, ks.iter().map(|(f, v, e)| json!([f, if v.is_finite() { json!(v) } else { json!({"nf": v.to_string()}) }, e])).collect::<Vec<_>>()])).collect();
     json!({"fps": p.fps, "width": p.width, "height": p.height, "frames": p.frames, "spawns": spawns, "keys": keys})
+}
+
+// ------------------------------------------------------------------------------------------- native-4: binary bakes
+// A kept bake is "RNB4", the header's length (u32 LE), the header (JSON: w, h, fps, total, the page's ops, the Program's
+// fps/width/height/frames, and "strings", every distinct string the 3D names, once), then the 3D in binary: its spawns
+// and keys by string index. The header keeps the paths, so portable()/placed()/stale() and the carried solids work on
+// it as on native-3's JSON. Lossless: numbers are the f64's bits. The whole file is zstd'd, as before.
+// native-3 kept every mesh row's own copy of its shape and attributes (Ch2 @900, 26 frames: 230 MB of JSON, 202 MB of
+// it mesh rows, 33 distinct shapes among 361), and a reader built a JSON tree of all of it before the Program.
+const BIN_MAGIC: &[u8; 4] = b"RNB4";
+
+#[derive(Default)]
+struct Strs {
+    idx: HashMap<String, u32>,
+    list: Vec<String>,
+}
+
+impl Strs {
+    fn of(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.idx.get(s) {
+            return i;
+        }
+        let i = self.list.len() as u32;
+        self.list.push(s.to_string());
+        self.idx.insert(s.to_string(), i);
+        i
+    }
+}
+
+/// The Program's spawns and keys in binary (little-endian), its strings into `st`.
+fn prog_bin(p: &Program, st: &mut Strs) -> Vec<u8> {
+    let mut b: Vec<u8> = Vec::new();
+    fn u(b: &mut Vec<u8>, x: usize) {
+        b.extend_from_slice(&(x as u32).to_le_bytes());
+    }
+    u(&mut b, p.spawns.len());
+    for (kind, rows) in &p.spawns {
+        u(&mut b, st.of(kind) as usize);
+        u(&mut b, rows.len());
+        for r in rows {
+            u(&mut b, r.len());
+            for (c, v) in r {
+                u(&mut b, st.of(c) as usize);
+                match v {
+                    V::N(x) => {
+                        b.push(0);
+                        b.extend_from_slice(&x.to_bits().to_le_bytes());
+                    }
+                    V::S(t) => {
+                        b.push(1);
+                        u(&mut b, st.of(t) as usize);
+                    }
+                }
+            }
+        }
+    }
+    u(&mut b, p.keys.len());
+    for ((id, c), ks) in &p.keys {
+        u(&mut b, st.of(id) as usize);
+        u(&mut b, st.of(c) as usize);
+        u(&mut b, ks.len());
+        ks.iter().for_each(|k| b.extend_from_slice(&k.0.to_le_bytes()));
+        ks.iter().for_each(|k| b.extend_from_slice(&k.1.to_bits().to_le_bytes()));
+        let e0 = ks.first().map_or("linear", |k| k.2.as_str());
+        if ks.iter().all(|k| k.2 == e0) {
+            b.push(0);
+            u(&mut b, st.of(e0) as usize);
+        } else {
+            b.push(1);
+            ks.iter().for_each(|k| u(&mut b, st.of(&k.2) as usize));
+        }
+    }
+    b
+}
+
+/// A binary section read with every length and index checked (a damaged or crafted bake is refused, never a panic).
+struct Cur<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cur<'a> {
+    fn take(&mut self, n: usize) -> R<&'a [u8]> {
+        let e = self.at.checked_add(n).filter(|&e| e <= self.b.len()).ok_or("the bake's 3D ends early")?;
+        let s = &self.b[self.at..e];
+        self.at = e;
+        Ok(s)
+    }
+    fn u32(&mut self) -> R<usize> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize)
+    }
+    fn u8(&mut self) -> R<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn u64(&mut self) -> R<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    /// a count, bounded by the bytes left (each item takes at least `min` bytes)
+    fn count(&mut self, min: usize) -> R<usize> {
+        let n = self.u32()?;
+        if n.saturating_mul(min.max(1)) > self.b.len() - self.at {
+            return Err("the bake's 3D names more than it holds".into());
+        }
+        Ok(n)
+    }
+}
+
+/// The Program from a native-4 header's meta and strings and its binary section.
+fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
+    let s = |i: usize| strings.get(i).cloned().ok_or_else(|| format!("the bake's 3D names string {i} of {}", strings.len()));
+    let mut c = Cur { b: bin, at: 0 };
+    let mut p = Program {
+        fps: meta["fps"].as_f64().ok_or("no fps")?,
+        width: meta["width"].as_u64().ok_or("no width")? as u32,
+        height: meta["height"].as_u64().ok_or("no height")? as u32,
+        frames: meta["frames"].as_i64().ok_or("no frames")?,
+        ..Default::default()
+    };
+    for _ in 0..c.count(8)? {
+        let kind = s(c.u32()?)?;
+        let n = c.count(4)?;
+        let mut rows = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut r = BTreeMap::new();
+            for _ in 0..c.count(9)? {
+                let col = s(c.u32()?)?;
+                let v = match c.u8()? {
+                    0 => V::N(f64::from_bits(c.u64()?)),
+                    1 => V::S(s(c.u32()?)?),
+                    t => return Err(format!("the bake's 3D has a value of kind {t}")),
+                };
+                r.insert(col, v);
+            }
+            rows.push(r);
+        }
+        p.spawns.push((kind, rows));
+    }
+    for _ in 0..c.count(13)? {
+        let (id, col) = (s(c.u32()?)?, s(c.u32()?)?);
+        let n = c.count(16)?;
+        let fs: Vec<i64> = (0..n).map(|_| c.u64().map(|x| x as i64)).collect::<R<_>>()?;
+        let vs: Vec<f64> = (0..n).map(|_| c.u64().map(f64::from_bits)).collect::<R<_>>()?;
+        let eases: Vec<String> = match c.u8()? {
+            0 => vec![s(c.u32()?)?; n],
+            1 => (0..n).map(|_| c.u32().and_then(&s)).collect::<R<_>>()?,
+            t => return Err(format!("the bake's 3D has an ease table of kind {t}")),
+        };
+        p.keys.insert((id, col), fs.into_iter().zip(vs).zip(eases).map(|((f, v), e)| (f, v, e)).collect());
+    }
+    if c.at != bin.len() {
+        return Err("the bake's 3D has bytes past its end".into());
+    }
+    Ok(p)
+}
+
+/// A kept bake's bytes (before zstd): native-4's header and binary 3D, its paths made portable.
+fn kept_bytes(w: u32, h: u32, fps: f64, total: i64, ops: &[(i64, Vec<String>)], prog: Option<&Program>, dir: &Path) -> Vec<u8> {
+    let mut st = Strs::default();
+    let bin = prog.map(|p| prog_bin(p, &mut st)).unwrap_or_default();
+    let meta = prog.map(|p| json!({"fps": p.fps, "width": p.width, "height": p.height, "frames": p.frames}));
+    let doc = json!({"format": "native-4", "w": w, "h": h, "fps": fps, "total": total, "ops": ops, "prog": meta, "strings": st.list});
+    let head = portable(&doc, dir);
+    let mut out = Vec::with_capacity(8 + head.len() + bin.len());
+    out.extend_from_slice(BIN_MAGIC);
+    out.extend_from_slice(&(head.len() as u32).to_le_bytes());
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(&bin);
+    out
+}
+
+/// A kept bake's bytes split into its header text and binary 3D (native-4), or the whole JSON (native-3: no binary).
+fn split_kept(b: Vec<u8>) -> R<(String, Option<Vec<u8>>)> {
+    if b.starts_with(BIN_MAGIC) {
+        let n = b.get(4..8).map(|x| u32::from_le_bytes(x.try_into().unwrap()) as usize).ok_or("a short bake")?;
+        let e = 8usize.checked_add(n).filter(|&e| e <= b.len()).ok_or("the bake's header runs past its end")?;
+        let head = String::from_utf8(b[8..e].to_vec()).map_err(|e| e.to_string())?;
+        Ok((head, Some(b[e..].to_vec())))
+    } else {
+        Ok((String::from_utf8(b).map_err(|e| e.to_string())?, None))
+    }
 }
 
 fn prog_of(j: &Value) -> Option<Program> {
@@ -540,7 +722,7 @@ fn key_of(js: &Path, stepped: &[i64]) -> R<u64> {
         }
     };
     eat(&std::fs::read(js).map_err(|e| format!("{}: {e}", js.display()))?);
-    eat(format!("native-3|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
+    eat(format!("native-4|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
     for v in ["RAEA_NATIVE_DROP3D", "RAEA_HIDE_LAYERS", "RAEA_CAMERA", "RAEA_ENGINE_READS", "RAEA_SOURCE_STAMPS", "RAEA_LAYERS"] {
         eat(format!("|{v}={:?}", std::env::var(v).ok()).as_bytes());
     }
@@ -756,12 +938,14 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
             laps.push((what, t_ms(lap)));
             lap = std::time::Instant::now();
         };
+        let mut bin: Option<Vec<u8>> = None;
         let read = std::fs::read(p)
             .map_err(|e| e.to_string())
             .and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string()))
-            .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
-            .map(|t| {
+            .and_then(split_kept)
+            .map(|(t, b)| {
                 mark("zstd");
+                bin = b;
                 let t = placed(&t, dir);
                 mark("root placed");
                 t
@@ -779,20 +963,38 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         match read {
             Ok(v) => {
                 let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
-                let prog = if v["prog"].is_null() { None } else { prog_of(&v["prog"]) };
+                let prog = if v["prog"].is_null() {
+                    None
+                } else if let Some(b) = bin.as_deref() {
+                    let strings: Vec<String> = v["strings"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+                    match prog_from_bin(&v["prog"], &strings, b) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            eprintln!("raea native: the kept bake {} can't be used ({e}); baking again", p.display());
+                            None
+                        }
+                    }
+                } else {
+                    prog_of(&v["prog"])
+                };
                 mark("Program made");
-                // its solids written out only now: the bake passed stale() and its Program read (a 3D that didn't read
-                // is drawn without them anyway)
-                if v["prog"].is_null() || prog.is_some() {
-                    unpack_solids_into(&v, &solids_dir());
+                // a 3D that didn't read is baked again (drawn without it, a shot would lose its 3D: page-only native)
+                if !v["prog"].is_null() && prog.is_none() {
+                    eprintln!("raea native: the kept bake {}'s 3D didn't read; baking again", p.display());
+                } else {
+                    // its solids written out only now: the bake passed stale() and its Program read (a 3D that didn't read
+                    // is drawn without them anyway)
+                    if v["prog"].is_null() || prog.is_some() {
+                        unpack_solids_into(&v, &solids_dir());
+                    }
+                    if trace() {
+                        eprintln!("raea native: bake read back: {}", laps.iter().map(|(w, ms)| format!("{w} {ms:.0} ms")).collect::<Vec<_>>().join(", "));
+                    }
+                    let num = |k: &str| v[k].as_f64().unwrap_or(0.0);
+                    let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+                    raea_runtime_react::startup_mark(&format!("the shot's bake read back ({:.0} ms)", t_ms(t0)));
+                    return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog }));
                 }
-                if trace() {
-                    eprintln!("raea native: bake read back: {}", laps.iter().map(|(w, ms)| format!("{w} {ms:.0} ms")).collect::<Vec<_>>().join(", "));
-                }
-                let num = |k: &str| v[k].as_f64().unwrap_or(0.0);
-                let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
-                raea_runtime_react::startup_mark(&format!("the shot's bake read back ({:.0} ms)", t_ms(t0)));
-                return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog }));
             }
             Err(e) => eprintln!("raea native: the kept bake {} can't be used ({e}); baking again", p.display()),
         }
@@ -834,10 +1036,9 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         let (sw, sh, sfps, stotal) = (shot.w, shot.h, shot.fps, shot.total);
         let h = std::thread::Builder::new().name("raea shot keep".into()).spawn(move || {
             let t2 = std::time::Instant::now();
-            let doc = json!({"w": sw, "h": sh, "fps": sfps, "total": stotal, "ops": ops, "prog": prog.as_ref().map(prog_json)});
             if let Some(d) = p.parent().filter(|d| std::fs::create_dir_all(d).is_ok()) {
                 let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-                let packed = zstd::encode_all(portable(&doc, &dir).as_bytes(), 3).unwrap_or_default();
+                let packed = zstd::encode_all(&kept_bytes(sw, sh, sfps, stotal, &ops, prog.as_ref(), &dir)[..], 3).unwrap_or_default();
                 if !packed.is_empty() && std::fs::write(&tmp, packed).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
                     prune_cache(d, "zst", 64);
                 } else {
@@ -1326,5 +1527,87 @@ mod solid_tests {
             let _ = std::fs::remove_dir_all(outside.parent().unwrap());
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod bin_tests {
+    use super::*;
+
+    fn sample() -> Program {
+        let mut p = Program { fps: 30.0, width: 1920, height: 1080, frames: 150, ..Default::default() };
+        let shape = "mesh(1 2 3; 4 5 6)".repeat(50);
+        let row = |id: &str| -> BTreeMap<String, V> {
+            [("id".to_string(), V::S(id.into())), ("shape".to_string(), V::S(shape.clone())), ("x".to_string(), V::N(-0.0)), ("y".to_string(), V::N(f64::NAN)), ("z".to_string(), V::N(f64::INFINITY))].into_iter().collect()
+        };
+        p.spawns.push(("mesh".into(), vec![row("mesh0"), row("mesh1")]));
+        p.spawns.push(("light".into(), vec![[("id".to_string(), V::S("light0".into())), ("k".to_string(), V::N(1e-300))].into_iter().collect()]));
+        p.keys.insert(("mesh0".into(), "x".into()), vec![(10, 0.5, "linear".into()), (11, f64::NEG_INFINITY, "linear".into())]);
+        p.keys.insert(("mesh1".into(), "q_w".into()), vec![(-3, 1.0, "step".into()), (4, 0.25, "linear".into()), (i64::MAX, -2.0, "ease".into())]);
+        p
+    }
+
+    fn same(a: &Program, b: &Program) -> bool {
+        let vb = |v: &V| match v { V::N(x) => format!("n{}", x.to_bits()), V::S(s) => format!("s{s}") };
+        let rows = |p: &Program| p.spawns.iter().map(|(k, rs)| (k.clone(), rs.iter().map(|r| r.iter().map(|(c, v)| (c.clone(), vb(v))).collect::<Vec<_>>()).collect::<Vec<_>>())).collect::<Vec<_>>();
+        let keys = |p: &Program| p.keys.iter().map(|(k, ks)| (k.clone(), ks.iter().map(|(f, v, e)| (*f, v.to_bits(), e.clone())).collect::<Vec<_>>())).collect::<Vec<_>>();
+        (a.fps, a.width, a.height, a.frames) == (b.fps, b.width, b.height, b.frames) && rows(a) == rows(b) && keys(a) == keys(b)
+    }
+
+    #[test]
+    fn round_trip_is_exact() {
+        let p = sample();
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        let meta = json!({"fps": p.fps, "width": p.width, "height": p.height, "frames": p.frames});
+        let q = prog_from_bin(&meta, &st.list, &bin).unwrap();
+        assert!(same(&p, &q));
+        // the big shape stored once
+        assert_eq!(st.list.iter().filter(|s| s.starts_with("mesh(")).count(), 1);
+    }
+
+    #[test]
+    fn damaged_bin_is_refused() {
+        let p = sample();
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        let meta = json!({"fps": 30, "width": 1920, "height": 1080, "frames": 150});
+        for cut in [0, 3, bin.len() / 2, bin.len() - 1] {
+            assert!(prog_from_bin(&meta, &st.list, &bin[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut extra = bin.clone();
+        extra.push(0);
+        assert!(prog_from_bin(&meta, &st.list, &extra).is_err());
+        assert!(prog_from_bin(&meta, &st.list[..1], &bin).is_err(), "a string index past the table");
+        let mut huge = bin.clone();
+        huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(prog_from_bin(&meta, &st.list, &huge).is_err(), "a count past the bytes");
+    }
+
+    #[test]
+    fn split_reads_both_formats() {
+        let (h, b) = split_kept(b"{\"w\":1}".to_vec()).unwrap();
+        assert_eq!((h.as_str(), b), ("{\"w\":1}", None));
+        let mut v = BIN_MAGIC.to_vec();
+        v.extend_from_slice(&3u32.to_le_bytes());
+        v.extend_from_slice(b"{}x");
+        v.extend_from_slice(&[1, 2]);
+        let (h, b) = split_kept(v).unwrap();
+        assert_eq!((h.as_str(), b), ("{}x", Some(vec![1, 2])));
+        let mut bad = BIN_MAGIC.to_vec();
+        bad.extend_from_slice(&99u32.to_le_bytes());
+        assert!(split_kept(bad).is_err());
+    }
+
+    #[test]
+    fn same_as_native3() {
+        let p = sample();
+        let via_json = prog_of(&prog_json(&p)).unwrap();
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        let via_bin = prog_from_bin(&json!({"fps": p.fps, "width": p.width, "height": p.height, "frames": p.frames}), &st.list, &bin).unwrap();
+        // native-3 can't carry NaN bits exactly; compare the finite parts through both
+        let fin = |q: &Program| q.keys.values().flatten().filter(|k| k.1.is_finite()).map(|k| (k.0, k.1.to_bits())).collect::<Vec<_>>();
+        assert_eq!(fin(&via_json), fin(&via_bin));
     }
 }
