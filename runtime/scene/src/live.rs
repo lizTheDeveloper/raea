@@ -54,7 +54,10 @@ pub(crate) const LIVE_GROUPS: [&str; 5] = ["light", "mesh", "model", "panel", "d
 
 /// A <Model animations>'s keyed columns (its clips' times and weights) and a <Model morphs>'s (its targets' weights).
 pub(crate) const MIX_COLS: [(&str, &str); 4] = [("mix0_t", "mix0_w"), ("mix1_t", "mix1_w"), ("mix2_t", "mix2_w"), ("mix3_t", "mix3_w")];
-pub(crate) const GRAPH_COLS: [[&str; 2]; 16] = [["g0_w", "g0_t"], ["g1_w", "g1_t"], ["g2_w", "g2_t"], ["g3_w", "g3_t"], ["g4_w", "g4_t"], ["g5_w", "g5_t"], ["g6_w", "g6_t"], ["g7_w", "g7_t"], ["g8_w", "g8_t"], ["g9_w", "g9_t"], ["g10_w", "g10_t"], ["g11_w", "g11_t"], ["g12_w", "g12_t"], ["g13_w", "g13_t"], ["g14_w", "g14_t"], ["g15_w", "g15_t"]];
+/// Up to 64 nodes of a <Model graph> (the u64 of Bevy's AnimationMask caps its masked nodes at 64 too: model.rs):
+/// each node's keyed weight and clip time. Only the nodes a graph has are columns, so a bigger cap costs nothing a frame.
+pub(crate) const GRAPH_NODES: usize = 64;
+pub(crate) const GRAPH_COLS: [[&str; 2]; GRAPH_NODES] = [["g0_w", "g0_t"], ["g1_w", "g1_t"], ["g2_w", "g2_t"], ["g3_w", "g3_t"], ["g4_w", "g4_t"], ["g5_w", "g5_t"], ["g6_w", "g6_t"], ["g7_w", "g7_t"], ["g8_w", "g8_t"], ["g9_w", "g9_t"], ["g10_w", "g10_t"], ["g11_w", "g11_t"], ["g12_w", "g12_t"], ["g13_w", "g13_t"], ["g14_w", "g14_t"], ["g15_w", "g15_t"], ["g16_w", "g16_t"], ["g17_w", "g17_t"], ["g18_w", "g18_t"], ["g19_w", "g19_t"], ["g20_w", "g20_t"], ["g21_w", "g21_t"], ["g22_w", "g22_t"], ["g23_w", "g23_t"], ["g24_w", "g24_t"], ["g25_w", "g25_t"], ["g26_w", "g26_t"], ["g27_w", "g27_t"], ["g28_w", "g28_t"], ["g29_w", "g29_t"], ["g30_w", "g30_t"], ["g31_w", "g31_t"], ["g32_w", "g32_t"], ["g33_w", "g33_t"], ["g34_w", "g34_t"], ["g35_w", "g35_t"], ["g36_w", "g36_t"], ["g37_w", "g37_t"], ["g38_w", "g38_t"], ["g39_w", "g39_t"], ["g40_w", "g40_t"], ["g41_w", "g41_t"], ["g42_w", "g42_t"], ["g43_w", "g43_t"], ["g44_w", "g44_t"], ["g45_w", "g45_t"], ["g46_w", "g46_t"], ["g47_w", "g47_t"], ["g48_w", "g48_t"], ["g49_w", "g49_t"], ["g50_w", "g50_t"], ["g51_w", "g51_t"], ["g52_w", "g52_t"], ["g53_w", "g53_t"], ["g54_w", "g54_t"], ["g55_w", "g55_t"], ["g56_w", "g56_t"], ["g57_w", "g57_t"], ["g58_w", "g58_t"], ["g59_w", "g59_t"], ["g60_w", "g60_t"], ["g61_w", "g61_t"], ["g62_w", "g62_t"], ["g63_w", "g63_t"]];
 /// Up to 64 morph weights a model (Bevy takes 256; a MakeHuman face has 34 expression units).
 pub(crate) const MORPH_COLS: [&str; 64] = ["morph0", "morph1", "morph2", "morph3", "morph4", "morph5", "morph6", "morph7", "morph8", "morph9", "morph10", "morph11", "morph12", "morph13", "morph14", "morph15", "morph16", "morph17", "morph18", "morph19", "morph20", "morph21", "morph22", "morph23", "morph24", "morph25", "morph26", "morph27", "morph28", "morph29", "morph30", "morph31", "morph32", "morph33", "morph34", "morph35", "morph36", "morph37", "morph38", "morph39", "morph40", "morph41", "morph42", "morph43", "morph44", "morph45", "morph46", "morph47", "morph48", "morph49", "morph50", "morph51", "morph52", "morph53", "morph54", "morph55", "morph56", "morph57", "morph58", "morph59", "morph60", "morph61", "morph62", "morph63"];
 
@@ -63,7 +66,7 @@ pub(crate) fn live_dynamic(kind: &str) -> &'static [&'static str] {
     match kind {
         "light" => &["lux", "lumens", "x", "y", "z", "dir_x", "dir_y", "dir_z", "rot_qx", "rot_qy", "rot_qz", "rot_qw", "inner", "outer", "frame_sets", "frame_set_i"],
         "mesh" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "shape", "col_r", "col_g", "col_b", "rough", "metal", "emissive_k", "opacity", "sh_r", "sh_g", "sh_b", "rim_k", "spec_k", "outline_w", "pass", "inst"],
-        "model" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "anim_t", "mix0_t", "mix0_w", "mix1_t", "mix1_w", "mix2_t", "mix2_w", "mix3_t", "mix3_w", "morph0", "morph1", "morph2", "morph3", "morph4", "morph5", "morph6", "morph7", "morph8", "morph9", "morph10", "morph11", "morph12", "morph13", "morph14", "morph15", "morph16", "morph17", "morph18", "morph19", "morph20", "morph21", "morph22", "morph23", "morph24", "morph25", "morph26", "morph27", "morph28", "morph29", "morph30", "morph31", "morph32", "morph33", "morph34", "morph35", "morph36", "morph37", "morph38", "morph39", "morph40", "morph41", "morph42", "morph43", "morph44", "morph45", "morph46", "morph47", "morph48", "morph49", "morph50", "morph51", "morph52", "morph53", "morph54", "morph55", "morph56", "morph57", "morph58", "morph59", "morph60", "morph61", "morph62", "morph63", "g0_w", "g0_t", "g1_w", "g1_t", "g2_w", "g2_t", "g3_w", "g3_t", "g4_w", "g4_t", "g5_w", "g5_t", "g6_w", "g6_t", "g7_w", "g7_t", "g8_w", "g8_t", "g9_w", "g9_t", "g10_w", "g10_t", "g11_w", "g11_t", "g12_w", "g12_t", "g13_w", "g13_t", "g14_w", "g14_t", "g15_w", "g15_t", "look", "glitch_explode", "glitch_scramble", "glitch_jitter", "glitch_snap", "glitch_smear_x", "glitch_smear_y", "glitch_smear_z", "glitch_seed", "cloth_frame", "screen_power", "pass", "inst"],
+        "model" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "anim_t", "mix0_t", "mix0_w", "mix1_t", "mix1_w", "mix2_t", "mix2_w", "mix3_t", "mix3_w", "morph0", "morph1", "morph2", "morph3", "morph4", "morph5", "morph6", "morph7", "morph8", "morph9", "morph10", "morph11", "morph12", "morph13", "morph14", "morph15", "morph16", "morph17", "morph18", "morph19", "morph20", "morph21", "morph22", "morph23", "morph24", "morph25", "morph26", "morph27", "morph28", "morph29", "morph30", "morph31", "morph32", "morph33", "morph34", "morph35", "morph36", "morph37", "morph38", "morph39", "morph40", "morph41", "morph42", "morph43", "morph44", "morph45", "morph46", "morph47", "morph48", "morph49", "morph50", "morph51", "morph52", "morph53", "morph54", "morph55", "morph56", "morph57", "morph58", "morph59", "morph60", "morph61", "morph62", "morph63", "g0_w", "g0_t", "g1_w", "g1_t", "g2_w", "g2_t", "g3_w", "g3_t", "g4_w", "g4_t", "g5_w", "g5_t", "g6_w", "g6_t", "g7_w", "g7_t", "g8_w", "g8_t", "g9_w", "g9_t", "g10_w", "g10_t", "g11_w", "g11_t", "g12_w", "g12_t", "g13_w", "g13_t", "g14_w", "g14_t", "g15_w", "g15_t", "g16_w", "g16_t", "g17_w", "g17_t", "g18_w", "g18_t", "g19_w", "g19_t", "g20_w", "g20_t", "g21_w", "g21_t", "g22_w", "g22_t", "g23_w", "g23_t", "g24_w", "g24_t", "g25_w", "g25_t", "g26_w", "g26_t", "g27_w", "g27_t", "g28_w", "g28_t", "g29_w", "g29_t", "g30_w", "g30_t", "g31_w", "g31_t", "g32_w", "g32_t", "g33_w", "g33_t", "g34_w", "g34_t", "g35_w", "g35_t", "g36_w", "g36_t", "g37_w", "g37_t", "g38_w", "g38_t", "g39_w", "g39_t", "g40_w", "g40_t", "g41_w", "g41_t", "g42_w", "g42_t", "g43_w", "g43_t", "g44_w", "g44_t", "g45_w", "g45_t", "g46_w", "g46_t", "g47_w", "g47_t", "g48_w", "g48_t", "g49_w", "g49_t", "g50_w", "g50_t", "g51_w", "g51_t", "g52_w", "g52_t", "g53_w", "g53_t", "g54_w", "g54_t", "g55_w", "g55_t", "g56_w", "g56_t", "g57_w", "g57_t", "g58_w", "g58_t", "g59_w", "g59_t", "g60_w", "g60_t", "g61_w", "g61_t", "g62_w", "g62_t", "g63_w", "g63_t", "look", "glitch_explode", "glitch_scramble", "glitch_jitter", "glitch_snap", "glitch_smear_x", "glitch_smear_y", "glitch_smear_z", "glitch_seed", "cloth_frame", "screen_power", "pass", "inst"],
         "panel" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "screen_power", "screen_bright", "pass", "sheet_frame", "sheet_cols", "sheet_rows", "src"],
         "decal" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "col_r", "col_g", "col_b", "opacity", "rough", "metal"],
         _ => &[],
@@ -459,6 +462,30 @@ mod tests {
         ls.open(Shot { scene: &text(0.5), clear: None }, 64, 64, 30.0);
         let (set, _) = ls.frame(Shot { scene: &text(1.0), clear: None });
         assert_eq!(set.iter().find(|t| t.kind == "glyph").and_then(|t| t.vals.get("opacity")), Some(&V::N(1.0)));
+    }
+
+    /// Every one of a graph's 64 nodes has its columns, named for its place, and a live frame may change each of them.
+    #[test]
+    fn a_graph_has_64_nodes_each_keyed() {
+        for (i, [w, t]) in GRAPH_COLS.iter().enumerate() {
+            assert_eq!((*w, *t), (format!("g{i}_w").as_str(), format!("g{i}_t").as_str()));
+            assert!(live_dynamic("model").contains(w) && live_dynamic("model").contains(t), "node {i}'s columns aren't live");
+        }
+    }
+
+    /// A 40-node <Model graph> (past the old 16): its last node's weight changed live reaches the engine as g39_w.
+    #[test]
+    fn a_40_node_graph_keys_its_last_node() {
+        let graph = |w: f64| -> Vec<Node3> {
+            let mut nodes = vec![json!({"kind": "blend", "parent": -1, "mask": [], "weight": 1, "time": 0})];
+            nodes.extend((1..40).map(|i| json!({"kind": "clip", "clip": "idle", "parent": 0, "mask": [], "weight": if i == 39 { w } else { 1.0 }, "time": 0})));
+            vec![model(json!({"name": "body", "src": "/media/a/body.glb", "graph": nodes}))]
+        };
+        let mut ls = LiveScene::default();
+        ls.open(Shot { scene: &graph(1.0), clear: None }, 64, 64, 30.0);
+        let (set, _) = ls.frame(Shot { scene: &graph(0.25), clear: None });
+        let m = set.iter().find(|t| t.kind == "model").expect("the model's row");
+        assert_eq!(m.vals.get("g39_w"), Some(&V::N(0.25)));
     }
 
     /// Two cameras cut between (<Camera3d is_active>): the camera row's shot is sent the frame it changes, and 0 when
