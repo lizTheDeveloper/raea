@@ -244,9 +244,9 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             && bump_guard(device, px.x, px.y).is_ok()
         {
             let cache = slot_cache.get_or_insert_with(|| crate::slot_cache::SlotCache::new(device));
-            let drawn = cache.draw(device, &queue, handle.id(), px, print, sp, linear, (slot_tex, *origin), tex, |s, target| {
+            let drawn = cache.draw(device, &queue, handle.id(), px, sp, linear, (slot_tex, *origin), tex, |s, target| {
                 vello::set_raw_output(true);
-                let r = renderer.render_to_texture(device, &queue, s, &target.create_view(&default()), &params).map_err(|e| format!("vello, a slot cache piece: {e}"));
+                let r = renderer.render_to_texture(device, &queue, s, target, &params).map_err(|e| format!("vello, a slot cache piece: {e}"));
                 vello::set_raw_output(false);
                 r
             });

@@ -53,6 +53,47 @@ pub struct Encoding {
 }
 
 impl Encoding {
+    /// raea: a print of everything this encoding draws (its streams and resources: ramps' stops, images by blob,
+    /// glyph runs by font and glyphs), the same for two encodings that draw the same. raea-page's slot cache keeps a
+    /// page piece's render while its print is unchanged.
+    pub fn fingerprint(&self) -> u64 {
+        use core::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        bytemuck::cast_slice::<PathTag, u8>(&self.path_tags).hash(&mut h);
+        self.path_data.hash(&mut h);
+        bytemuck::cast_slice::<DrawTag, u8>(&self.draw_tags).hash(&mut h);
+        self.draw_data.hash(&mut h);
+        bytemuck::cast_slice::<Transform, u8>(&self.transforms).hash(&mut h);
+        bytemuck::cast_slice::<Style, u8>(&self.styles).hash(&mut h);
+        (self.n_paths, self.n_path_segments, self.n_clips, self.n_open_clips, self.flags).hash(&mut h);
+        let r = &self.resources;
+        for p in &r.patches {
+            match p {
+                Patch::Ramp { draw_data_offset, stops, extend, interpolation_alpha_space } => {
+                    (0u8, draw_data_offset, stops.start, stops.end).hash(&mut h);
+                    format!("{extend:?}{interpolation_alpha_space:?}").hash(&mut h);
+                }
+                Patch::GlyphRun { index } => (1u8, index).hash(&mut h),
+                Patch::Image { draw_data_offset, image } => {
+                    (2u8, draw_data_offset, image.data.id(), image.width, image.height).hash(&mut h);
+                    format!("{:?}{:?}", image.format, image.alpha_type).hash(&mut h);
+                }
+            }
+        }
+        format!("{:?}", r.color_stops).hash(&mut h);
+        format!("{:?}", r.glyphs).hash(&mut h);
+        for g in &r.glyph_runs {
+            (g.font.data.id(), g.font.index, g.font_size.to_bits(), g.hint, g.normalized_coords.start, g.normalized_coords.end, g.glyphs.start, g.glyphs.end).hash(&mut h);
+            bytemuck::bytes_of(&g.transform).hash(&mut h);
+            g.glyph_transform.map(|t| bytemuck::bytes_of(&t).to_vec()).hash(&mut h);
+            g.brush_transform.map(|t| bytemuck::bytes_of(&t).to_vec()).hash(&mut h);
+            format!("{:?}", g.style).hash(&mut h);
+            format!("{:?}{:?}", g.font_embolden, g.stream_offsets).hash(&mut h);
+        }
+        r.normalized_coords.hash(&mut h);
+        h.finish()
+    }
+
     /// Forces encoding of the next transform even if it matches
     /// the current transform in the stream.
     pub const FORCE_NEXT_TRANSFORM: u32 = 1;
