@@ -36,6 +36,15 @@ impl Col {
             Col::Any(x) => x[r].clone(),
         }
     }
+    /// Whether row r's value here is `v` (None: the row has none), copying nothing.
+    pub fn is(&self, r: usize, v: Option<&V>) -> bool {
+        match (self, v) {
+            (Col::Num { v: n, has }, Some(V::N(x))) => has[r] && n[r].to_bits() == x.to_bits(),
+            (Col::Num { has, .. }, None) => !has[r],
+            (Col::Num { .. }, Some(_)) => false,
+            (Col::Any(a), v) => a[r].as_ref() == v,
+        }
+    }
     pub fn has(&self, r: usize) -> bool {
         match self {
             Col::Num { has, .. } => has[r],

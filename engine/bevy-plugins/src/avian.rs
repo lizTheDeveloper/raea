@@ -75,7 +75,26 @@ fn collisions(In(_): In<Option<Value>>, s: Res<Started>) -> BrpResult {
 }
 
 /// Adds the methods (after avian's PhysicsPlugins, in the plugin's install).
+/// Physics paused while nothing in the World is physical (no rigid body, no collider): its schedule (six substeps of
+/// solver, broad phase and transform sync) ran every update for a film with no bodies at all. It runs again from the
+/// update a body or collider appears (RAEA_IDLE_PHYSICS=0: always runs).
+fn idle_physics(bodies: Query<(), Or<(With<RigidBody>, With<Collider>)>>, mut time: ResMut<Time<Physics>>, mut paused: Local<bool>) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RAEA_IDLE_PHYSICS").as_deref() != Ok("0")) {
+        return;
+    }
+    let idle = bodies.is_empty();
+    if idle && !time.is_paused() {
+        time.pause();
+        *paused = true;
+    } else if !idle && *paused {
+        time.unpause();
+        *paused = false;
+    }
+}
+
 pub fn calls(app: &mut App) {
+    app.add_systems(First, idle_physics);
     crate::bridge::install_remote(app);
     add_method(app, "avian3d/cast_ray", cast_ray);
     add_method(app, "avian3d/cast_rays", cast_rays);
