@@ -78,20 +78,21 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
     let chunks = |rows: u32, cw: u32| -> usize {
         if (rows as u64) * (cw as u64) < (1 << 20) { 1 } else { raea_core_scene::par::share().min(8).min(rows as usize).max(1) }
     };
-    let base = &data[..(w * h * 4) as usize];
-    let mut cur: Vec<[f32; 4]> = vec![[0.0; 4]; (w * h) as usize];
-    {
-        let k = chunks(h, w);
-        let per = (h as usize).div_ceil(k) * w as usize;
-        let parts: Vec<std::sync::Mutex<(&mut [[f32; 4]], &[u8])>> = cur.chunks_mut(per).zip(base.chunks(per * 4)).map(std::sync::Mutex::new).collect();
-        raea_core_scene::par::each(parts.len(), 8, |i| {
-            let mut g = parts[i].lock().unwrap();
-            let (part, src) = &mut *g;
-            for (o, p) in part.iter_mut().zip(src.chunks_exact(4)) {
-                *o = [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0];
+    // the whole chain's bytes reserved once (growing it level by level copied the picture over again), and level 0
+    // read straight from its bytes through to_lin, not first copied out as linear f32 (16 bytes a texel: 268 MB for a
+    // 4096 texture, held for every texture being mipped at once); the same values, so the same bytes
+    let total: usize = {
+        let (mut a, mut b, mut t) = (w, h, 0usize);
+        loop {
+            t += (a as usize) * (b as usize) * 4;
+            if a <= 1 && b <= 1 {
+                break t;
             }
-        });
-    }
+            (a, b) = ((a / 2).max(1), (b / 2).max(1));
+        }
+    };
+    data.reserve_exact(total.saturating_sub(data.len()));
+    let mut cur: Vec<[f32; 4]> = Vec::new();
     let (mut cw, mut ch) = (w, h);
     let mut levels = 1;
     while cw > 1 || ch > 1 {
@@ -102,7 +103,16 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
         let rows_per = (nh as usize).div_ceil(k);
         {
             let parts: Vec<std::sync::Mutex<(&mut [[f32; 4]], &mut [u8])>> = next.chunks_mut(rows_per * nw as usize).zip(bytes.chunks_mut(rows_per * nw as usize * 4)).map(std::sync::Mutex::new).collect();
-            let cur = &cur;
+            let (cur, base) = (&cur, &data[..(cw * ch * 4) as usize]);
+            let first = levels == 1;
+            let at = |i: usize| -> [f32; 4] {
+                if first {
+                    let p = &base[i * 4..i * 4 + 4];
+                    [to_lin[p[0] as usize], to_lin[p[1] as usize], to_lin[p[2] as usize], p[3] as f32 / 255.0]
+                } else {
+                    cur[i]
+                }
+            };
             raea_core_scene::par::each(parts.len(), 8, |i| {
                 let mut g = parts[i].lock().unwrap();
                 let (part, out) = &mut *g;
@@ -111,7 +121,7 @@ pub fn mips_rgba8(mut data: Vec<u8>, w: u32, h: u32, srgb: bool) -> (Vec<u8>, u3
                     let (x, y) = (j as u32 % nw, y0 + j as u32 / nw);
                     let mut acc = [0.0f32; 4];
                     for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                        let p = cur[((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize];
+                        let p = at(((y * 2 + dy).min(ch - 1) * cw + (x * 2 + dx).min(cw - 1)) as usize);
                         for k in 0..4 {
                             acc[k] += p[k] * 0.25;
                         }
