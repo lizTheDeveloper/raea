@@ -276,9 +276,15 @@ impl Engine {
         mem_mark("engine: target and readback made");
         e.load_shared_arc(prog, inserted, timeline)?;
         mem_mark("engine: edit loaded into the World");
+        if std::env::var_os("RAEA_ASSET_CENSUS").is_some() {
+            asset_census(e.app.world(), "loaded");
+        }
         for i in 0..8 {
             e.app.update();
             mem_mark(&format!("engine: warm-up update {i}"));
+        }
+        if std::env::var_os("RAEA_ASSET_CENSUS").is_some() {
+            asset_census(e.app.world(), "warmed");
         }
         // the warm-up drew the clock's frame: a first draw across a cut from it warms up again (Engine::draw)
         e.drawn = Some(e.app.world().resource::<Clock>().0);
@@ -309,3 +315,45 @@ impl Engine {
     }
 }
 
+
+
+/// RAEA_ASSET_CENSUS=1: what the main World's assets hold in RAM (CPU copies, besides the GPU's): meshes' vertex and
+/// index bytes, images' bytes and their mips, by whether the asset keeps a main-world copy.
+pub(crate) fn asset_census(world: &World, at: &str) {
+    use bevy::asset::RenderAssetUsages;
+    let mb = |b: usize| b as f64 / 1048576.0;
+    let (mut mn, mut mbytes, mut mkept, mut mgone) = (0usize, 0usize, 0usize, 0usize);
+    if let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
+        for (_, m) in meshes.iter() {
+            mn += 1;
+            match m.try_attributes() {
+                Ok(attrs) => {
+                    let v: usize = attrs.map(|(_, a)| a.get_bytes().len()).sum();
+                    let i = match m.indices() { Some(bevy::mesh::Indices::U16(x)) => x.len() * 2, Some(bevy::mesh::Indices::U32(x)) => x.len() * 4, None => 0 };
+                    mbytes += v + i;
+                    if m.asset_usage.contains(RenderAssetUsages::MAIN_WORLD) { mkept += 1 }
+                }
+                Err(_) => mgone += 1,
+            }
+        }
+    }
+    let (mut inn, mut ibytes, mut imip, mut imipb, mut ikept, mut igone) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut big: Vec<(usize, u32, u32, u32)> = Vec::new();
+    if let Some(images) = world.get_resource::<Assets<Image>>() {
+        for (_, im) in images.iter() {
+            inn += 1;
+            match &im.data {
+                Some(d) => {
+                    ibytes += d.len();
+                    if im.texture_descriptor.mip_level_count > 1 { imip += 1; imipb += d.len() }
+                    if im.asset_usage.contains(RenderAssetUsages::MAIN_WORLD) { ikept += 1 }
+                    big.push((d.len(), im.texture_descriptor.size.width, im.texture_descriptor.size.height, im.texture_descriptor.mip_level_count));
+                }
+                None => igone += 1,
+            }
+        }
+    }
+    big.sort_by(|a, b| b.0.cmp(&a.0));
+    eprintln!("raea assets ({at}): meshes {mn} ({:.0} MB on the CPU, {mkept} kept for the main world, {mgone} render-world only); images {inn} ({:.0} MB on the CPU, {imip} with mips holding {:.0} MB, {ikept} kept for the main world, {igone} render-world only); largest {:?}",
+        mb(mbytes), mb(ibytes), mb(imipb), big.iter().take(6).map(|(b, w, h, l)| format!("{w}x{h}x{l}: {:.0} MB", mb(*b))).collect::<Vec<_>>());
+}
