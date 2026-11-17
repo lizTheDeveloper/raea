@@ -1,0 +1,65 @@
+# The live player's macOS build (Lane F, premature-collapse design/engine-live-loop.md): every push to `live` builds
+# raea for Apple silicon on GitHub's free macOS runner (this fork is public) and uploads `raea` with its
+# libraea_bundle.dylib, so the Mac gets a fork build without compiling on its own disk. Never runs on main.
+# The release profile (no thin LTO), target/ kept between runs by actions/cache (keyed on Cargo.lock, restored by
+# prefix), so a small change rebuilds what changed. Fetch: gh run download -R lizTheDeveloper/raea -n raea-macos-live
+name: mac-live
+on:
+  push:
+    branches: [live]
+  workflow_dispatch:
+concurrency:
+  group: mac-live
+  cancel-in-progress: true
+jobs:
+  build:
+    if: github.ref == 'refs/heads/live'
+    runs-on: macos-15
+    timeout-minutes: 340
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: false
+      - name: macOS tools
+        run: brew install cmake ninja
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: The runtime's packages
+        run: for d in sdk/react/js sdk/react/tw; do (cd "$d" && bun install --frozen-lockfile); done
+      - name: Room for the build
+        run: |
+          keep=$(cd "$(xcode-select -p)/../.." && pwd -P)
+          for x in /Applications/Xcode*.app; do [ -L "$x" ] || [ "$(cd "$x" && pwd -P)" = "$keep" ] || sudo rm -rf "$x" & done
+          sudo rm -rf "$HOME/Library/Android" "$HOME/.dotnet" /usr/local/share/dotnet &
+          wait; df -h . | tail -1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: mac-live-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            mac-live-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            mac-live-
+      - name: Build
+        run: |
+          feat=$(bash tools/bevy-plugins.sh features sdk/raea/bench/bevy-plugins)
+          s=$SECONDS
+          cargo build --release --locked -p raea-cli --bin raea --no-default-features --features "$feat"
+          echo "::notice::raea built in $(( (SECONDS - s) / 60 )) min"
+          mkdir ship && cp target/release/raea target/release/libraea_bundle.dylib ship/
+          strip -x ship/raea || true
+          (cd ship && shasum -a 256 raea libraea_bundle.dylib > SHA256SUMS && git -C .. rev-parse HEAD > COMMIT)
+          rm -rf target/release/incremental
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raea-macos-live
+          path: ship/
+          retention-days: 14
