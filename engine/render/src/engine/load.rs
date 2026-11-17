@@ -49,7 +49,9 @@ impl Engine {
     }
 
     /// Whether a keeping reload (reload_*_keeping) can keep this engine's live rows with `inserted` as the new rows: none
-    /// of them text, none named as one of the new rows. Checked again by the keeping reloads themselves.
+    /// of them text, none named as one of the new rows. Checked again by the keeping reloads themselves. A kept row must
+    /// carry no physics body either (pristine_restore resets the physics world under it); a live cast has none today.
+    /// A live path only: capture (render, render-serve) never reloads keeping, since the kept rows carry their state on.
     pub fn keepable(&self, inserted: &[Tup]) -> Result<(), String> {
         let world = self.app.world();
         let fr = world.resource::<FrameRows>();

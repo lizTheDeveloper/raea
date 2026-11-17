@@ -107,6 +107,7 @@ pub fn clear_keeping(world: &mut World, keep: &[Entity]) {
     let s = schema(world);
     s.order.clear();
     s.by.clear();
+    let keep: std::collections::HashSet<Entity> = keep.iter().copied().collect();
     let gone: Vec<Entity> = world.query_filtered::<Entity, bevy::prelude::With<RowKey>>().iter(world).filter(|e| !keep.contains(e)).collect();
     for e in gone {
         world.despawn(e);
