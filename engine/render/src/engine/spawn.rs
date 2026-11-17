@@ -264,7 +264,9 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
             };
             // the shape it was made with, for a shape keyed by the frame (sync_shapes); a three.js shader's mesh is
             // fitted to its shader, so it keeps its first
-            if three.is_none() {
+            // (only a shape the frame changes: a render's keyed `shapes`, or any mesh of a live scene, whose rows
+            // arrive frame by frame; a still shape costs nothing per frame)
+            if three.is_none() && (vals.contains_key("shapes") || world.resource::<FrameRows>().live.is_some()) {
                 world.entity_mut(e).insert(ShapeNow { expr: expr.clone(), own: false });
             }
             // the surface (emissive, opacity, unlit, clearcoat, a picture map...) and transform: scene3d
@@ -400,16 +402,35 @@ pub(crate) struct ShapeNow {
 /// ripple is) made again from the frame's shape, into a Mesh of its own (never the shared one equal parts hold, so a
 /// changing shape doesn't fill the share with a mesh a frame). It drew the batch's first frame's shape throughout.
 pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
-    for (e, mut now, mut m) in &mut q {
+    // the meshes whose shape this frame changes, made across the cores (Ch2's shore: 478 meshes a frame, one by one
+    // about 50 ms), then set
+    let mut todo: Vec<(Entity, String, bool, bool, String, bool)> = Vec::new();
+    for (e, now, _) in &q {
         let Some(v) = frame.vals(e) else { continue };
+        // a hidden mesh keeps the shape it has; it's made again on the frame it shows (its shape then differs)
+        if v.get("visible").is_some_and(|x| !x.truthy()) {
+            continue;
+        }
         let Some(expr) = raea_sys_frame::keyed(|k| v.get(k).cloned(), "shape") else { continue };
         if expr == now.expr {
             continue;
         }
         let uvs = scene3d::has_maps(&v) || grid::grid_of(&v).is_some();
         let tangents = raea_sys_material::maps::needs_tangents(&v);
-        let (attrs, packed) = (match v.get("attributes") { Some(V::S(a)) => a.clone(), _ => String::new() }, v.get("compressed").is_some_and(V::truthy));
-        match raea_sys_material::mesh::shape_mesh("mesh", &expr, uvs, tangents).and_then(|mesh| raea_sys_material::mesh::finished(mesh, &attrs, packed)) {
+        let attrs = match v.get("attributes") { Some(V::S(a)) => a.clone(), _ => String::new() };
+        todo.push((e, expr, uvs, tangents, attrs, v.get("compressed").is_some_and(V::truthy)));
+    }
+    if todo.is_empty() {
+        return;
+    }
+    let made: Vec<(Entity, String, Result<Mesh, String>)> = bevy::tasks::ComputeTaskPool::get().scope(|s| {
+        for (e, expr, uvs, tangents, attrs, packed) in &todo {
+            s.spawn(async move { (*e, expr.clone(), raea_sys_material::mesh::shape_mesh("mesh", expr, *uvs, *tangents).and_then(|mesh| raea_sys_material::mesh::finished(mesh, attrs, *packed))) });
+        }
+    });
+    for (e, expr, mesh) in made {
+        let Ok((_, mut now, mut m)) = q.get_mut(e) else { continue };
+        match mesh {
             Ok(mesh) => {
                 if now.own {
                     let _ = meshes.insert(&m.0, mesh);

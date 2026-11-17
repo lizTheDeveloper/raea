@@ -392,12 +392,15 @@ pub struct ToonPartOf {
 /// materials it made, where the spec gives one: they were the colour of the frame the model's materials were swapped
 /// on, for the whole batch. Written only when it moves past the columns' rounding (1e-4), so a colour that never changes
 /// stays exactly the one spawned; its alpha (opacity, sync_surfaces) is kept.
-pub fn sync_model_toons(frame: Res<FrameRows>, mut mats: ResMut<Assets<ToonMaterial>>, parts: Query<(&ToonPartOf, &MeshMaterial3d<ToonMaterial>), With<ToonOwnColour>>) {
+pub fn sync_model_toons(frame: Res<FrameRows>, mut mats: ResMut<Assets<ToonMaterial>>, parts: Query<(&ToonPartOf, &MeshMaterial3d<ToonMaterial>), With<ToonOwnColour>>, mut roots: Local<HashMap<Entity, Option<std::collections::BTreeMap<String, V>>>>) {
+    // each root's row read once a frame (a model has many toon parts), and none for a root whose row is still
+    roots.clear();
     for (of, h) in &parts {
-        let Some(v) = frame.vals(of.root) else { continue };
+        let v = roots.entry(of.root).or_insert_with(|| if frame.still(of.root) { None } else { frame.vals(of.root).map(|v| v.into_owned()) });
+        let Some(v) = v.as_ref() else { continue };
         let p = format!("tc{}_", of.spec);
         let Some(r) = v.get(&format!("{p}col_r")).map(|x| x.num() as f32) else { continue };
-        let (g, b) = (num(&v, &format!("{p}col_g"), r), num(&v, &format!("{p}col_b"), r));
+        let (g, b) = (num(v, &format!("{p}col_g"), r), num(v, &format!("{p}col_b"), r));
         let Some(cur) = mats.get(&h.0) else { continue };
         let have = cur.base.base_color.to_srgba();
         if (have.red - r).abs() > 1e-4 || (have.green - g).abs() > 1e-4 || (have.blue - b).abs() > 1e-4 {

@@ -292,7 +292,8 @@ line), so none fell back.
 
 ### Current build and pin
 
-- **Latest and pinned:** `0.1.4-pc212` (commit 10f50d7; rollback pc211): every camera without GPU culling
+- **Latest:** `0.1.4-pc214` (e644c1f) and `0.1.4-pc213` (374a659); see the third engine agent's final state below for
+  the pin. `0.1.4-pc212` (commit 10f50d7; rollback pc211): every camera without GPU culling
   (`NoIndirectDrawing`; `RAEA_GPU_CULLING=1` restores), so draw order and depth ties are the same every run.
 - **pc211** (commit d0cec75; rollback pc210). JSC on
   the system malloc (the members' map exhaustion), bare <Entity> placement per frame (Ch1's batch-boundary zoom pops),
@@ -342,6 +343,31 @@ frame drawn alone.
 - a light's target placed by its groups.
 
 ### In progress, and exactly where it stands
+
+**2026-11-17, third engine agent: final state (wound down; what's left goes to the speed agent):**
+- **pc213 shipped** (374a659): per-frame properties (ambient colour, model toon colours, toon parts following their
+  surface colour, env-map intensity, camera clear, per-frame mesh shapes with bounds, FrameCount and render-world
+  globals.time pinned to the frame, hidden entity cameras parked, transparent ties by a fixed key). Census
+  (tools/sticky-census.sh, 31 frames Ch1-Ch5, a frame mid-batch vs drawn alone, floor 55 dB): pc212 11 fails, pc213 6.
+- **pc214 shipped** (e644c1f): render-serve requests `{args, env, cwd}`; kept engine restores clocks/physics
+  (pristine_take/restore) and empties the text atlas before the new program's spawn.
+- **rq serves batches through render-serve** on pc214+ (project tools/raea-serve.sh; switch ~/.cache/rq/serve:
+  on | off | only MID...; RQ_SERVE=0 forces off; pre-serve copies of rq.py, rq-ops.sh, rq-remote.sh and
+  render-vast-remote.sh kept as *.pre-serve).
+- **Left, in order of value:**
+  1. Census fails, Ch2 @2700/@6000/@14189 (the organism's glass plates): batch-history state (F as a batch's second
+     frame equals F alone; mid-batch differs), not in any reflected row property, not frame count, shader time or
+     warm-up. Next suspects: GPU-side state of transparent glass (OIT/transmission textures), Bevy's retained phases.
+  2. Census fails, Ch4 @4000/@10000 and Ch5 @6000 (the gilt symbolic figure, fx/look + fx/signature): likely
+     ShaderExtension uniforms fixed at mesh creation (the project re-keys meshes to refresh u_now); key them per frame
+     as own:uniforms are.
+  3. Kept engine: 44 dB on 3D text glyph edges from bevy_rich_text3d's `Local<TextRng>` (seeded once per system;
+     a kept engine carries it). Reset needs a patched rich_text3d (a resource RNG) or the system re-initialised.
+     Everything else in a kept repeat of Ch5 (and Ch5 after Ch3) is identical.
+  4. Transparent near-ties (distances that cross back and forth, Ch1 lace's strobe): no sort key can fix them; OIT
+     (Bevy's OrderIndependentTransparencySettings) or opaque parts. Exact ties are fixed (tsort.rs); quantising
+     distances made it worse (tools/checks/transparent-ties).
+  5. Ch3 @904's lit/dark alternation is the project's (shore-dusk.tsx `sand`/`ripple-*` most likely), assigned.
 
 **2026-11-16, third engine agent (live log; newest first):**
 - **In progress: first-frame-only columns (coordinator, from Ch1 v7.4 probes).** Batch-boundary check `bd.sh BIN TAG CH
