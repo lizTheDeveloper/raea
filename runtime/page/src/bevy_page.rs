@@ -137,6 +137,13 @@ impl BevyPage {
         self.slot.is_some()
     }
 
+    /// Whether the frame's page can wait for its 3D (as last synced): a layered slot, and nothing the 3D takes from
+    /// the page first (no <Screen>s, no UiMaterial elements, no app screens). Such a page is drawn once a frame, with
+    /// the 3D in its slot, not also before the 3D.
+    pub fn after_3d_only(&self) -> bool {
+        self.slot.is_some() && !self.page.has_subs() && self.ui_mats.is_empty() && self.app_screens.is_empty()
+    }
+
     /// The layered 3D's frame (`rgba` straight, `w` x `h`) as its slot's picture.
     pub fn set_scene(&mut self, w: u32, h: u32, rgba: Vec<u8>) {
         if let Some(id) = self.slot {
