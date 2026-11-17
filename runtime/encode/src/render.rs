@@ -267,17 +267,24 @@ pub fn render_with(prog: &Program, rows: &[Tup], dir: &Path, out: &Path, ro: &Re
                 Ok((st, t.elapsed().as_secs_f64()))
             }));
         }
+        // a folder's frames written beside the draw, or piped (RAEA_FRAME_PIPE, sink.rs)
+        let sink = if pngs && !still { Some(crate::sink::Sink::open(out, w, h, list.len(), 2, 4)?) } else { None };
         let t_frames = std::time::Instant::now();
         let mut n = 0;
         let dt = v
             .render_nv12(&list, |f, px| {
-                match pngs {
-                    true => save_png(&if still { out.to_path_buf() } else { out.join(format!("frame-{f:05}.png")) }, &straight(px), w, h)?,
-                    false => direct_sink(tx.as_ref(), &mut lines, f, px)?,
+                match (pngs, &sink) {
+                    (true, Some(s)) => s.put(f as usize, Box::new(straight(px)))?,
+                    (true, None) => save_png(out, &straight(px), w, h)?,
+                    (false, _) => direct_sink(tx.as_ref(), &mut lines, f, px)?,
                 }
                 n += 1;
                 Ok(())
             });
+        let dt = match (dt, sink.map(crate::sink::Sink::finish)) {
+            (Ok(_), Some(Err(e))) => Err(e),
+            (dt, _) => dt,
+        };
         let t = std::time::Instant::now();
         drop(tx);
         let joined = match enc_thread {
@@ -410,12 +417,15 @@ pub fn render_with(prog: &Program, rows: &[Tup], dir: &Path, out: &Path, ro: &Re
         let nv12 = e.nv12;
         let rgba_of = |px: Vec<u8>| if nv12 { raea_io_media::yuv::nv12_to_rgba(&px, w as usize, h as usize) } else { straight(px) };
         let mut n = 0;
-        e.frames(&list, |f, px| {
-            save_png(&out.join(format!("frame-{f:05}.png")), &rgba_of(px), w, h)?;
+        // written beside the draw, or piped (RAEA_FRAME_PIPE, sink.rs)
+        let sink = crate::sink::Sink::open(&out, w, h, list.len(), 2, 4)?;
+        let drawn = e.frames(&list, |f, px| {
+            sink.put(f as usize, Box::new(rgba_of(px)))?;
             n += 1;
             Ok(())
-        })
-        .map_err(|e| kept_note(e, &out, n))?;
+        });
+        let written = sink.finish();
+        drawn.and(written).map_err(|e| kept_note(e, &out, n))?;
     }
     eprintln!("{} ({} frames) in {:.2}s", out.display(), list.len(), t0.elapsed().as_secs_f64());
     Ok(())

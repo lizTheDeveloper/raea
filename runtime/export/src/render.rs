@@ -162,17 +162,21 @@ pub fn render(args: &[String]) -> R<String> {
 /// The render's message with its pictures' exposure after it (a still, or a folder's frames; a video's frames are
 /// measured by rendering them to a folder with --at), and the stats in the manifest with --manifest.
 fn with_exposure(said: String, out: &Path, manifest: Option<&Path>) -> String {
-    let pngs: Vec<PathBuf> = if out.is_dir() {
+    // a render whose frames were piped (RAEA_FRAME_PIPE) wrote no files: they were measured as they passed
+    let piped = raea_runtime_encode::sink::take_piped_exposure().filter(|_| out.is_dir());
+    let pngs: Vec<PathBuf> = if piped.is_some() {
+        Vec::new()
+    } else if out.is_dir() {
         raea_io_alpha::frames_in(out)
     } else if out.extension().is_some_and(|x| x == "png") {
         vec![out.to_path_buf()]
     } else {
         return said;
     };
-    if pngs.is_empty() {
+    if pngs.is_empty() && piped.is_none() {
         return said;
     }
-    match raea_sys_light_meter::exposure::of_pngs(&pngs) {
+    match piped.unwrap_or_else(|| raea_sys_light_meter::exposure::of_pngs(&pngs)) {
         Ok((e, v)) => {
             let fs = raea_sys_light_meter::exposure::said(&v); // counted with the render's other findings (DR3)
             if let Some(m) = manifest {
@@ -309,6 +313,8 @@ pub(crate) fn render_bundle_with(js: &Path, dir: &Path, out: &Path, wanted: Opti
         if folder {
             std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
         }
+        // a folder's frames written beside the draw (or piped, RAEA_FRAME_PIPE: raea_runtime_encode::sink)
+        let sink = if folder { Some(raea_runtime_encode::sink::Sink::open(out, w, h, wanted.len(), 2, 4)?) } else { None };
         for (i, &f) in wanted.iter().enumerate() {
             let px = raea_gpu_device::check::frame_caught(f, || { // a panic drawing it an error naming it (#33)
             engine_before(&app, &mut cx, f);
@@ -331,9 +337,14 @@ pub(crate) fn render_bundle_with(js: &Path, dir: &Path, out: &Path, wanted: Opti
             Ok(px)
             })
             .map_err(|e| if i == 0 { format!("{e}; no frame was written") } else { format!("{e}; the {i} frames before it are in {}", out.display()) })?;
-            let dest = if folder { out.join(format!("frame-{i:05}.png")) } else { out.to_path_buf() };
-            image::save_buffer(&dest, &px, w, h, image::ColorType::Rgba8).map_err(|e| format!("{}: {e}", dest.display()))?;
+            match &sink {
+                Some(s) => s.put(i, Box::new(px))?,
+                None => image::save_buffer(out, &px, w, h, image::ColorType::Rgba8).map_err(|e| format!("{}: {e}", out.display()))?,
+            }
             if folder { write_aov(out, i, cx.scene3d.as_mut())?; }
+        }
+        if let Some(s) = sink {
+            s.finish()?;
         }
         // with --manifest, its file as a 2D render writes it (it wrote none, and an older one stayed looking current, #28)
         let clipping = FED_CLIPPING.lock().unwrap().take().and_then(|t| t.join().ok()).unwrap_or_default();
