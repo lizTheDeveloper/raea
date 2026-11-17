@@ -990,7 +990,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
             });
         match read {
             Ok(v) => {
-                let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
+                let ops: Vec<(i64, Vec<String>)> = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
                 let prog = if v["prog"].is_null() {
                     None
                 } else if let Some(b) = bin.as_deref() {
@@ -1021,6 +1021,13 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
                     let num = |k: &str| v[k].as_f64().unwrap_or(0.0);
                     let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
                     raea_runtime_react::startup_mark(&format!("the shot's bake read back ({:.0} ms)", t_ms(t0)));
+                    // RAEA_NATIVE_READ_ONLY=1: stop once the kept bake is read, saying what reading it cost (the live
+                    // player's load: peak memory, the Program's rows and keys), with no engine opened
+                    if std::env::var("RAEA_NATIVE_READ_ONLY").as_deref() == Ok("1") {
+                        let hwm = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmHWM:")).map(|l| l.split_whitespace().nth(1).unwrap_or("?").to_string())).unwrap_or_else(|| "?".into());
+                        let (rows, keys) = prog.as_ref().map_or((0, 0), |p| (p.spawns.iter().map(|s| s.1.len()).sum::<usize>(), p.keys.values().map(Vec::len).sum::<usize>()));
+                        return Err(format!("NATIVE  read only: {} read in {:.0} ms; peak RSS {hwm} kB; {rows} spawn rows, {keys} keys, {} page frames", p.display(), t_ms(t0), ops.len()));
+                    }
                     return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog }));
                 }
             }
