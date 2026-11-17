@@ -1195,9 +1195,15 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     // the stepped frames' scenes go with the fold (only the ops are kept below); what the runtimes and the scenes
     // freed is handed back before the engine opens
     let ops: Vec<(i64, Vec<String>)> = piece.into_iter().map(|(f, o, _, _)| (f, o)).collect();
+    // the runtimes' JS threads end after their Apps go, on their own; their engines' memory is freed as they end,
+    // so wait for them (up to 3 s) before handing it back (V8's isolates took longer than the fold: 3 GB stayed)
+    let waited = std::time::Instant::now();
+    while raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst) > 0 && waited.elapsed() < std::time::Duration::from_secs(3) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let trimmed = trim_heap();
     if trace() {
-        eprintln!("raea native: {trimmed:.2} GB handed back after the bake (malloc_trim)");
+        eprintln!("raea native: {trimmed:.2} GB handed back after the bake (malloc_trim; JS threads ended in {:.0} ms, {} still running)", t_ms(waited), raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst));
     }
     let shot = Shot { w, h, fps, total, ops, prog };
     if let Some(p) = path {
