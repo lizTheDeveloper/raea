@@ -176,7 +176,8 @@ impl Live {
         };
         if !kept {
             self.scene = None;
-            match raea_render::engine::Engine::new_live(&prog, &inserted, &self.dir) {
+            // the shot's Program shared with the engine, not copied (mem2: Engine::new_live_arc)
+            match raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, &self.dir) {
                 Ok(e) => self.scene = Some(e),
                 Err(e) => eprintln!("raea play --shots: shot {i}'s 3D didn't open: {e}"),
             }
