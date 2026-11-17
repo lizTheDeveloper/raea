@@ -51,16 +51,6 @@ pub fn sync_pictures(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut mats: R
 #[derive(Component)]
 pub struct StillSynced;
 
-/// A mesh row the same on every frame whose values are on its entity (StillSynced): sync_meshes leaves it out of its
-/// query altogether, not visiting it each frame to skip it (Ch1's 7,000 still meshes; RAEA_STILL_DONE=0: visited)
-#[derive(Component)]
-pub struct StillDone;
-
-fn still_done_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAEA_STILL_DONE").as_deref() != Ok("0"))
-}
-
 /// The columns sync_meshes applies to a part's material.
 const MATERIAL_COLS: [&str; 6] = ["col_r", "opacity", "emissive_k", "rough", "metal", "sheet_frame"];
 
@@ -135,7 +125,7 @@ pub fn sync_meshes(
             Has<super::SharedMaterial>,
             Has<StillSynced>,
         ),
-        (Or<(With<Mesh3d>, With<Model3d>, With<Instanced>)>, Without<StillDone>),
+        Or<(With<Mesh3d>, With<Model3d>, With<Instanced>)>,
     >,
 ) {
     let t_sys = std::time::Instant::now();
@@ -146,9 +136,6 @@ pub fn sync_meshes(
         // scene's rows are never still
         let still = frame.still(e);
         if still && synced {
-            if still_done_on() {
-                commands.entity(e).insert(StillDone);
-            }
             continue;
         }
         // a row only its placement moves, its other values applied once: its transform alone (FrameRows::moves_only)
