@@ -8,6 +8,11 @@ use bevy::render::render_resource::TextureFormat;
 #[derive(Resource, Default)]
 pub struct Maps(pub HashMap<String, Handle<Image>>);
 
+/// The last program's maps while a kept engine loads the next (Engine::reload): a map the next shot names again is
+/// taken from here, decoded, mipped and uploaded once, not again at every shot change; the rest go after the load.
+#[derive(Resource, Default)]
+pub struct PrevMaps(pub HashMap<String, Handle<Image>>);
+
 /// An image a texture source names instead of a file, by whoever draws it (raea-sys-screen's named_image: a UiTexture's
 /// `raea-screen:name@WxH`, render_ui_to_texture); None for any other source.
 #[derive(Resource)]
@@ -288,6 +293,10 @@ pub fn cached_map(world: &mut World, key: String, kind: MapKind, repeat: bool, s
     let key = format!("{key}|{}|{}|{}", kind == MapKind::Colour, repeat, sampling.map_or("", |s| s.key.as_str()));
     if let Some(h) = world.get_resource::<Maps>().and_then(|m| m.0.get(&key)) {
         return Ok(h.clone());
+    }
+    if let Some(h) = world.get_resource_mut::<PrevMaps>().and_then(|mut m| m.0.remove(&key)) {
+        world.resource_mut::<Maps>().0.insert(key, h.clone());
+        return Ok(h);
     }
     // taken, not copied (a 4K map's chain is ~90 MB): a second use with another sampler makes its own, as before
     let ahead = PREFETCHED.lock().unwrap().as_mut().and_then(|p| p.remove(&(src, kind == MapKind::Colour)));

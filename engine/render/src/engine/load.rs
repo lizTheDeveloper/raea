@@ -20,6 +20,10 @@ impl Engine {
         // spawn, the new text was never drawn into it: a kept engine's repeat of Ch5 lost its clock's numerals)
         text3d::reset_atlas(self.app.world_mut());
         let t_reset = t.elapsed().as_secs_f64() * 1e3;
+        // what the last shot loaded, kept for the next one's load (its models' glTFs, its maps), then let go
+        let held = scene3d::model_handles(self.app.world_mut());
+        let prev: std::collections::HashMap<String, Handle<Image>> = self.app.world_mut().get_resource_mut::<scene3d::Maps>().map(|mut m| std::mem::take(&mut m.0)).unwrap_or_default();
+        self.app.world_mut().insert_resource(raea_sys_material::maps::PrevMaps(prev));
         self.load_shared(prog, inserted, None)?;
         let t_load = t.elapsed().as_secs_f64() * 1e3;
         let mut ups = Vec::new();
@@ -28,6 +32,8 @@ impl Engine {
             self.app.update();
             ups.push(u.elapsed().as_secs_f64() * 1e3);
         }
+        self.app.world_mut().remove_resource::<raea_sys_material::maps::PrevMaps>();
+        drop(held);
         if std::env::var_os("RAEA_NATIVE_TRACE").is_some() {
             eprintln!("raea native: reload {:.0} ms: restore {t_reset:.0}, load {:.0}, warm-up updates {}", t.elapsed().as_secs_f64() * 1e3, t_load - t_reset, ups.iter().map(|u| format!("{u:.0}")).collect::<Vec<_>>().join(" "));
         }
