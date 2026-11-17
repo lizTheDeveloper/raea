@@ -52,10 +52,13 @@ pub fn sync_motion_blur(frame: Res<FrameRows>, mut commands: Commands, cams: Que
     }
 }
 
-/// The shaders' frame counter at the frame being drawn, while motion blur is on (its noise is seeded by it), so every
-/// update of frame f samples the same.
+/// The shaders' frame counter at the frame being drawn, so every update of frame f, in any batch, samples the same:
+/// Bevy seeds noise with it (motion blur, specular transmission's blur, SSAO, contact shadows, volumetric jitter),
+/// and counting updates made a frame's noise depend on where its batch began (Ch2 @2700's glass panels: 35 dB between
+/// the frame mid-batch and drawn alone). Pinned with motion blur only, before. RAEA_FRAME_COUNT=updates counts updates
+/// (Bevy's own), except under motion blur.
 pub fn pin_frame_count(clock: Res<Clock>, cams: Query<Has<MotionBlur>, With<Camera3d>>, mut count: ResMut<bevy::diagnostic::FrameCount>) {
-    if !cams.iter().any(|mb| mb) {
+    if !cams.iter().any(|mb| mb) && std::env::var("RAEA_FRAME_COUNT").as_deref() == Ok("updates") {
         return;
     }
     let want = clock.0.max(0) as u32;
@@ -64,8 +67,45 @@ pub fn pin_frame_count(clock: Res<Clock>, cams: Query<Has<MotionBlur>, With<Came
     }
 }
 
+/// The composition's clock in seconds (frame / fps), extracted into the render world for pin_shader_time.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ShaderClock(Option<f64>, f64);
+
+fn extract_shader_clock(mut commands: Commands, clock: bevy::render::Extract<Option<Res<Clock>>>, edit: bevy::render::Extract<Option<Res<Edit>>>) {
+    let fps = edit.as_ref().map_or(0.0, |e| e.prog.fps);
+    let secs = clock.as_ref().filter(|_| fps > 0.0).map(|c| c.0.max(0) as f64 / fps);
+    commands.insert_resource(ShaderClock(secs, fps));
+}
+
+/// The shaders' `globals.time` at the frame being drawn (frame / fps, the composition's clock) and its delta one frame,
+/// in the render world (the main world's Time, which plugins step, is left be). Bevy's was the engine's own elapsed
+/// time, so a frame's time-driven shading (fx/look's holo, fuzz and dissolve noise, its baked curves' steps; a stills
+/// render measured 0 at frames 60, 61 and 140 of one batch) depended on where its batch began. RAEA_SHADER_TIME=real
+/// keeps Bevy's.
+fn pin_shader_time(clock: Res<ShaderClock>, mut time: ResMut<Time>) {
+    let (Some(secs), fps) = (clock.0, clock.1) else { return };
+    let want = std::time::Duration::from_secs_f64(secs);
+    if time.elapsed() == want {
+        return;
+    }
+    let mut t = Time::<()>::default();
+    let step = std::time::Duration::from_secs_f64(1.0 / fps);
+    if want >= step {
+        t.advance_to(want - step);
+    }
+    t.advance_to(want);
+    *time = t;
+}
+
 /// The systems, on every engine (they do nothing without a MotionBlur).
 pub fn install(app: &mut App) {
+    if std::env::var("RAEA_SHADER_TIME").as_deref() != Ok("real") {
+        if let Some(r) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            r.init_resource::<ShaderClock>()
+                .add_systems(bevy::render::ExtractSchedule, extract_shader_clock)
+                .add_systems(bevy::render::Render, pin_shader_time.in_set(bevy::render::RenderSystems::CreateViews));
+        }
+    }
     app.add_systems(Last, pin_frame_count.after(bevy::diagnostic::update_frame_count));
 }
 
