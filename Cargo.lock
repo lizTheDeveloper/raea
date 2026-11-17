@@ -14308,6 +14308,7 @@ version = "0.1.0"
 name = "raea-core-shape"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "manifold-rust",
  "raea-core-fonts",
  "raea-core-grow",
