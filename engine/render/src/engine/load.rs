@@ -14,13 +14,22 @@ impl Engine {
     /// kept. A served process's next native shot (docs/native-shots.md).
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
         // the clocks and physics as a fresh engine's, before the new program's rows set any of them
+        let t = std::time::Instant::now();
         pristine_restore(self.app.world_mut());
         // the text atlas emptied before the new program's text is spawned, as a fresh engine's is (emptied after the
         // spawn, the new text was never drawn into it: a kept engine's repeat of Ch5 lost its clock's numerals)
         text3d::reset_atlas(self.app.world_mut());
+        let t_reset = t.elapsed().as_secs_f64() * 1e3;
         self.load_shared(prog, inserted, None)?;
+        let t_load = t.elapsed().as_secs_f64() * 1e3;
+        let mut ups = Vec::new();
         for _ in 0..8 {
+            let u = std::time::Instant::now();
             self.app.update();
+            ups.push(u.elapsed().as_secs_f64() * 1e3);
+        }
+        if std::env::var_os("RAEA_NATIVE_TRACE").is_some() {
+            eprintln!("raea native: reload {:.0} ms: restore {t_reset:.0}, load {:.0}, warm-up updates {}", t.elapsed().as_secs_f64() * 1e3, t_load - t_reset, ups.iter().map(|u| format!("{u:.0}")).collect::<Vec<_>>().join(" "));
         }
         self.drawn = Some(self.app.world().resource::<Clock>().0);
         self.pipe = raea_sys_frame::pipe::Pipe::new();

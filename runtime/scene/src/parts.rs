@@ -132,6 +132,10 @@ pub(crate) fn lights_rows(all: &[Vec<Item>], tr: &Tracks, p: &mut Program) {
 pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
     for (m, (_, track)) in tr.meshes.iter().enumerate() {
         let its = filled(&track);
+        // a plane whose size the frame changes, drawn as the unit plane scaled: its size moves its placement's scale,
+        // not its mesh (a Mesh changed every frame costs its upload, bounds and specialisation: Ch2's shore resized 69
+        // planes a frame)
+        let its = sized_planes(its);
         let Some(shape) = its[0].shape.clone() else { continue };
         let id = format!("mesh{m}");
         let mut row = BTreeMap::new();
@@ -441,9 +445,10 @@ mod light_rotation_tests {
     }
 }
 
-/// A frame's shape that differs from the one kept before it only by float noise (the same expression, every number
-/// within 1e-5 of it, relative) is that one: Ch2's shore cones animated their radii by 3e-7 a frame, and each change
-/// made the engine build the mesh again (478 meshes a frame). A real change (a plane growing 0.3% a frame) is kept.
+/// A frame's shape within 1e-4 (relative) of the one kept before it, the same expression otherwise, is that one: Ch2's
+/// shore cones taper by 1e-5 to 6e-5 a frame (about 0.1 mm), and each change made the engine build the mesh again
+/// (350 meshes a frame); kept within 1e-4 they're never more than 0.12 mm (on a 1.2 m cone) from their own shape and
+/// are made again every few frames. A bigger change (a plane growing 0.3% a frame) is kept every frame.
 pub(crate) fn settle_shapes(shapes: Vec<String>) -> Vec<String> {
     fn split(s: &str) -> (String, Vec<f64>) {
         let (mut tpl, mut nums, mut cur) = (String::with_capacity(s.len()), Vec::new(), String::new());
@@ -485,7 +490,7 @@ pub(crate) fn settle_shapes(shapes: Vec<String>) -> Vec<String> {
                     return s;
                 }
                 let (t, n) = split(&s);
-                if t == *kt && n.len() == kn.len() && n.iter().zip(kn).all(|(a, b)| (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1e-3)) {
+                if t == *kt && n.len() == kn.len() && n.iter().zip(kn).all(|(a, b)| (a - b).abs() <= 1e-4 * a.abs().max(b.abs()).max(1e-3)) {
                     return ks.clone();
                 }
                 kept = Some((s.clone(), t, n));
@@ -511,11 +516,76 @@ mod settle_tests {
         let p = "plane(0, 0, 1, 1.451171835074451, 1.451171835074451)";
         let q = "plane(0, 0, 1, 1.4558055717374923, 1.4558055717374923)";
         assert_eq!(settle_shapes(v(&[p, q])), v(&[p, q]));
+        let c = "rotate(cone(1.2429999999999999, 1.2429879787444014, 1.1999999999999995), -90, 0, 0)";
+        assert_eq!(settle_shapes(v(&[a, b, c])), v(&[a, a, a]), "the bake's own cone");
         // a different expression is never merged
         assert_eq!(settle_shapes(v(&["box(1, 1, 1)", "sphere(1)"])), v(&["box(1, 1, 1)", "sphere(1)"]));
         // drift is measured from the shape kept, so many tiny steps still add up to a change
-        let steps: Vec<String> = (0..50).map(|i| format!("torus({}, 0.5)", 1.0 + i as f64 * 4e-6)).collect();
+        let steps: Vec<String> = (0..50).map(|i| format!("torus({}, 0.5)", 1.0 + i as f64 * 4e-5)).collect();
         let out = settle_shapes(steps);
         assert!(out.iter().collect::<std::collections::BTreeSet<_>>().len() > 1);
+    }
+}
+
+/// A track whose every frame is `plane(n, w, h)` with one normal and sizes that change: each frame the unit plane
+/// (`plane(n, 1, 1)`), its world scaled by its size along the axes Bevy lays the plane's width and height on (its
+/// Plane3d mesh: the quad on X and Z turned from +Y to the normal), when those are axis-aligned; the same vertices, so
+/// the same picture. Any other track as it was.
+pub(crate) fn sized_planes(its: Vec<Item>) -> Vec<Item> {
+    use bevy::math::{Mat4, Quat, Vec3};
+    // `plane(nx, ny, nz, w, h)` alone (raea-core-shape's plane_of)
+    let plane_of = |e: &str| -> Option<([f32; 3], [f32; 2])> {
+        let inner = e.trim().strip_prefix("plane(")?.strip_suffix(')')?;
+        let n: Vec<f32> = inner.split(',').map(|s| s.trim().parse().ok()).collect::<Option<_>>()?;
+        match n.as_slice() {
+            &[x, y, z, w, h] => Some(([x, y, z], [w, h])),
+            _ => None,
+        }
+    };
+    let planes: Option<Vec<([f32; 3], [f32; 2])>> = its.iter().map(|i| i.shape.as_deref().and_then(plane_of)).collect();
+    let Some(planes) = planes else { return its };
+    let n0 = planes[0].0;
+    if planes.iter().any(|(n, _)| *n != n0) || planes.iter().all(|(_, s)| *s == planes[0].1) {
+        return its;
+    }
+    let n = Vec3::from(n0).normalize_or_zero();
+    if n == Vec3::ZERO {
+        return its;
+    }
+    let r = Quat::from_rotation_arc(Vec3::Y, n);
+    let axis = |v: Vec3| -> Option<usize> {
+        let a = v.abs();
+        [a.x, a.y, a.z].iter().position(|c| (c - 1.0).abs() < 1e-6).filter(|_| (a.x + a.y + a.z - 1.0).abs() < 1e-6)
+    };
+    let (Some(aw), Some(ah)) = (axis(r * Vec3::X), axis(r * Vec3::Z)) else { return its };
+    let unit: std::sync::Arc<str> = format!("plane({}, {}, {}, 1, 1)", n0[0], n0[1], n0[2]).into();
+    its.into_iter()
+        .zip(planes)
+        .map(|(mut it, (_, [w, h]))| {
+            let mut sc = [1.0f32; 3];
+            sc[aw] = w;
+            sc[ah] = h;
+            it.world = it.world * Mat4::from_scale(Vec3::from(sc));
+            it.shape = Some(unit.clone());
+            it
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod sized_plane_tests {
+    use super::*;
+    use bevy::math::{Mat4, Vec3};
+
+    #[test]
+    fn a_resized_plane_is_the_unit_plane_scaled_on_bevys_axes() {
+        let it = |w: f32, h: f32| Item { kind: "mesh", props: Default::default(), shape: Some(format!("plane(0, 0, 1, {w}, {h})").into()), at: None, material: None, world: Mat4::IDENTITY };
+        let out = sized_planes(vec![it(1.5, 1.5), it(2.0, 3.0)]);
+        assert_eq!(out[0].shape.as_deref(), Some("plane(0, 0, 1, 1, 1)"));
+        // Bevy's Plane3d for +Z: width on X, height on Y
+        assert!((out[1].world.to_scale_rotation_translation().0 - Vec3::new(2.0, 3.0, 1.0)).length() < 1e-6);
+        // a plane that never changes size is left as it is
+        let still = sized_planes(vec![it(1.5, 1.5), it(1.5, 1.5)]);
+        assert_eq!(still[0].shape.as_deref(), Some("plane(0, 0, 1, 1.5, 1.5)"));
     }
 }
