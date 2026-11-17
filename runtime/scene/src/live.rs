@@ -435,7 +435,7 @@ mod tests {
         let (set, _) = ls.frame(Shot { scene: &b, clear: None });
         let id_of = |name: &str| set.iter().find(|t| t.vals.get("name") == Some(&V::S(name.into()))).map(|t| t.id.clone()).unwrap();
         let body = set.iter().find(|t| t.vals.get("name") == Some(&V::S("b-body".into()))).unwrap();
-        assert_eq!(body.vals.get("bone_rows"), Some(&V::S(id_of("b-head"))));
+        assert_eq!(body.vals.get("bone_rows"), Some(&V::s(id_of("b-head"))));
     }
 
     /// A live layer's rows numbered clear of a baked Program's (mesh0.., model0..), its references following
