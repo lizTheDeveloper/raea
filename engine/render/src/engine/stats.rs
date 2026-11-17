@@ -37,13 +37,23 @@ pub(crate) fn wanted() -> bool {
 }
 
 pub(crate) fn install(app: &mut App) {
+    // (diagnosis: RAEA_DIAG_NO_SPOT_SHADOWS=1 turns every spot light's shadow map off, to see what they draw)
+    if std::env::var_os("RAEA_DIAG_NO_SPOT_SHADOWS").is_some() {
+        app.add_systems(PostUpdate, (|mut q: Query<&mut SpotLight>| {
+            for mut s in &mut q {
+                if s.shadow_maps_enabled {
+                    s.shadow_maps_enabled = false;
+                }
+            }
+        }).before(bevy::camera::visibility::VisibilitySystems::CheckVisibility));
+    }
     let Some(path) = std::env::var_os("RAEA_SCENE_STATS") else { return };
     let out = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
     if out.is_none() {
         eprintln!("raea: RAEA_SCENE_STATS: can't open {}", path.to_string_lossy());
     }
     let s = Stats(Arc::new(Mutex::new(Shared { out, ..Default::default() })));
-    app.insert_resource(s.clone()).init_resource::<MainStart>().add_systems(First, main_start).add_systems(Last, (main_stats, census, pick));
+    app.insert_resource(s.clone()).init_resource::<MainStart>().add_systems(First, main_start).add_systems(Last, ((main_stats, shadow_motion).chain(), census, pick));
     fn mark(name: &'static str) -> impl FnMut(Res<Stats>) {
         move |s: Res<Stats>| {
             let mut g = s.0.lock().unwrap();
@@ -69,6 +79,61 @@ pub(crate) fn install(app: &mut App) {
             mark("render").after(RS::Render).before(RS::Cleanup),
         ),
     );
+}
+
+/// Each shadow view's casters this update: how many it sees, how many moved (their transform, a skin joint or their
+/// morph weights changed since the last update), and whether its light moved. A view with neither could reuse its last
+/// shadow map, drawn the same. Added to the frame's line as `shadow_motion`.
+#[allow(clippy::type_complexity)]
+fn shadow_motion(
+    s: Res<Stats>,
+    gts: Query<(Ref<GlobalTransform>, Option<&bevy::mesh::skinning::SkinnedMesh>, Option<Ref<bevy::mesh::morph::MeshMorphWeights>>)>,
+    joints: Query<Ref<GlobalTransform>>,
+    dirs: Query<(Entity, &DirectionalLight, &bevy::camera::visibility::CascadesVisibleEntities, Ref<GlobalTransform>)>,
+    points: Query<(Entity, &PointLight, &bevy::camera::visibility::CubemapVisibleEntities, Ref<GlobalTransform>)>,
+    spots: Query<(Entity, &SpotLight, &bevy::camera::visibility::VisibleMeshEntities, Ref<GlobalTransform>)>,
+    layers: Query<&bevy::camera::visibility::RenderLayers>,
+) {
+    let moved = |e: &Entity| -> bool {
+        let Ok((g, skin, morph)) = gts.get(*e) else { return false };
+        g.is_changed() || morph.is_some_and(|m| m.is_changed()) || skin.is_some_and(|sk| sk.joints.iter().any(|j| joints.get(*j).is_ok_and(|jg| jg.is_changed())))
+    };
+    let mut out = Vec::new();
+    let default_layers = bevy::camera::visibility::RenderLayers::default();
+    let mut view = |kind: &str, light: Entity, light_moved: bool, ents: &[Entity]| {
+        let m = ents.iter().filter(|e| moved(e)).count();
+        // the casters whose render layers meet the light's (Bevy's queue_shadows drops the rest)
+        let ll = layers.get(light).unwrap_or(&default_layers);
+        let meet = ents.iter().filter(|e| ll.intersects(layers.get(**e).unwrap_or(&default_layers))).count();
+        out.push(serde_json::json!({"light": format!("{kind} {light}"), "visible": ents.len(), "moved": m, "layers_meet": meet, "light_layers": format!("{ll:?}"), "light_moved": light_moved, "reusable": !light_moved && m == 0}));
+    };
+    for (e, d, vis, g) in &dirs {
+        if !d.shadow_maps_enabled {
+            continue;
+        }
+        for cascades in vis.entities.values() {
+            for c in cascades {
+                view("directional", e, g.is_changed(), &c.entities);
+            }
+        }
+    }
+    for (e, p, vis, g) in &points {
+        if !p.shadow_maps_enabled {
+            continue;
+        }
+        for f in vis.iter() {
+            view("point", e, g.is_changed(), &f.entities);
+        }
+    }
+    for (e, sp, vis, g) in &spots {
+        if !sp.shadow_maps_enabled {
+            continue;
+        }
+        view("spot", e, g.is_changed(), &vis.entities);
+    }
+    if let Some(m) = s.0.lock().unwrap().main.as_mut() {
+        m.insert("shadow_motion".into(), serde_json::Value::Array(out));
+    }
 }
 
 /// Once, at the 12th update (the shot's first frames drawn): the mesh entities by their material component types and
