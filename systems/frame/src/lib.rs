@@ -37,6 +37,9 @@ pub mod shots;
 /// RAEA_NATIVE_TRACE: per-system time (ns summed, calls) by name, read by the native draw's trace line (`sys_times`).
 static SYS_TIMES: std::sync::Mutex<Vec<(&'static str, u64, u64)>> = std::sync::Mutex::new(Vec::new());
 
+/// RAEA_NATIVE_TRACE: `vals` calls by their caller (file, line).
+pub static VALS_BY: std::sync::Mutex<std::collections::BTreeMap<(&'static str, u32), u64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Whether per-system times are kept (RAEA_NATIVE_TRACE).
 pub fn sys_timing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -202,6 +205,9 @@ pub struct FrameRows {
     /// each row's values this frame as `vals` makes them, made on its first ask: six of the 3D's systems read every
     /// row, and many_foxes' thousand foxes were each made six times a frame (FC1b)
     made: Vec<std::sync::OnceLock<BTreeMap<String, V>>>,
+    /// whether a row's made values were asked for since the last frame: a moving row's kept map is brought up to the
+    /// next frame only if it was (one a warm-up made and nothing reads now is dropped, not patched every frame)
+    read: Vec<std::sync::atomic::AtomicBool>,
 }
 
 impl FrameRows {
@@ -214,6 +220,8 @@ impl FrameRows {
     pub fn set_cols(&mut self, cols: eval::Cols) {
         self.made.clear();
         self.made.resize_with(cols.len(), Default::default);
+        self.read.clear();
+        self.read.resize_with(cols.len(), Default::default);
         self.cols = cols;
     }
 
@@ -230,6 +238,19 @@ impl FrameRows {
         // changes of it are read again (its map, keys and other values kept), so a frame allocates next to nothing
         // (RAEA_KEEP_MOVING=0: made again from scratch). A row with a table is made again (its sets are laid on).
         let patch = keep_moving_on();
+        if sys_timing() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                let moving = (0..cols.len()).filter(|r| !timeline.still(*r)).count();
+                let made = self.made.iter().filter(|m| m.get().is_some()).count();
+                let mc: usize = (0..cols.len()).map(|r| timeline.moving(r).len()).sum();
+                eprintln!("raea native: rows {}, moving {moving} ({mc} moving cells), made last frame {made}, columns {}, with tables {}", cols.len(), cols.cols.len(), self.looks.len());
+            });
+        }
+        // each moving column found in this frame's columns once
+        let (names, ix) = timeline.moving_indexed();
+        let found: Vec<Option<&eval::Col>> = names.iter().map(|c| cols.cols.get(c).map(|a| &**a)).collect();
+        let t_loop = std::time::Instant::now();
         for (r, m) in self.made.iter_mut().enumerate() {
             if timeline.still(r) && !self.looks.contains_key(&r) {
                 continue;
@@ -238,15 +259,20 @@ impl FrameRows {
                 drop(m.take());
                 continue;
             }
+            if m.get().is_some() && !self.read.get(r).is_some_and(|x| x.swap(false, std::sync::atomic::Ordering::Relaxed)) {
+                drop(m.take());
+                continue;
+            }
             let Some(map) = m.get_mut() else { continue };
-            for c in timeline.moving(r) {
-                match cols.cols.get(c).and_then(|col| col.get(r)) {
+            for &ci in ix.get(r).map_or(&[][..], Vec::as_slice) {
+                let (c, col) = (&names[ci as usize], found[ci as usize]);
+                // unchanged (most of a frame's values): nothing copied
+                if col.map_or(!map.contains_key(c), |col| col.is(r, map.get(c))) {
+                    continue;
+                }
+                match col.and_then(|col| col.get(r)) {
                     Some(v) => match map.get_mut(c) {
-                        Some(slot) => {
-                            if *slot != v {
-                                *slot = v;
-                            }
-                        }
+                        Some(slot) => *slot = v,
                         None => {
                             map.insert(c.clone(), v);
                         }
@@ -257,7 +283,10 @@ impl FrameRows {
                 }
             }
         }
+        sys_time("next_frame: rows patched", t_loop);
+        let t = std::time::Instant::now();
         self.cols = cols;
+        sys_time("next_frame: last frame's columns dropped", t);
     }
 
     /// Whether a row's values are the same on every frame of the edit, so a system applying them to its entity each
@@ -328,6 +357,7 @@ impl FrameRows {
     }
 
     /// A row's values this frame.
+    #[track_caller]
     pub fn vals(&self, e: Entity) -> Option<std::borrow::Cow<'_, BTreeMap<String, V>>> {
         let r = *self.ix.get(&e)?;
         match &self.live {
@@ -344,6 +374,11 @@ impl FrameRows {
                 })
             }
             None => {
+                if sys_timing() {
+                    let l = std::panic::Location::caller();
+                    let mut v = VALS_BY.lock().unwrap();
+                    *v.entry((l.file(), l.line())).or_default() += 1;
+                }
                 let make = || {
                     // the row's own columns (the timeline's), not every column of the edit asked for this row: a
                     // frame made thousands of rows' values by walking hundreds of columns each (RAEA_ROW_COLS=0: as before)
@@ -357,6 +392,9 @@ impl FrameRows {
                     }
                     v
                 };
+                if let Some(x) = self.read.get(r) {
+                    x.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 Some(match self.made.get(r) {
                     Some(m) => std::borrow::Cow::Borrowed(m.get_or_init(make)),
                     None => std::borrow::Cow::Owned(make()),

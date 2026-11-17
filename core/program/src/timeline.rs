@@ -22,6 +22,10 @@ pub struct Timeline {
     /// per row: every column it can hold on some frame (its base columns and the ones a frame changes), so a row's
     /// values are made from its own few columns, not by asking every column of the edit (`row_cols`)
     row_cols: Vec<Vec<String>>,
+    /// every column some row moves by, once (`moving_ix` indexes it): a frame finds each column once, not per row
+    moving_names: Vec<String>,
+    /// per row: `moving`'s columns as places in `moving_names`
+    moving_ix: Vec<Vec<u32>>,
 }
 
 impl Timeline {
@@ -61,7 +65,22 @@ impl Timeline {
                 }
             }
         }
-        Ok(Timeline { frames, base, written, still, moving, row_cols })
+        let mut moving_names: Vec<String> = Vec::new();
+        let mut at: HashMap<String, u32> = HashMap::new();
+        let moving_ix = moving
+            .iter()
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| {
+                        *at.entry(c.clone()).or_insert_with(|| {
+                            moving_names.push(c.clone());
+                            (moving_names.len() - 1) as u32
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Timeline { frames, base, written, still, moving, row_cols, moving_names, moving_ix })
     }
 
     /// Whether row r's value of any of `cols` differs from its base on some frame (it moves over the edit).
@@ -72,6 +91,11 @@ impl Timeline {
     /// The columns some frame changes row r's value of (none for a still row or one out of range).
     pub fn moving(&self, r: usize) -> &[String] {
         self.moving.get(r).map_or(&[], Vec::as_slice)
+    }
+
+    /// The columns any row moves by, and each row's as places among them (`moving`, indexed).
+    pub fn moving_indexed(&self) -> (&[String], &[Vec<u32>]) {
+        (&self.moving_names, &self.moving_ix)
     }
 
     /// Every column row r holds on some frame (None out of range): its values at any frame are these columns' there.

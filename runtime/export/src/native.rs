@@ -991,6 +991,11 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         eprintln!("raea native: own:uniforms a frame: {:.1} applied, {:.1} changed, {:.1} storage buffers written", pc(0), pc(1), pc(2));
         let fast = |i: usize| bevy::render::material_bind_groups::RAEA_FAST[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;
         eprintln!("raea native: materials a frame: {:.1} updated in place, {:.1} made again", fast(0), fast(1));
+        let mut by: Vec<_> = raea_sys_frame::VALS_BY.lock().unwrap().iter().map(|(k, v)| (*v, *k)).collect();
+        by.sort_by(|a, b| b.0.cmp(&a.0));
+        for (c, (f, l)) in by.iter().take(12) {
+            eprintln!("raea native: vals from {f}:{l}: {:.0} a frame", *c as f64 / n);
+        }
         for (k, ms, calls) in raea_sys_frame::sys_times() {
             eprintln!("raea native: system {k}: {:.2} ms a frame ({calls} calls)", ms / n);
         }
