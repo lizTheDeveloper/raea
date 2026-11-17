@@ -11,8 +11,8 @@ pub(super) fn rows(tracks: &[Track], p: &mut Program) {
         let Some(spec) = first.get("spec").filter(|s| s.is_object()) else { continue };
         let id = format!("grass{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id));
-        row.insert("grass".into(), V::S(spec.to_string()));
+        row.insert("id".into(), V::s(id));
+        row.insert("grass".into(), V::s(spec.to_string()));
         if first.get("shadow").and_then(Value::as_bool) == Some(true) {
             row.insert("shadow".into(), V::N(1.0));
         }

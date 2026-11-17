@@ -109,7 +109,7 @@ pub struct ToonSpec {
 
 fn hex(v: Option<&serde_json::Value>) -> Option<Color> {
     let s = v?.as_str()?;
-    s.starts_with('#').then(|| colour(Some(&V::S(s.to_string())), [0.0, 0.0, 0.0, 1.0]))
+    s.starts_with('#').then(|| colour(Some(&V::s(s.to_string())), [0.0, 0.0, 0.0, 1.0]))
 }
 
 fn f(v: &serde_json::Value, k: &str, d: f32) -> f32 {

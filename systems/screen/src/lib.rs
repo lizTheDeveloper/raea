@@ -160,7 +160,7 @@ fn params(spec: &serde_json::Value, map_a: Vec4, map_b: Vec4) -> CrtParams {
         Some("shadow") => 2.0,
         _ => 1.0,
     };
-    let glass = c.get("glass").and_then(serde_json::Value::as_str).map(|h| colour(Some(&V::S(h.to_string())), [0.1, 0.11, 0.1, 1.0])).unwrap_or(Color::srgb(0.10, 0.115, 0.105)).to_linear();
+    let glass = c.get("glass").and_then(serde_json::Value::as_str).map(|h| colour(Some(&V::s(h.to_string())), [0.1, 0.11, 0.1, 1.0])).unwrap_or(Color::srgb(0.10, 0.115, 0.105)).to_linear();
     let z = |k: &str, d: f32| if flat { 0.0 } else { f(c, k, d) };
     CrtParams {
         map_a,

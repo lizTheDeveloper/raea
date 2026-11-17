@@ -38,7 +38,7 @@ pub fn model(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], dir: &Path
     if ["flat", "look", "toon"].iter().any(|k| t.vals.get(*k).is_some_and(V::truthy)) {
         world.entity_mut(e).insert(raea_sys_shader::OwnSurface);
     }
-    world.entity_mut(e).insert((Model3d { gltf, scene: num(&t.vals, "scene", 0.0) as usize, anim, state: ModelState::Loading, src, id: t.id.clone(), toon, toon_wait: 0, surfaces, shaders, sampler, mix: names_col(&t.vals, "mix"), mixer: vec![], morphs: names_col(&t.vals, "morph_names"), graph: graph_col(&t.vals).map_err(|e| format!("model {}: {e}", t.id))?, built: None, inst }, transform_of(&t.vals), Visibility::default()));
+    world.entity_mut(e).insert((Model3d { gltf, scene: num(&t.vals, "scene", 0.0) as usize, anim, state: ModelState::Loading, src: src.to_string(), id: t.id.clone(), toon, toon_wait: 0, surfaces, shaders, sampler, mix: names_col(&t.vals, "mix"), mixer: vec![], morphs: names_col(&t.vals, "morph_names"), graph: graph_col(&t.vals).map_err(|e| format!("model {}: {e}", t.id))?, built: None, inst }, transform_of(&t.vals), Visibility::default()));
     Ok(())
 }
 
@@ -128,7 +128,7 @@ pub fn model_setup(
                     };
                     let Some(g) = gltfs.get(&m.gltf) else { break 'step };
                     let find = |anim: &V| match anim {
-                        V::S(name) => g.named_animations.get(name.as_str()).cloned().ok_or_else(|| {
+                        V::S(name) => g.named_animations.get(name.as_ref()).cloned().ok_or_else(|| {
                             let mut names: Vec<&str> = g.named_animations.keys().map(|k| k.as_ref()).collect();
                             names.sort();
                             format!("model {}: no clip \"{name}\" (it has {})", m.src, names.join(", "))

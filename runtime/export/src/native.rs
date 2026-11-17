@@ -454,13 +454,13 @@ fn v_json(v: &V) -> Value {
     match v {
         V::N(x) if x.is_finite() => json!(x),
         V::N(x) => json!({ "nf": x.to_string() }),
-        V::S(s) => Value::String(s.clone()),
+        V::S(s) => Value::String(s.to_string()),
     }
 }
 
 fn v_of(j: &Value) -> V {
     match j {
-        Value::String(s) => V::S(s.clone()),
+        Value::String(s) => V::s(s.clone()),
         Value::Object(o) => V::N(o.get("nf").and_then(Value::as_str).and_then(|s| s.parse().ok()).unwrap_or(f64::NAN)),
         _ => V::N(j.as_f64().unwrap_or(0.0)),
     }

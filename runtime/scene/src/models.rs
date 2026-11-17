@@ -6,13 +6,13 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let its = filled(&track);
         let id = format!("model{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
         name_column(&mut row, first);
-        row.insert("src".into(), V::S(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
+        row.insert("src".into(), V::s(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
         match first.get("animation") {
             Some(Value::String(s)) => {
-                row.insert("anim".into(), V::S(s.clone()));
+                row.insert("anim".into(), V::s(s.clone()));
             }
             Some(Value::Number(x)) => {
                 row.insert("anim".into(), V::N(x.as_f64().unwrap_or(0.0)));
@@ -27,7 +27,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         }
         // clips blended (<Model animations>) and morph weights (<Model morphs>): the names once, times and weights keyed
         if let Some(Value::Array(a)) = first.get("animations") {
-            row.insert("mix".into(), V::S(Value::Array(a.iter().map(|c| c.get("clip").cloned().unwrap_or(Value::Null)).collect()).to_string()));
+            row.insert("mix".into(), V::s(Value::Array(a.iter().map(|c| c.get("clip").cloned().unwrap_or(Value::Null)).collect()).to_string()));
             for i in 0..a.len() {
                 for (k, col, d) in [("time", "t", 0.0), ("weight", "w", 1.0)] {
                     let vals: Vec<f64> = its.iter().map(|it| it.props.get("animations").and_then(|x| x.get(i)).map(|c| n(c.as_object().unwrap_or(&Default::default()), k, d)).unwrap_or(0.0)).collect();
@@ -40,7 +40,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         }
         if let Some(Value::Array(a)) = first.get("graph") {
             let parts: Vec<Value> = a.iter().map(|g| serde_json::json!({ "kind": g.get("kind"), "clip": g.get("clip"), "parent": g.get("parent"), "mask": g.get("mask") })).collect();
-            row.insert("graph".into(), V::S(Value::Array(parts).to_string()));
+            row.insert("graph".into(), V::s(Value::Array(parts).to_string()));
             for i in 0..a.len().min(16) {
                 for (k, col, d) in [("weight", "w", 1.0), ("time", "t", 0.0)] {
                     let vals: Vec<f64> = its.iter().map(|it| it.props.get("graph").and_then(|x| x.get(i)).map(|c| n(c.as_object().unwrap_or(&Default::default()), k, d)).unwrap_or(d)).collect();
@@ -52,7 +52,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
             }
         }
         if let Some(Value::Array(a)) = first.get("morphs") {
-            row.insert("morph_names".into(), V::S(Value::Array(a.iter().map(|c| c.get("target").cloned().unwrap_or(Value::Null)).collect()).to_string()));
+            row.insert("morph_names".into(), V::s(Value::Array(a.iter().map(|c| c.get("target").cloned().unwrap_or(Value::Null)).collect()).to_string()));
             for i in 0..a.len().min(64) {
                 let vals: Vec<f64> = its.iter().map(|it| it.props.get("morphs").and_then(|x| x.get(i)).and_then(|c| c.get("weight")).and_then(Value::as_f64).unwrap_or(0.0)).collect();
                 column(p, &mut row, &id, &format!("morph{i}"), &vals);
@@ -65,7 +65,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         if let Some(a) = first.get("attach") {
             let to = a.get("to").and_then(Value::as_str).unwrap_or("");
             if let Some(j) = tr.models.iter().position(|(_, t)| t.iter().flatten().next().and_then(|i| i.props.get("name")).and_then(Value::as_str) == Some(to)) {
-                row.insert("attach_to".into(), V::S(format!("model{j}")));
+                row.insert("attach_to".into(), V::s(format!("model{j}")));
                 row.insert("attach_bone".into(), V::S(a.get("bone").and_then(Value::as_str).unwrap_or("").into()));
             } else {
                 eprintln!("WARN  model {}: attach.to {to:?} names no model", first.get("name").and_then(Value::as_str).unwrap_or("?"));
@@ -84,8 +84,8 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
                     None => eprintln!("WARN  model {}: bones.{joint} names no model ({to:?})", first.get("name").and_then(Value::as_str).unwrap_or("?")),
                 }
             }
-            row.insert("bone_joints".into(), V::S(joints.join(",")));
-            row.insert("bone_rows".into(), V::S(rows.join(",")));
+            row.insert("bone_joints".into(), V::s(joints.join(",")));
+            row.insert("bone_rows".into(), V::s(rows.join(",")));
         }
         if first.get("flat") == Some(&Value::Bool(true)) {
             row.insert("flat".into(), V::N(1.0));
@@ -94,17 +94,17 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         screen_columns(p, &mut row, &id, &its);
         node_columns(p, &mut row, &id, &its);
         if let Some(s) = first.get("surfaces") {
-            row.insert("surfaces".into(), V::S(s.to_string()));
+            row.insert("surfaces".into(), V::s(s.to_string()));
             surface_columns(p, &mut row, &id, &its);
         }
         if let Some(sm) = first.get("sampler").filter(|v| v.is_object()) {
-            row.insert("sampler".into(), V::S(sm.to_string()));
+            row.insert("sampler".into(), V::s(sm.to_string()));
         }
         if let Some(sh) = first.get("shader") {
-            row.insert("shader".into(), V::S(sh.to_string()));
+            row.insert("shader".into(), V::s(sh.to_string()));
         }
         if let Some(t) = first.get("toon") {
-            row.insert("toon".into(), V::S(t.to_string()));
+            row.insert("toon".into(), V::s(t.to_string()));
             toon_columns(p, &mut row, &id, &its);
         }
         grid_columns(&mut row, first);
@@ -118,15 +118,15 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
             }
             match first.get("edgeColor") {
                 Some(Value::String(c)) => {
-                    row.insert("look_edge".into(), V::S(if c == "none" { String::new() } else { hex_of(c).unwrap_or_default() }));
+                    row.insert("look_edge".into(), V::s(if c == "none" { String::new() } else { hex_of(c).unwrap_or_default() }));
                 }
                 Some(Value::Null) | Some(Value::Bool(false)) => {
-                    row.insert("look_edge".into(), V::S(String::new()));
+                    row.insert("look_edge".into(), V::s(String::new()));
                 }
                 _ => {}
             }
             if let Some(t) = first.get("theme").and_then(Value::as_str) {
-                row.insert("look_theme".into(), V::S(t.to_string()));
+                row.insert("look_theme".into(), V::s(t.to_string()));
             }
         }
         meshseq::glitch_columns(p, &mut row, &id, &its);
@@ -147,7 +147,7 @@ pub(crate) fn panels_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let its = filled(&track);
         let id = format!("plane{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
         if first.get("screen").is_some_and(Value::is_object) {
             screen_columns(p, &mut row, &id, &its);
@@ -184,11 +184,11 @@ pub(crate) fn decals_rows(tr: &Tracks, p: &mut Program) {
         let its = filled(&track);
         let id = format!("decal{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
         for (prop, col) in [("src", "map"), ("normalMap", "normal_map")] {
             if let Some(src) = first.get(prop).and_then(Value::as_str) {
-                row.insert(col.into(), V::S(src_path(src)));
+                row.insert(col.into(), V::s(src_path(src)));
             }
         }
         tint(p, &mut row, &id, &its, "#ffffff");
@@ -212,9 +212,9 @@ pub(crate) fn plates_rows(tr: &Tracks, p: &mut Program) {
         let its = filled(&track);
         let id = format!("plate{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
-        row.insert("src".into(), V::S(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
+        row.insert("src".into(), V::s(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
         column(p, &mut row, &id, "t", &its.iter().map(|i| n(&i.props, "time", 0.0)).collect::<Vec<_>>());
         if let Some(k1) = num(first, "k1").filter(|k| *k != 0.0) {
             row.insert("k1".into(), V::N(k1));
@@ -230,10 +230,10 @@ pub(crate) fn fogs_rows(tr: &Tracks, p: &mut Program) {
         let its = filled(&track);
         let id = format!("fog{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         column(p, &mut row, &id, "density", &its.iter().map(|i| n(&i.props, "density", 0.1)).collect::<Vec<_>>());
         let colors: Vec<String> = its.iter().map(|i| hex(i.props.get("color")).unwrap_or("#ffffff".into())).collect();
-        row.insert("color".into(), V::S(colors[0].clone()));
+        row.insert("color".into(), V::s(colors[0].clone()));
         if colors.iter().any(|c| *c != colors[0]) {
             let c: Vec<[f64; 3]> = colors.iter().map(|c| rgb(c)).collect();
             for (k, name) in ["col_r", "col_g", "col_b"].iter().enumerate() {
@@ -260,12 +260,12 @@ pub(crate) fn fires_rows(tr: &Tracks, p: &mut Program) {
         let its = filled(&track);
         let id = format!("fire{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         for (prop, d) in [("time", 0.0), ("intensity", 6.0)] {
             column(p, &mut row, &id, prop, &its.iter().map(|i| n(&i.props, prop, d)).collect::<Vec<_>>());
         }
         let colors: Vec<String> = its.iter().map(|i| hex(i.props.get("color")).unwrap_or("#ff7a1f".into())).collect();
-        row.insert("color".into(), V::S(colors[0].clone()));
+        row.insert("color".into(), V::s(colors[0].clone()));
         if colors.iter().any(|c| *c != colors[0]) {
             let c: Vec<[f64; 3]> = colors.iter().map(|c| rgb(c)).collect();
             for (k, name) in ["col_r", "col_g", "col_b"].iter().enumerate() {
@@ -281,7 +281,7 @@ pub(crate) fn fires_rows(tr: &Tracks, p: &mut Program) {
         // a simulated volume (<Smoke>, <Cloud>, <Contrail>): its spec, for raea-render's volume.rs, and how much of the light
         // it stops in the shadow maps (1 unless the SDK says otherwise; 0 casts none)
         if let Some(sim) = first.get("sim").filter(|s| s.is_object()) {
-            row.insert("sim".into(), V::S(sim.to_string()));
+            row.insert("sim".into(), V::s(sim.to_string()));
             if let Some(x) = num(first, "shadow") {
                 row.insert("shadow".into(), V::N(x));
             }
@@ -298,7 +298,7 @@ pub(crate) fn fires_rows(tr: &Tracks, p: &mut Program) {
 fn node_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, its: &[Item]) {
     let Some(Value::Object(first)) = its[0].props.get("nodes") else { return };
     for (i, (name, f)) in first.iter().enumerate() {
-        row.insert(format!("node{i}"), V::S(name.clone()));
+        row.insert(format!("node{i}"), V::s(name.clone()));
         for (field, cols) in [("translation", ["x", "y", "z", ""]), ("rotation", ["q_x", "q_y", "q_z", "q_w"]), ("scale", ["s_x", "s_y", "s_z", ""])] {
             if f.get(field).is_none() {
                 continue;

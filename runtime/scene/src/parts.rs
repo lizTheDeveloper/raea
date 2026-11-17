@@ -28,8 +28,8 @@ pub(crate) fn ordered_shader_rows(all: &[Vec<Item>], p: &mut Program, kind: &str
 /// A row holding an item's shader spec as JSON.
 fn shader_row(id: String, it: &Item) -> BTreeMap<String, V> {
     let mut row = BTreeMap::new();
-    row.insert("id".into(), V::S(id));
-    row.insert("shader".into(), V::S(it.props.get("shader").cloned().unwrap_or(Value::Null).to_string()));
+    row.insert("id".into(), V::s(id));
+    row.insert("shader".into(), V::s(it.props.get("shader").cloned().unwrap_or(Value::Null).to_string()));
     row
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn lights_rows(all: &[Vec<Item>], tr: &Tracks, p: &mut Program) {
         let id = if kind == "directional" { format!("sun{li}") } else { format!("{kind}{li}") };
         li += 1;
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         if kind != "directional" {
             row.insert("type".into(), V::S(kind.into()));
         }
@@ -139,7 +139,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let Some(shape) = its[0].shape.clone() else { continue };
         let id = format!("mesh{m}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         // its shape keyed by the frame when it changes (a <BufferMesh> remade every frame: the multiverse veils'
         // ripple), where it was the first frame's for a whole batch; one with a line break in it holds the first's
         let shapes: Vec<String> = its.iter().map(|i| i.shape.as_deref().unwrap_or(&shape).to_string()).collect();
@@ -148,7 +148,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let mats: Vec<std::sync::Arc<Map<String, Value>>> = its.iter().map(mat).collect();
         let basic = its[0].material.as_ref().is_some_and(|m| &*m.kind == "MeshBasicMaterial");
         let colors: Vec<String> = mats.iter().map(|m| hex(m.get("color")).unwrap_or("#cccccc".into())).collect();
-        row.insert("color".into(), V::S(colors[0].clone()));
+        row.insert("color".into(), V::s(colors[0].clone()));
         if colors.iter().any(|c| *c != colors[0]) {
             let c: Vec<[f64; 3]> = colors.iter().map(|c| rgb(c)).collect();
             for (k, name) in ["col_r", "col_g", "col_b"].iter().enumerate() {
@@ -170,7 +170,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         // and glowing later had none at all, and one whose glow changed colour kept the first)
         let ems: Vec<Option<String>> = mats.iter().map(|m| hex(m.get("emissive")).filter(|e| e != "#000000")).collect();
         if let Some(e0) = ems.iter().flatten().next().cloned() {
-            row.insert("emissive".into(), V::S(e0.clone()));
+            row.insert("emissive".into(), V::s(e0.clone()));
             column(p, &mut row, &id, "emissive_k", &mats.iter().zip(&ems).map(|(m, e)| if e.is_some() { emissive_power(m) } else { 0.0 }).collect::<Vec<_>>());
             if ems.iter().any(|e| e.as_deref().is_some_and(|e| e != e0)) {
                 let c: Vec<[f64; 3]> = ems.iter().map(|e| rgb(e.as_deref().unwrap_or(&e0))).collect();
@@ -195,7 +195,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         }
         for (prop, col) in [("map", "map"), ("normalMap", "normal_map"), ("roughnessMap", "rough_map"), ("metalnessMap", "metal_map"), ("metallicRoughnessMap", "mr_map"), ("aoMap", "ao_map"), ("emissiveMap", "emissive_map"), ("depthMap", "depth_map"), ("clearcoatNormalMap", "clearcoat_normal_map")] {
             if let Some(src) = m0.get(prop).and_then(Value::as_str) {
-                row.insert(col.into(), V::S(src_path(src)));
+                row.insert(col.into(), V::s(src_path(src)));
             }
         }
         if let Some(Value::Array(r)) = m0.get("repeat") {
@@ -207,7 +207,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         // how its alpha and faces draw, and real transmission (StandardMaterial's fields), from the first frame
         for (prop, col) in [("alphaMode", "alpha"), ("side", "side")] {
             if let Some(Value::String(x)) = m0.get(prop) {
-                row.insert(col.into(), V::S(x.clone()));
+                row.insert(col.into(), V::s(x.clone()));
             }
         }
         for (prop, col) in [("alphaCutoff", "alpha_cutoff"), ("transmission", "transmission"), ("ior", "ior"), ("thickness", "thickness")] {
@@ -217,27 +217,27 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         }
         // StandardMaterial's other fields (docs/shaders.feature SH7), from the first frame
         if let Some(f) = fields_of(m0) {
-            row.insert("fields".into(), V::S(f));
+            row.insert("fields".into(), V::s(f));
         }
         // how its maps are read (docs/shaders.feature SH5): all of them, and per map by its prop name
         for k in ["sampler", "samplers"] {
             if let Some(v) = m0.get(k).filter(|v| v.is_object()) {
-                row.insert(k.into(), V::S(v.to_string()));
+                row.insert(k.into(), V::s(v.to_string()));
             }
         }
         // a shader over its lit surface (docs/shaders.feature SH1), from the first frame
         if let Some(sh) = m0.get("shader").filter(|v| v.is_object()) {
-            row.insert("shader".into(), V::S(sh.to_string()));
+            row.insert("shader".into(), V::s(sh.to_string()));
         }
         // a three.js shader (<ThreeShaderMaterial>, docs/r3f.feature R3F11): its spec from the first frame, unlit in its
         // colour where it can't run; its uniforms keyed frame by frame (three_uniforms)
         if its[0].material.as_ref().is_some_and(|m| &*m.kind == "ThreeShaderMaterial") {
-            row.insert("three".into(), V::S(Value::Object((**m0).clone()).to_string()));
+            row.insert("three".into(), V::s(Value::Object((**m0).clone()).to_string()));
             row.insert("unlit".into(), V::N(1.0));
         }
         if its[0].material.as_ref().is_some_and(|m| &*m.kind == "MeshToonMaterial") {
             // a toon surface: its bands, rim, highlight and outline from the first frame; what animates, keyed
-            row.insert("toon".into(), V::S(toon_spec(m0, false).to_string()));
+            row.insert("toon".into(), V::s(toon_spec(m0, false).to_string()));
             let shadows: Vec<Option<String>> = mats.iter().map(|m| hex(m.get("shadowColor"))).collect();
             // (always columns, so a live game's frames can change them as a render's keys do)
             if shadows[0].is_some() {
@@ -266,7 +266,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         // a page on it over its UVs (<Mesh3d>'s layer="surface" element, S3a): its screen spec, JSON (screen.rs's
         // mesh_screens)
         if let Some(v) = its[0].props.get("surface").filter(|v| v.is_object()) {
-            row.insert("surface".into(), V::S(v.to_string()));
+            row.insert("surface".into(), V::s(v.to_string()));
         }
         // `castShadow: false`, three.js's `shadow: false` (`shadow` wins)
         if its[0].props.get("shadow").or(its[0].props.get("castShadow")) == Some(&Value::Bool(false)) {
@@ -292,7 +292,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         instances_column(p, &mut row, &id, &its);
         // its geometry's own vertex attributes (JSON, Mesh3d `attributes`), from the first frame: raea-sys-mesh with_attributes
         if let Some(Value::String(a)) = its[0].props.get("attributes") {
-            row.insert("attributes".into(), V::S(a.clone()));
+            row.insert("attributes".into(), V::s(a.clone()));
         }
         // its geometry compressed, as Bevy's compressed_mesh(regular) (Mesh3d `compressed`): raea-sys-mesh finished
         if its[0].props.get("compressed").and_then(Value::as_bool) == Some(true) {
@@ -313,7 +313,7 @@ pub(crate) fn entities_rows(tr: &Tracks, p: &mut Program) {
         let its = filled(track);
         let id = format!("ent{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         placement(p, &mut row, &id, &its);
         visible(p, &mut row, &id, track);
         name_column(&mut row, &its[0].props);
@@ -331,8 +331,8 @@ pub(crate) fn texts_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let id = format!("text{k}");
         let first = &its[0].props;
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
-        row.insert("spans".into(), V::S(first.get("spans").cloned().unwrap_or(Value::Array(vec![])).to_string()));
+        row.insert("id".into(), V::s(id.clone()));
+        row.insert("spans".into(), V::s(first.get("spans").cloned().unwrap_or(Value::Array(vec![])).to_string()));
         for (prop, col, d) in [("size", "size", 0.5), ("align", "align", 0.5), ("lineHeight", "line_height", 1.2)] {
             row.insert(col.into(), V::N(r6(n(first, prop, d))));
         }
@@ -345,7 +345,7 @@ pub(crate) fn texts_rows(tr: &Tracks, names: &[String], p: &mut Program) {
             }
         }
         if let Some(e) = hex(first.get("emissive")).filter(|e| e != "#000000") {
-            row.extend([("emissive".into(), V::S(e)), ("emissive_k".into(), V::N(r6(emissive_power(first))))]);
+            row.extend([("emissive".into(), V::s(e)), ("emissive_k".into(), V::N(r6(emissive_power(first))))]);
         }
         for (prop, col) in [("unlit", "unlit"), ("castShadow", "shadow"), ("receiveShadow", "receive")] {
             if let Some(Value::Bool(b)) = first.get(prop) {
@@ -365,13 +365,13 @@ pub(crate) fn texts_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         for (gi, g0) in per[0].iter().enumerate() {
             let gid = format!("{id}-g{gi}");
             let mut row = BTreeMap::new();
-            row.insert("id".into(), V::S(gid.clone()));
-            row.insert("target".into(), V::S(id.clone()));
+            row.insert("id".into(), V::s(gid.clone()));
+            row.insert("target".into(), V::s(id.clone()));
             row.insert("at".into(), V::N(g0.get("at").and_then(Value::as_f64).unwrap_or(0.0)));
             row.insert("span".into(), V::N(g0.get("span").and_then(Value::as_f64).unwrap_or(0.0)));
-            row.insert("ch".into(), V::S(g0.get("ch").and_then(Value::as_str).unwrap_or("").to_string()));
+            row.insert("ch".into(), V::s(g0.get("ch").and_then(Value::as_str).unwrap_or("").to_string()));
             if let Some(n) = name {
-                row.insert("name".into(), V::S(format!("{n}:{gi}")));
+                row.insert("name".into(), V::s(format!("{n}:{gi}")));
             }
             let at = |f: usize| per[f].get(gi).and_then(Value::as_object).cloned().unwrap_or_default();
             let gs: Vec<Map<String, Value>> = (0..its.len()).map(at).collect();
@@ -387,7 +387,7 @@ pub(crate) fn texts_rows(tr: &Tracks, names: &[String], p: &mut Program) {
             }).collect();
             placement(p, &mut row, &gid, &moved);
             let colors: Vec<String> = gs.iter().map(|g| hex(g.get("c")).unwrap_or("#ffffff".into())).collect();
-            row.insert("color".into(), V::S(colors[0].clone()));
+            row.insert("color".into(), V::s(colors[0].clone()));
             if colors.iter().any(|c| *c != colors[0]) {
                 let c: Vec<[f64; 3]> = colors.iter().map(|c| rgb(c)).collect();
                 for (ch, col) in ["col_r", "col_g", "col_b"].iter().enumerate() {

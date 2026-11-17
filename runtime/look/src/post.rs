@@ -29,7 +29,7 @@ pub fn light_sets(its: &[Item], p: &mut Program, row: &mut BTreeMap<String, V>, 
         .map(|i| {
             let mut set = BTreeMap::new();
             if let Some(c) = hex(i.props.get("color")).filter(|c| c != "#ffffff") {
-                set.insert("color".into(), V::S(c));
+                set.insert("color".into(), V::s(c));
             }
             if let Some(Value::Bool(s)) = i.props.get("castShadow") {
                 set.insert("shadows".into(), V::N(*s as u8 as f64));
@@ -64,7 +64,7 @@ pub fn sets(per: Vec<BTreeMap<String, V>>, p: &mut Program, row: &mut BTreeMap<S
         return;
     }
     let json: Vec<Value> = list.iter().map(|s| Value::Object(s.iter().map(|(c, v)| (c.clone(), json_of(v))).collect())).collect();
-    row.insert("frame_sets".into(), V::S(Value::Array(json).to_string()));
+    row.insert("frame_sets".into(), V::s(Value::Array(json).to_string()));
     row.insert("frame_set_i".into(), V::N(idx[0]));
     p.keys.insert((id.to_string(), "frame_set_i".to_string()), step_keys(&idx));
 }
@@ -76,7 +76,7 @@ pub fn as_table(row: &mut BTreeMap<String, V>, set: impl Fn(&str) -> bool) {
     let cols: BTreeMap<String, V> = row.iter().filter(|(k, _)| set(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
     row.retain(|k, _| !set(k));
     let json = Value::Array(vec![Value::Object(cols.iter().map(|(c, v)| (c.clone(), json_of(v))).collect())]);
-    row.insert("frame_sets".into(), V::S(json.to_string()));
+    row.insert("frame_sets".into(), V::s(json.to_string()));
     row.insert("frame_set_i".into(), V::N(0.0));
 }
 
@@ -94,7 +94,7 @@ pub fn step_keys(vals: &[f64]) -> Vec<(i64, f64, String)> {
 fn json_of(v: &V) -> Value {
     match v {
         V::N(x) => serde_json::json!(x),
-        V::S(s) => Value::String(s.clone()),
+        V::S(s) => Value::String(s.to_string()),
     }
 }
 
@@ -126,11 +126,11 @@ pub fn frame_post(its: &[Item]) -> BTreeMap<String, V> {
             row.insert("bloom_threshold".into(), V::N(t));
         }
         if let Some(s) = shares(b) {
-            row.insert("bloom_passes".into(), V::S(s));
+            row.insert("bloom_passes".into(), V::s(s));
         }
     }
     if let Some(f) = first("fog") {
-        row.insert("fog_color".into(), V::S(hex(f.get("color")).unwrap_or("#808080".into())));
+        row.insert("fog_color".into(), V::s(hex(f.get("color")).unwrap_or("#808080".into())));
         match num(f, "density") {
             Some(d) => {
                 row.insert("fog_density".into(), V::N(d));
@@ -147,7 +147,7 @@ pub fn frame_post(its: &[Item]) -> BTreeMap<String, V> {
     // ambient occlusion (no multisampling with it: SMAA unless asked otherwise) and the anti-aliasing
     let ssao = first("ssao");
     if let Some(a) = ssao {
-        row.insert("ssao".into(), V::S(a.get("quality").and_then(Value::as_str).unwrap_or("medium").to_string()));
+        row.insert("ssao".into(), V::s(a.get("quality").and_then(Value::as_str).unwrap_or("medium").to_string()));
         if let Some(t) = num(a, "thickness") {
             row.insert("ssao_thickness".into(), V::N(t));
         }
@@ -158,7 +158,7 @@ pub fn frame_post(its: &[Item]) -> BTreeMap<String, V> {
             row.insert("aa".into(), V::S("smaa".into()));
         }
         (Some(m), _) if m != "msaa" => {
-            row.insert("aa".into(), V::S(m.to_string()));
+            row.insert("aa".into(), V::s(m.to_string()));
         }
         _ => {}
     }
@@ -168,7 +168,7 @@ pub fn frame_post(its: &[Item]) -> BTreeMap<String, V> {
             row.insert("shadow_map".into(), V::N(m));
         }
         if let Some(f) = sh.get("filter").and_then(Value::as_str) {
-            row.insert("shadow_filter".into(), V::S(f.to_string()));
+            row.insert("shadow_filter".into(), V::s(f.to_string()));
         }
     }
     if let Some(v) = first("volfog") {
@@ -176,7 +176,7 @@ pub fn frame_post(its: &[Item]) -> BTreeMap<String, V> {
     }
     if let Some(t) = first("tonemapping") {
         if let Some(m) = t.get("mode").and_then(Value::as_str) {
-            row.insert("tonemap".into(), V::S(m.to_lowercase()));
+            row.insert("tonemap".into(), V::s(m.to_lowercase()));
         }
         if let Some(e) = num(t, "exposure") {
             row.insert("exposure".into(), V::N(r6(EV100 - e)));
@@ -188,7 +188,7 @@ pub fn frame_post(its: &[Item]) -> BTreeMap<String, V> {
 /// A <Grade>'s columns: its passes, its colour grading by section and its vignette.
 fn grade(g: &Map<String, Value>, row: &mut BTreeMap<String, V>) {
     if let Some(s) = shares(g) {
-        row.insert("grade_passes".into(), V::S(s));
+        row.insert("grade_passes".into(), V::s(s));
     }
     for (k, col) in [("temperature", "grade_temperature"), ("tint", "grade_tint"), ("saturation", "grade_saturation")] {
         if let Some(x) = num(g, k) {
@@ -215,7 +215,7 @@ fn grade(g: &Map<String, Value>, row: &mut BTreeMap<String, V>) {
                 }
             }
             if let Some(c) = hex(o.get("color")) {
-                row.insert("vignette_color".into(), V::S(c));
+                row.insert("vignette_color".into(), V::s(c));
             }
         }
         _ => {}
@@ -245,7 +245,7 @@ fn volfog(v: &Map<String, Value>, row: &mut BTreeMap<String, V>) {
     }
     row.insert("vfog_ambient".into(), V::N(n(v, "ambient", 0.0)));
     if let Some(c) = hex(v.get("ambientColor")) {
-        row.insert("vfog_ambient_color".into(), V::S(c));
+        row.insert("vfog_ambient_color".into(), V::s(c));
     }
 }
 

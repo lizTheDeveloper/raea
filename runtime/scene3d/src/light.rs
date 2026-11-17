@@ -11,7 +11,7 @@ pub fn light(world: &mut World, e: Entity, vals: &BTreeMap<String, V>) {
     let g = |k: &str, d: f32| num(vals, k, d);
     layers(world, e, vals);
     let color = colour(vals.get("color"), [1.0, 1.0, 1.0, 1.0]);
-    let kind = match vals.get("type") { Some(V::S(s)) => s.as_str(), _ => "directional" };
+    let kind = match vals.get("type") { Some(V::S(s)) => s.as_ref(), _ => "directional" };
     let pos = Vec3::new(g("x", 0.0), g("y", 0.0), g("z", 0.0));
     let dir = Vec3::new(g("dir_x", -0.5), g("dir_y", -1.0), g("dir_z", -0.4));
     // a light seen in the air (volumetric) is marched through its shadow map, so it casts shadows
@@ -154,7 +154,7 @@ pub fn sync_light_sets(
         if volumetric != shafts {
             if volumetric { commands.entity(e).insert(bevy::light::VolumetricLight); } else { commands.entity(e).remove::<bevy::light::VolumetricLight>(); }
         }
-        let directional = !matches!(v.get("type"), Some(V::S(t)) if matches!(t.as_str(), "point" | "spot" | "rect"));
+        let directional = !matches!(v.get("type"), Some(V::S(t)) if matches!(t.as_ref(), "point" | "spot" | "rect"));
         let want = (flag(&v, "shadows", directional) || volumetric) && !preview();
         if casts.0 != want {
             casts.0 = want;
@@ -190,7 +190,7 @@ pub fn fog_volume(world: &mut World, e: Entity, id: &str, vals: &BTreeMap<String
     fog_values(&mut fv, vals);
     // a density texture (a 3D .ktx2), loaded as Bevy's AssetServer loads one; one that won't load leaves the box even
     if let Some(V::S(p)) = vals.get("density_tex") {
-        let img = std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| {
+        let img = std::fs::read(&**p).map_err(|e| e.to_string()).and_then(|b| {
             Image::from_buffer(&b, bevy::image::ImageType::Extension("ktx2"), bevy::image::CompressedImageFormats::NONE, true, bevy::image::ImageSampler::Default, bevy::asset::RenderAssetUsages::RENDER_WORLD).map_err(|e| e.to_string())
         });
         match img {

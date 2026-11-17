@@ -180,7 +180,7 @@ fn walk(n: &Node3, parent: Mat4, out: &mut Vec<Item>) {
 /// A part's SDK name as its row's `name` column: what a Bevy Entity field (a ChildOf's parent) names it by.
 fn name_column(row: &mut BTreeMap<String, V>, props: &Map<String, Value>) {
     if let Some(Value::String(n)) = props.get("name") {
-        row.insert("name".into(), V::S(n.clone()));
+        row.insert("name".into(), V::s(n.clone()));
     }
 }
 
@@ -256,7 +256,7 @@ pub fn rows(all: &[Vec<Item>], p: &mut Program) {
     if std::env::var_os("RAEA_SCENE_ROWS").is_some() {
         for (kind, rows) in p.spawns.iter().filter(|(k, _)| k == "camera").chain(p.spawns[before..].iter()) {
             for r in rows {
-                let keyed: Vec<&str> = p.keys.keys().filter(|(id, _)| Some(&V::S(id.clone())) == r.get("id")).map(|(_, c)| c.as_str()).collect();
+                let keyed: Vec<&str> = p.keys.keys().filter(|(id, _)| Some(&V::s(id.clone())) == r.get("id")).map(|(_, c)| c.as_str()).collect();
                 eprintln!("3d row {kind}: {r:?} keyed {keyed:?}");
             }
         }

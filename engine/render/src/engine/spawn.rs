@@ -186,7 +186,7 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
     let g = |k: &str, d: f32| num(vals, k, d);
     // its SDK name as Bevy's Name too: a BRP query, an observer, a saved world or a compute's mesh finds it by it
     if let Some(V::S(n)) = vals.get("name") {
-        world.entity_mut(e).insert(Name::new(n.clone()));
+        world.entity_mut(e).insert(Name::new(n.to_string()));
     }
     match t.kind.as_str() {
         // directional (as before), point or spot: scene3d
@@ -247,7 +247,7 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
             let grid = grid::grid_of(vals);
             let uvs = scene3d::has_maps(vals) || grid.is_some();
             let tangents = raea_sys_material::maps::needs_tangents(vals);
-            let (attrs, packed) = (match vals.get("attributes") { Some(V::S(a)) => a.as_str(), _ => "" }, vals.get("compressed").is_some_and(V::truthy));
+            let (attrs, packed) = (match vals.get("attributes") { Some(V::S(a)) => a.as_ref(), _ => "" }, vals.get("compressed").is_some_and(V::truthy));
             // made once per shape and what it's given (share.rs): equal parts hold one Mesh, so Bevy batches them
             let mesh = scene3d::shared_mesh(world, &format!("{expr}\0{uvs}\0{tangents}\0{attrs}\0{packed}"), || raea_sys_material::mesh::shape_mesh(&t.id, &expr, uvs, tangents).and_then(|m| raea_sys_material::mesh::finished(m, attrs, packed).map_err(|e| format!("mesh {}: {e}", t.id))))?;
             // a three.js shader (raea-sys-three-shader, docs/r3f.feature R3F11): its own material, and the mesh given
@@ -271,7 +271,7 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
             // (only a shape the frame changes: a render's keyed `shapes`, or any mesh of a live scene, whose rows
             // arrive frame by frame; a still shape costs nothing per frame)
             if three.is_none() && (vals.contains_key("shapes") || world.resource::<FrameRows>().live.is_some()) {
-                world.entity_mut(e).insert(ShapeNow { expr: expr.clone(), own: false });
+                world.entity_mut(e).insert(ShapeNow { expr: expr.to_string(), own: false });
             }
             // the surface (emissive, opacity, unlit, clearcoat, a picture map...) and transform: scene3d
             let mat = scene3d::material(world, t, inserted, dir)?;
@@ -359,8 +359,8 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
                 _ => None,
             };
             let src = match &pictures {
-                Some(p) => p.paths.get(p.shown).map(|p| p.to_string_lossy().to_string()).unwrap_or(src),
-                None => src,
+                Some(p) => p.paths.get(p.shown).map(|p| p.to_string_lossy().to_string()).unwrap_or(src.to_string()),
+                None => src.to_string(),
             };
             let pic = scene3d::panel_picture(&src, inserted, dir).map_err(|e| format!("panel {}: {e}", t.id))?;
             let (pw, ph) = pic.dimensions();
@@ -421,7 +421,7 @@ pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut commands: Commands, mut mes
         }
         let uvs = scene3d::has_maps(&v) || grid::grid_of(&v).is_some();
         let tangents = raea_sys_material::maps::needs_tangents(&v);
-        let attrs = match v.get("attributes") { Some(V::S(a)) => a.clone(), _ => String::new() };
+        let attrs = match v.get("attributes") { Some(V::S(a)) => a.to_string(), _ => String::new() };
         todo.push((e, expr, uvs, tangents, attrs, v.get("compressed").is_some_and(V::truthy)));
     }
     if todo.is_empty() {

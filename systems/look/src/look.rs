@@ -113,7 +113,7 @@ pub struct Look {
 
 fn mode_of(v: &BTreeMap<String, V>) -> u32 {
     match v.get("look") {
-        Some(V::S(s)) => match s.as_str() {
+        Some(V::S(s)) => match s.as_ref() {
             "pixel" => 1,
             "site" | "dither" => 2,
             _ => 0,
@@ -154,7 +154,7 @@ fn frame_params(v: &BTreeMap<String, V>, mode: &str) -> LookParams {
     let mut npal = 0;
     if let Some(V::S(list)) = v.get("paint_palette") {
         for h in list.split(',').filter(|h| !h.is_empty()).take(16) {
-            pal[npal] = Vec4::from_array(colour(Some(&V::S(h.to_string())), [0.0; 4]).to_linear().to_f32_array());
+            pal[npal] = Vec4::from_array(colour(Some(&V::s(h.to_string())), [0.0; 4]).to_linear().to_f32_array());
             npal += 1;
         }
     }
@@ -165,7 +165,7 @@ fn frame_params(v: &BTreeMap<String, V>, mode: &str) -> LookParams {
             "paint" => 6,
             _ => 3,
         },
-        dark: !matches!(v.get("frame_look_theme"), Some(V::S(s)) if s == "light") as u32,
+        dark: !matches!(v.get("frame_look_theme"), Some(V::S(s)) if &**s == "light") as u32,
         size: Vec2::ZERO,
         edge: Vec4::from_array(colour(v.get("frame_look_ink"), [0.13, 0.12, 0.10, 1.0]).to_linear().to_f32_array()),
         paper: Vec4::from_array(colour(v.get("frame_look_paper"), [0.90, 0.88, 0.80, 1.0]).to_linear().to_f32_array()),
@@ -275,10 +275,10 @@ pub fn sync_looks(
             }
             let cam = cam.id();
             let edge = match v.get("look_edge") {
-                Some(V::S(s)) if s.is_empty() || s == "none" => Vec4::ZERO,
+                Some(V::S(s)) if s.is_empty() || &**s == "none" => Vec4::ZERO,
                 c => Vec4::from_array(colour(c, [0.0, 0.0, 0.0, 1.0]).to_linear().to_f32_array()),
             };
-            let theme_dark = !matches!(v.get("look_theme"), Some(V::S(s)) if s == "light");
+            let theme_dark = !matches!(v.get("look_theme"), Some(V::S(s)) if &**s == "light");
             let mat = mats.add(LookMaterial {
                 p: LookParams {
                     mode: 0,

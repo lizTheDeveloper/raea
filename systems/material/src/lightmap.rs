@@ -23,7 +23,7 @@ pub fn of(world: &mut World, t: &Tup, vals: &BTreeMap<String, V>, inserted: &[Tu
     let path = resolve_src(inserted, src, dir).map_err(|e| format!("model {}: Lightmap {mesh}: {e}", t.id))?;
     let image = image_file(world, &format!("model {}: Lightmap {mesh}", t.id), &path.to_string_lossy())?;
     let uv_rect = Rect::new(num(vals, "uv_x0", 0.0), num(vals, "uv_y0", 0.0), num(vals, "uv_x1", 1.0), num(vals, "uv_y1", 1.0));
-    Ok(Some(Baked { mesh: mesh.clone(), made: Lightmap { image, uv_rect, bicubic_sampling: num(vals, "bicubic", 0.0) > 0.5 } }))
+    Ok(Some(Baked { mesh: mesh.to_string(), made: Lightmap { image, uv_rect, bicubic_sampling: num(vals, "bicubic", 0.0) > 0.5 } }))
 }
 
 /// Each mesh entity (with its glTF mesh's name) given the bake that names its mesh.

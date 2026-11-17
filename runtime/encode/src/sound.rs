@@ -48,7 +48,7 @@ pub fn cues_tl(prog: &Program, tl: &timeline::Timeline, rows: &[Tup], dir: &Path
         }
     }
     let graph = rows.iter().find(|t| t.kind == "tone").and_then(|t| match t.vals.get("tone_json") {
-        Some(V::S(g)) => Some(g.clone()),
+        Some(V::S(g)) => Some(g.to_string()),
         _ => None,
     });
     let mut paths: std::collections::HashMap<String, Option<PathBuf>> = Default::default();
@@ -76,7 +76,7 @@ pub fn cues_tl(prog: &Program, tl: &timeline::Timeline, rows: &[Tup], dir: &Path
                 Some(V::S(s)) => s.clone(),
                 _ => return Err(format!("{} {}: no src", t.kind, t.id)),
             };
-            let path = paths.entry(src.clone()).or_insert_with(|| raea_sys_frame::resolve_src(rows, &src, dir).ok()).clone();
+            let path = paths.entry(src.to_string()).or_insert_with(|| raea_sys_frame::resolve_src(rows, &src, dir).ok()).clone();
             let Some(file) = path else { continue };
             let from = g("from", 0.0);
             let rate = g("snd_rate", 1.0);
@@ -84,7 +84,7 @@ pub fn cues_tl(prog: &Program, tl: &timeline::Timeline, rows: &[Tup], dir: &Path
             let at = if (f as f64 - from).abs() < 0.5 { at0 } else { at0 + (f as f64 - from) * rate / fps };
             let volume = t.vals.get("snd_vol").map(V::num).unwrap_or_else(|| 10f64.powf(g("gain", 0.0) / 20.0));
             let key = match t.vals.get("snd_key") {
-                Some(V::S(k)) => k.clone(),
+                Some(V::S(k)) => k.to_string(),
                 _ => format!("{}:{}", t.kind, t.id),
             };
             let bus = match t.vals.get("snd_bus") {

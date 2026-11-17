@@ -197,7 +197,7 @@ pub fn spawn_plate(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], dir:
         let mut m = world.non_send_mut::<Media>();
         let dec = m.backend.open_video(&path).map_err(|x| format!("plate {}: {}: {x}", t.id, path.display()))?;
         let (w, h) = (dec.info().width, dec.info().height);
-        m.decoders.insert((src.clone(), slot), dec);
+        m.decoders.insert((src.to_string(), slot), dec);
         (w, h)
     };
     let image = world.resource_mut::<Assets<Image>>().add(Image::new_fill(
@@ -223,7 +223,7 @@ pub fn spawn_plate(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], dir:
         bevy::light::NotShadowCaster,
         bevy::light::NotShadowReceiver,
         bevy::camera::visibility::NoFrustumCulling,
-        Plate { src, slot, image, aspect: w as f32 / h.max(1) as f32, k1: num(vals, "k1", 0.0), built: 0.0, last: None },
+        Plate { src: src.to_string(), slot, image, aspect: w as f32 / h.max(1) as f32, k1: num(vals, "k1", 0.0), built: 0.0, last: None },
     ));
     Ok(())
 }

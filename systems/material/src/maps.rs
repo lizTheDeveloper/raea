@@ -368,13 +368,13 @@ pub fn material(world: &mut World, t: &Tup, inserted: &[Tup], dir: &Path) -> Res
     if let Some(s) = src("map") {
         m.base_color_texture = Some(match screen(world, &s) {
             Some(h) => h,
-            None => cached_map(world, s.clone(), MapKind::Colour, repeat, sam("map"), || map_picture(t, inserted, dir, "map", &s))?,
+            None => cached_map(world, s.to_string(), MapKind::Colour, repeat, sam("map"), || map_picture(t, inserted, dir, "map", &s))?,
         });
     }
     if let Some(s) = src("normal_map") {
         m.normal_map_texture = Some(match screen(world, &s) {
             Some(h) => h,
-            None => cached_map(world, s.clone(), MapKind::Data, repeat, sam("normalMap"), || map_picture(t, inserted, dir, "normalMap", &s))?,
+            None => cached_map(world, s.to_string(), MapKind::Data, repeat, sam("normalMap"), || map_picture(t, inserted, dir, "normalMap", &s))?,
         });
     }
     // the clearcoat layer's own normals, data not colour (rotate_environment_map loads it with is_srgb false); Bevy
@@ -390,7 +390,7 @@ pub fn material(world: &mut World, t: &Tup, inserted: &[Tup], dir: &Path) -> Res
     if let Some(s) = src("mr_map") {
         m.metallic_roughness_texture = Some(match screen(world, &s) {
             Some(h) => h,
-            None => cached_map(world, s.clone(), MapKind::Data, repeat, sam("metallicRoughnessMap"), || map_picture(t, inserted, dir, "metallicRoughnessMap", &s))?,
+            None => cached_map(world, s.to_string(), MapKind::Data, repeat, sam("metallicRoughnessMap"), || map_picture(t, inserted, dir, "metallicRoughnessMap", &s))?,
         });
     } else if src("rough_map").is_some() || src("metal_map").is_some() {
         // separate greyscale maps packed into glTF's layout: green roughness, blue metalness (white where there's no
@@ -411,18 +411,18 @@ pub fn material(world: &mut World, t: &Tup, inserted: &[Tup], dir: &Path) -> Res
     if let Some(s) = src("ao_map") {
         m.occlusion_texture = Some(match screen(world, &s) {
             Some(h) => h,
-            None => cached_map(world, s.clone(), MapKind::Data, repeat, sam("aoMap"), || map_picture(t, inserted, dir, "aoMap", &s))?,
+            None => cached_map(world, s.to_string(), MapKind::Data, repeat, sam("aoMap"), || map_picture(t, inserted, dir, "aoMap", &s))?,
         });
     }
     if let Some(s) = src("emissive_map") {
         m.emissive_texture = Some(match screen(world, &s) {
             Some(h) => h,
-            None => cached_map(world, s.clone(), MapKind::Colour, repeat, sam("emissiveMap"), || map_picture(t, inserted, dir, "emissiveMap", &s))?,
+            None => cached_map(world, s.to_string(), MapKind::Colour, repeat, sam("emissiveMap"), || map_picture(t, inserted, dir, "emissiveMap", &s))?,
         });
     }
     // how its alpha and faces draw (alphaMode, alphaCutoff, side) and real transmission (transmission, ior, thickness)
     if let Some(V::S(a)) = vals.get("alpha") {
-        m.alpha_mode = match a.as_str() {
+        m.alpha_mode = match a.as_ref() {
             "mask" => AlphaMode::Mask(g("alpha_cutoff", 0.5)),
             "blend" => AlphaMode::Blend,
             "add" => AlphaMode::Add,
@@ -434,11 +434,11 @@ pub fn material(world: &mut World, t: &Tup, inserted: &[Tup], dir: &Path) -> Res
         };
     }
     match vals.get("side") {
-        Some(V::S(s)) if s == "double" => {
+        Some(V::S(s)) if &**s == "double" => {
             m.double_sided = true;
             m.cull_mode = None;
         }
-        Some(V::S(s)) if s == "back" => m.cull_mode = Some(bevy::render::render_resource::Face::Front),
+        Some(V::S(s)) if &**s == "back" => m.cull_mode = Some(bevy::render::render_resource::Face::Front),
         _ => {}
     }
     m.specular_transmission = g("transmission", 0.0);
@@ -446,7 +446,7 @@ pub fn material(world: &mut World, t: &Tup, inserted: &[Tup], dir: &Path) -> Res
     m.thickness = g("thickness", 0.0);
     // a height map for parallax, and the rest of StandardMaterial's fields (docs/shaders.feature SH7: fields.rs)
     if let Some(s) = src("depth_map") {
-        m.depth_map = Some(cached_map(world, s.clone(), MapKind::Data, repeat, sam("depthMap"), || map_picture(t, inserted, dir, "depthMap", &s))?);
+        m.depth_map = Some(cached_map(world, s.to_string(), MapKind::Data, repeat, sam("depthMap"), || map_picture(t, inserted, dir, "depthMap", &s))?);
     }
     super::fields::apply(&mut m, vals, &format!("mesh {}", t.id))?;
     Ok(m)
