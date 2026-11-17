@@ -63,15 +63,52 @@ pub fn cli(args: &[String]) -> i32 {
             if line.trim().is_empty() {
                 continue;
             }
-            let reply = match serde_json::from_str::<Vec<String>>(&line) {
-                Err(e) => json!({"ok": false, "error": format!("a request is a JSON array of a render's arguments: {e}")}),
-                Ok(req) if req.first().map(String::as_str) != Some("render") => json!({"ok": false, "error": "render-serve serves render requests only"}),
-                Ok(req) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&req))) {
-                    Ok(Ok(msg)) => json!({"ok": true, "said": msg, "code": raea_app_direction::rendered(&req)}),
-                    Ok(Err(e)) => json!({"ok": false, "error": e}),
-                    Err(_) => json!({"ok": false, "error": "the render panicked"}),
-                },
+            // a request: the render's arguments as a JSON array, or {"args": [...], "env": {"K": "V"}, "cwd": DIR}: that
+            // render's own environment and folder (a queue's batch has its own shot cache and project snapshot), set
+            // for it alone and put back after
+            let parsed: Result<(Vec<String>, Vec<(String, String)>, Option<String>), String> = match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(serde_json::Value::Array(_)) => serde_json::from_str::<Vec<String>>(&line).map(|a| (a, Vec::new(), None)).map_err(|e| e.to_string()),
+                Ok(serde_json::Value::Object(o)) => {
+                    let args = o.get("args").cloned().map(serde_json::from_value::<Vec<String>>).transpose().map_err(|e| e.to_string()).and_then(|a| a.ok_or_else(|| "a request object needs args".to_string()));
+                    let env: Vec<(String, String)> = o.get("env").and_then(serde_json::Value::as_object).map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect()).unwrap_or_default();
+                    args.map(|a| (a, env, o.get("cwd").and_then(serde_json::Value::as_str).map(str::to_string)))
+                }
+                Ok(_) => Err("not an array or an object".into()),
+                Err(e) => Err(e.to_string()),
             };
+            let reply = match parsed {
+                Err(e) => json!({"ok": false, "error": format!("a request is a JSON array of a render's arguments, or {{args, env, cwd}}: {e}")}),
+                Ok((req, _, _)) if req.first().map(String::as_str) != Some("render") => json!({"ok": false, "error": "render-serve serves render requests only"}),
+                Ok((req, env, cwd)) => {
+                    // SAFETY: the server renders one request at a time; nothing else reads the environment between requests
+                    let saved: Vec<(String, Option<std::ffi::OsString>)> = env.iter().map(|(k, _)| (k.clone(), std::env::var_os(k))).collect();
+                    for (k, v) in &env {
+                        unsafe { std::env::set_var(k, v) };
+                    }
+                    let here = std::env::current_dir().ok();
+                    let moved = cwd.as_ref().map(std::env::set_current_dir).transpose();
+                    let r = match moved {
+                        Err(e) => json!({"ok": false, "error": format!("cwd: {e}")}),
+                        Ok(_) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&req))) {
+                            Ok(Ok(msg)) => json!({"ok": true, "said": msg, "code": raea_app_direction::rendered(&req)}),
+                            Ok(Err(e)) => json!({"ok": false, "error": e}),
+                            Err(_) => json!({"ok": false, "error": "the render panicked"}),
+                        },
+                    };
+                    if let (Some(h), true) = (here, cwd.is_some()) {
+                        let _ = std::env::set_current_dir(h);
+                    }
+                    for (k, v) in saved {
+                        match v {
+                            Some(v) => unsafe { std::env::set_var(&k, v) },
+                            None => unsafe { std::env::remove_var(&k) },
+                        }
+                    }
+                    r
+                }
+            };
+            // (stderr flushed first, so a reader that cuts the log at this line has the render's whole output)
+            let _ = std::io::stderr().flush();
             println!("SERVED {reply}");
             let _ = std::io::stdout().flush();
         }
