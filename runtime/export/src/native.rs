@@ -106,6 +106,22 @@ fn raea_processes() -> usize {
     d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).filter(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim().starts_with("raea"))).count().max(1)
 }
 
+/// Freed memory handed back to the system (glibc's malloc_trim): a bake's runtimes free gigabytes on their threads'
+/// arenas, which glibc keeps, so the engine opening after them stacked its own on top (Ch5 2400-2549 cold: 8.3-8.8 GB
+/// still resident after the fold, a 15.5-16.4 GB peak against a warm render's). Returns the RSS it gave back (GB).
+fn trim_heap() -> f64 {
+    let before = proc_gb("VmRSS:").unwrap_or(0.0);
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's malloc_trim takes no pointers; it only releases free pages
+        unsafe { malloc_trim(0) };
+    }
+    (before - proc_gb("VmRSS:").unwrap_or(before)).max(0.0)
+}
+
 /// A process's memory line from /proc/self/status (VmRSS, VmHWM), in GB; None where it can't be read.
 fn proc_gb(key: &str) -> Option<f64> {
     let t = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -1175,7 +1191,13 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         eprintln!("raea native: the Program folded over {} frames in {:.0} ms", piece.len(), t_ms(t1));
     }
     raea_runtime_react::startup_mark("the shot's bake: Program folded");
+    // the stepped frames' scenes go with the fold (only the ops are kept below); what the runtimes and the scenes
+    // freed is handed back before the engine opens
     let ops: Vec<(i64, Vec<String>)> = piece.into_iter().map(|(f, o, _, _)| (f, o)).collect();
+    let trimmed = trim_heap();
+    if trace() {
+        eprintln!("raea native: {trimmed:.2} GB handed back after the bake (malloc_trim)");
+    }
     let shot = Shot { w, h, fps, total, ops, prog };
     if let Some(p) = path {
         // kept on a thread of its own while the engine opens (1.6-2.1 s on Ch5 that frame one waited for); the render
