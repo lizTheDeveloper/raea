@@ -53,10 +53,16 @@ pub fn prefiltered(world: &mut World, e: Entity, vals: &BTreeMap<String, V>) -> 
 pub fn sync_prefiltered(frame: Res<FrameRows>, mut q: Query<(Entity, Option<&mut EnvironmentMapLight>, Option<&mut Skybox>), (With<Prefiltered>, Without<EnvMaps>, Without<EnvBake>)>) {
     for (e, light, sky) in &mut q {
         let Some(v) = frame.vals(e) else { continue };
-        if let Some(mut l) = light.filter(|_| v.contains_key("envmap_qw")) {
-            let r = quat(&v, "envmap");
-            if l.rotation != r {
-                l.rotation = r;
+        if let Some(mut l) = light {
+            if v.contains_key("envmap_qw") {
+                let r = quat(&v, "envmap");
+                if l.rotation != r {
+                    l.rotation = r;
+                }
+            }
+            // its intensity keyed (runtime/look camera.rs), not only the spawn's
+            if let Some(k) = v.get("envmap_k").map(|k| k.num() as f32).filter(|k| l.intensity != *k) {
+                l.intensity = k;
             }
         }
         if let Some(mut s) = sky.filter(|_| v.contains_key("skybox_qw")) {

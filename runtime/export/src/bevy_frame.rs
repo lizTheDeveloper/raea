@@ -237,6 +237,7 @@ pub(crate) fn bevy_fed_gpu(world: &mut World, page: &mut raea_runtime_page::Bevy
         }
         let mats = page.set_ui_materials(e.world_mut())?;
         e.draw(cx.now);
+        crate::native::rows_dump(e.world_mut(), cx.now);
         raea_sys_frame::gpu::said(e.world_mut(), cx.now)?;
         if mats {
             page.place_ui_materials(e.world());

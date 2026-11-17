@@ -1034,6 +1034,15 @@ pub(crate) fn rows_dump(world: &mut World, f: i64) {
                 comps.insert("material".into(), j);
             }
         }
+        // a toon surface's (its StandardMaterial base and toon params), which hid a batch-sticky colour (Ch1 @11550)
+        if let Some(m) = er.get::<MeshMaterial3d<raea_sys_material::toon::ToonMaterial>>() {
+            if let Some(mat) = world.resource::<Assets<raea_sys_material::toon::ToonMaterial>>().get(&m.0) {
+                let j = serde_json::to_value(bevy::reflect::serde::TypedReflectSerializer::new(mat.base.as_partial_reflect(), &reg)).unwrap_or(Value::Null);
+                comps.insert("material".into(), j);
+                let t = serde_json::to_value(bevy::reflect::serde::TypedReflectSerializer::new(mat.extension.as_partial_reflect(), &reg)).unwrap_or(Value::Null);
+                comps.insert("toon".into(), t);
+            }
+        }
         if let Some(kids) = er.get::<Children>() {
             for (i, k) in kids.iter().enumerate() {
                 let n = world.get::<Name>(k).map(|n| n.as_str().to_string()).unwrap_or_else(|| i.to_string());

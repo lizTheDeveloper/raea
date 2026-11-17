@@ -381,6 +381,38 @@ fn spec_for<'a>(specs: &'a [ToonSpec], name: Option<&str>) -> Option<&'a ToonSpe
 /// A model's meshes given toon surfaces (and outlines) once its scene is spawned: each glTF material swapped for a toon
 /// one over it (its colour and texture kept unless the spec gives a colour), shared materials swapped once. Returns
 /// whether it found the meshes.
+/// A model's mesh made toon by spec `spec` of its root's `toon` list (apply_to_model), for that spec's keyed colour.
+#[derive(Component)]
+pub struct ToonPartOf {
+    pub root: Entity,
+    pub spec: usize,
+}
+
+/// Each frame's colour of a model's toon spec (tc{i}_col_r..b, runtime/scene models.rs toon_columns) onto the toon
+/// materials it made, where the spec gives one: they were the colour of the frame the model's materials were swapped
+/// on, for the whole batch. Written only when it moves past the columns' rounding (1e-4), so a colour that never changes
+/// stays exactly the one spawned; its alpha (opacity, sync_surfaces) is kept.
+pub fn sync_model_toons(frame: Res<FrameRows>, mut mats: ResMut<Assets<ToonMaterial>>, parts: Query<(&ToonPartOf, &MeshMaterial3d<ToonMaterial>), With<ToonOwnColour>>) {
+    for (of, h) in &parts {
+        let Some(v) = frame.vals(of.root) else { continue };
+        let p = format!("tc{}_", of.spec);
+        let Some(r) = v.get(&format!("{p}col_r")).map(|x| x.num() as f32) else { continue };
+        let (g, b) = (num(&v, &format!("{p}col_g"), r), num(&v, &format!("{p}col_b"), r));
+        let Some(cur) = mats.get(&h.0) else { continue };
+        let have = cur.base.base_color.to_srgba();
+        if (have.red - r).abs() > 1e-4 || (have.green - g).abs() > 1e-4 || (have.blue - b).abs() > 1e-4 {
+            if let Some(mut m) = mats.get_mut(&h.0) {
+                m.base.base_color = Color::srgba(r, g, b, have.alpha);
+            }
+        }
+    }
+}
+
+/// A model's toon part whose <Toon> gives its own colour (laid over its surface's): the surface's keyed colour leaves it
+/// be (surface.rs sync_surfaces), where a part without one follows its surface's colour frame by frame.
+#[derive(Component)]
+pub struct ToonOwnColour;
+
 pub fn apply_to_model(world: &mut World, root: Entity, specs: &[ToonSpec]) -> bool {
     let mut stack = vec![root];
     let mut found = Vec::new();
@@ -414,7 +446,10 @@ pub fn apply_to_model(world: &mut World, root: Entity, specs: &[ToonSpec]) -> bo
                 h
             }
         };
-        world.entity_mut(x).remove::<MeshMaterial3d<StandardMaterial>>().insert(MeshMaterial3d(h));
+        world.entity_mut(x).remove::<MeshMaterial3d<StandardMaterial>>().insert((MeshMaterial3d(h), ToonPartOf { root, spec: k }));
+        if spec.color.is_some() {
+            world.entity_mut(x).insert(ToonOwnColour);
+        }
         if let Some(o) = outline_params(spec, colour_of.with_alpha(1.0), None, 1.0) {
             let hull = match hulls.get(&mesh.id()) {
                 Some(h) => Some(h.clone()),

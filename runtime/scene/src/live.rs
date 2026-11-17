@@ -76,12 +76,13 @@ pub(crate) fn live_dynamic(kind: &str) -> &'static [&'static str] {
 pub(crate) fn cam_keyed(k: &str) -> bool {
     ["lens_", "mb_", "up_", "view_"].iter().any(|p| k.starts_with(p))
         || ["_qx", "_qy", "_qz", "_qw"].iter().any(|q| k.ends_with(q))
-        || matches!(k, "x" | "y" | "z" | "look_x" | "look_y" | "look_z" | "fov" | "near" | "far" | "focus" | "ortho" | "ambient" | "skybox_k" | "env_srcs" | "env_i" | "env_k" | "env_rot" | "sky_k" | "aberration" | "dof_aperture" | "paint_bands" | "paint_grain" | "paint_rag" | "paint_seed")
+        || matches!(k, "x" | "y" | "z" | "look_x" | "look_y" | "look_z" | "fov" | "near" | "far" | "focus" | "ortho" | "ambient" | "amb_r" | "amb_g" | "amb_b" | "envmap_k" | "skybox_k" | "env_srcs" | "env_i" | "env_k" | "env_rot" | "sky_k" | "aberration" | "dof_aperture" | "paint_bands" | "paint_grain" | "paint_rag" | "paint_seed")
 }
 
-/// A model's posed-node column (models.rs node_columns): node{i}_x, _q_w, _s_z...
+/// A model's posed-node column (models.rs node_columns): node{i}_x, _q_w, _s_z...; its surfaces' (sf{i}_*) and toon
+/// specs' colours (tc{i}_col_*)
 pub(crate) fn node_column(k: &str) -> bool {
-    ["node", "sf"].iter().any(|p| k.strip_prefix(p).and_then(|r| r.split_once('_')).is_some_and(|(i, _)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())))
+    ["node", "sf", "tc"].iter().any(|p| k.strip_prefix(p).and_then(|r| r.split_once('_')).is_some_and(|(i, _)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())))
 }
 
 impl LiveScene {

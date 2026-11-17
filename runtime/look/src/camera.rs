@@ -129,6 +129,22 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
                 row.insert("ambient_color".into(), V::S(c));
             }
         }
+        // and its colour keyed (amb_r..amb_b, sRGB): each frame's first AmbientLight's, the frame before's
+        // where a frame has none. It was the first frame's for a whole batch, so a batch drew its first frame's ambient
+        // colour throughout and stepped at every batch boundary (Ch1 v7.4 @17100)
+        let mut held = "#ffffff".to_string();
+        let cols: Vec<[f64; 3]> = all
+            .iter()
+            .map(|its| {
+                if let Some(c) = its.iter().find(|i| i.kind == "ambient").map(|i| hex(i.props.get("color")).unwrap_or("#ffffff".into())) {
+                    held = c;
+                }
+                rgb(&held)
+            })
+            .collect();
+        for (k, name) in ["amb_r", "amb_g", "amb_b"].into_iter().enumerate() {
+            column(p, row, id, name, &cols.iter().map(|c| c[k]).collect::<Vec<_>>());
+        }
     }
     // an <Environment>: each frame's panorama (an index into env_srcs, -1 for none), its light, turn and sky, keyed, so
     // a cut from a hall to a street changes the light on that frame
@@ -139,7 +155,9 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
         for k in ["diffuse_map", "specular_map"] {
             row.insert(format!("envmap_{k}"), V::S(m.props.get(k).and_then(Value::as_str).unwrap_or_default().to_string()));
         }
-        row.insert("envmap_k".into(), V::N(n(&m.props, "intensity", 1.0)));
+        // its intensity keyed (each frame's, the first's where a frame has none): it was the first frame's for a batch
+        let k0 = n(&m.props, "intensity", 1.0);
+        column(p, row, id, "envmap_k", &maps.iter().map(|m| m.map_or(k0, |m| n(&m.props, "intensity", k0))).collect::<Vec<_>>());
         // its rotation (a Quat), keyed: rotate_environment_map turns it every frame
         quat_columns(p, row, id, "envmap", &maps);
     }

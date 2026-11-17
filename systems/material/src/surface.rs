@@ -149,8 +149,8 @@ pub struct SurfaceOf {
 /// The frame's surface values onto each re-covered mesh's material (standard, or the toon one laid over it): colour,
 /// opacity, glow (sf{i}_em_r.. times sf{i}_emissive_k, as maps.rs makes it), roughness and metalness. A <Model>'s
 /// <MeshStandardMaterial> children were applied once, at load, and held their first frame's values for good.
-pub fn sync_surfaces(frame: Res<FrameRows>, mut std_mats: ResMut<Assets<StandardMaterial>>, mut toon_mats: ResMut<Assets<super::toon::ToonMaterial>>, parts: Query<(&SurfaceOf, Option<&MeshMaterial3d<StandardMaterial>>, Option<&MeshMaterial3d<super::toon::ToonMaterial>>)>) {
-    for (of, std, toon) in &parts {
+pub fn sync_surfaces(frame: Res<FrameRows>, mut std_mats: ResMut<Assets<StandardMaterial>>, mut toon_mats: ResMut<Assets<super::toon::ToonMaterial>>, parts: Query<(&SurfaceOf, Option<&MeshMaterial3d<StandardMaterial>>, Option<&MeshMaterial3d<super::toon::ToonMaterial>>, Has<super::toon::ToonOwnColour>)>) {
+    for (of, std, toon, own_colour) in &parts {
         let Some(v) = frame.vals(of.root) else { continue };
         let p = format!("sf{}_", of.spec);
         let get = |k: &str| v.get(&format!("{p}{k}"));
@@ -161,7 +161,9 @@ pub fn sync_surfaces(frame: Res<FrameRows>, mut std_mats: ResMut<Assets<Standard
             Some(V::N(x)) => Some(*x as f32),
             _ => None,
         };
-        // (a toon surface's own colour, laid over the spec's, stays: toon.rs apply_to_model)
+        // a toon surface follows its surface's colour frame by frame too, unless its <Toon> gives its own (laid over the
+        // spec's at conversion, toon.rs apply_to_model: ToonOwnColour). It kept the batch's first frame's colour: Ch1 v7.4's
+        // dais floor stayed gold through a batch that began before it turned navy (f11550, 16.6 dB at the boundary)
         let set = |m: &mut StandardMaterial, colour: bool| {
             if let (true, Some(r), Some(g), Some(b)) = (colour, num("col_r"), num("col_g"), num("col_b")) {
                 m.base_color = Color::srgba(r, g, b, m.base_color.alpha());
@@ -195,10 +197,17 @@ pub fn sync_surfaces(frame: Res<FrameRows>, mut std_mats: ResMut<Assets<Standard
         if let Some(h) = toon {
             if let Some(cur) = toon_mats.get(&h.0) {
                 let mut want = cur.base.clone();
-                set(&mut want, false);
-                if want.base_color != cur.base.base_color || want.emissive != cur.base.emissive || want.perceptual_roughness != cur.base.perceptual_roughness || want.metallic != cur.base.metallic {
+                set(&mut want, !own_colour);
+                // the colour past the columns' rounding only (1e-4), so one that never changes stays exactly the one spawned
+                let (a, b) = (want.base_color.to_srgba(), cur.base.base_color.to_srgba());
+                let moved = (a.red - b.red).abs() > 1e-4 || (a.green - b.green).abs() > 1e-4 || (a.blue - b.blue).abs() > 1e-4 || a.alpha != b.alpha;
+                if moved || want.emissive != cur.base.emissive || want.perceptual_roughness != cur.base.perceptual_roughness || want.metallic != cur.base.metallic {
                     if let Some(mut m) = toon_mats.get_mut(&h.0) {
-                        set(&mut m.base, false);
+                        let keep = m.base.base_color;
+                        set(&mut m.base, !own_colour);
+                        if !moved {
+                            m.base.base_color = keep;
+                        }
                     }
                 }
             }

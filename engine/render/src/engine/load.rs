@@ -21,6 +21,7 @@ impl Engine {
         }
         self.drawn = Some(self.app.world().resource::<Clock>().0);
         self.pipe = raea_sys_frame::pipe::Pipe::new();
+        state_dump(&mut self.app, "reload");
         Ok(())
     }
 
@@ -200,4 +201,42 @@ impl Engine {
         plugins::await_loads(&mut self.app)?;
         Ok(())
     }
+}
+
+/// RAEA_STATE_DUMP=DIR (debug): a World's state as a shot is about to draw, DIR/TAG-N.json: every reflectable main-world
+/// resource's value, and both worlds' entity counts per component, so a kept engine's state after `reload` can be diffed
+/// against a fresh engine's (docs/native-shots.md, engine reuse).
+pub fn state_dump(app: &mut App, tag: &str) {
+    let Some(dir) = std::env::var_os("RAEA_STATE_DUMP").map(std::path::PathBuf::from) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let world = app.world();
+    let reg = world.resource::<AppTypeRegistry>().clone();
+    let reg = reg.read();
+    let mut res = serde_json::Map::new();
+    for (_, info, ptr) in world.iter_resources() {
+        let name = info.name().to_string();
+        let v = info.type_id().and_then(|t| reg.get(t)).and_then(|r| r.data::<bevy::reflect::ReflectFromPtr>()).map(|rfp| {
+            // SAFETY: the pointer is this resource's, of the registered type rfp was made for, read only
+            let v: &dyn bevy::reflect::Reflect = unsafe { &*(rfp.raw_pointer_cast())(ptr.as_ptr() as *mut ()) };
+            serde_json::to_value(bevy::reflect::serde::TypedReflectSerializer::new(v.as_partial_reflect(), &reg)).unwrap_or(serde_json::Value::Null)
+        });
+        res.insert(name, v.unwrap_or(serde_json::Value::String("(not reflected)".into())));
+    }
+    let counts = |w: &World| {
+        let mut m = std::collections::BTreeMap::<String, usize>::new();
+        for a in w.archetypes().iter() {
+            for c in a.components() {
+                if let Some(i) = w.components().get_info(*c) {
+                    *m.entry(i.name().to_string()).or_default() += a.len() as usize;
+                }
+            }
+        }
+        m
+    };
+    let main = counts(world);
+    let render = counts(app.sub_app(bevy::render::RenderApp).world());
+    let out = serde_json::json!({"resources": res, "main_counts": main, "render_counts": render, "entities": world.entities().len()});
+    let _ = std::fs::write(dir.join(format!("{tag}-{n}.json")), out.to_string());
 }

@@ -59,8 +59,8 @@ const MATERIAL_COLS: [&str; 6] = ["col_r", "opacity", "emissive_k", "rough", "me
 /// for the rest of the batch). Ch1's pocket-world window cameras, <Entity>s that follow the main camera, froze at each
 /// batch's first frame and jumped at every batch boundary (live and native alike). A row the same on every frame is
 /// left as spawned, so an entity a plugin moves (a rigid body: its row holds one placement) stays the plugin's.
-pub fn sync_entities(frame: Res<FrameRows>, mut q: Query<(Entity, &mut Transform, &mut Visibility), With<super::BareEntity>>) {
-    for (e, mut t, mut vis) in &mut q {
+pub fn sync_entities(frame: Res<FrameRows>, mut commands: Commands, mut q: Query<(Entity, &mut Transform, &mut Visibility, Option<&mut Camera>, Has<ParkedCamera>), With<super::BareEntity>>) {
+    for (e, mut t, mut vis, cam, parked) in &mut q {
         if frame.still(e) {
             continue;
         }
@@ -74,9 +74,26 @@ pub fn sync_entities(frame: Res<FrameRows>, mut q: Query<(Entity, &mut Transform
             if *vis != want {
                 *vis = want;
             }
+            // a camera on an entity the frame doesn't have (a pocket world's, after its part has gone) stops drawing:
+            // Bevy draws a camera whatever its Visibility, so a batch kept rendering every world camera it had met into
+            // its texture, frame after frame, where a batch begun later had none (Ch1 v7.4 @17100: 7 such cameras).
+            // Only a camera parked here is set going again, so one a composition turned off stays off
+            if let Some(mut c) = cam {
+                if !on.truthy() && c.is_active {
+                    c.is_active = false;
+                    commands.entity(e).insert(ParkedCamera);
+                } else if on.truthy() && parked {
+                    c.is_active = true;
+                    commands.entity(e).remove::<ParkedCamera>();
+                }
+            }
         }
     }
 }
+
+/// A camera sync_entities stopped while its entity is missing from the frame (set going again when it's back).
+#[derive(Component)]
+pub struct ParkedCamera;
 
 /// Meshes and models where the frame's rows put them: transform, whether they show, and the material values a row
 /// animates. Only columns a row has are applied, so rows written before these columns draw as they did.
@@ -326,9 +343,18 @@ pub fn sync_camera(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut placed: L
                 c.intensity = a;
             }
         }
-        if let (Some(b), Some(mut a)) = (v.get("ambient"), amb) {
-            if a.brightness != b.num() as f32 {
+        if let Some(mut a) = amb {
+            if let Some(b) = v.get("ambient").filter(|b| a.brightness != b.num() as f32) {
                 a.brightness = b.num() as f32;
+            }
+            // its colour keyed (amb_r..amb_b, sRGB; runtime/look camera.rs), written only when it moves past the columns'
+            // rounding, so a colour that never changes stays exactly the one spawned
+            if let Some(r) = v.get("amb_r") {
+                let want = Color::srgb(r.num() as f32, num(v, "amb_g", 1.0), num(v, "amb_b", 1.0)).to_srgba();
+                let have = a.color.to_srgba();
+                if (have.red - want.red).abs() > 1e-4 || (have.green - want.green).abs() > 1e-4 || (have.blue - want.blue).abs() > 1e-4 {
+                    a.color = Color::Srgba(want);
+                }
             }
         }
         // a clear keyed frame by frame (bg_r..bg_a, sRGB: a holder's background that changes, runtime/export program.rs)

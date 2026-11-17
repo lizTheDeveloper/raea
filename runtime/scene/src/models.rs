@@ -105,6 +105,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         }
         if let Some(t) = first.get("toon") {
             row.insert("toon".into(), V::S(t.to_string()));
+            toon_columns(p, &mut row, &id, &its);
         }
         grid_columns(&mut row, first);
         // a look (raea-render's look.rs): which one keyed by the frame, the rest the first frame's
@@ -306,6 +307,28 @@ fn node_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, its: &
                 let at = |it: &Item| it.props.get("nodes").and_then(|n| n.get(name)).and_then(|n| n.get(field)).and_then(|v| v.get(k)).and_then(Value::as_f64).unwrap_or(f64::NAN);
                 exact(p, row, id, &format!("node{i}_{c}"), &its.iter().map(at).collect::<Vec<_>>());
             }
+        }
+    }
+}
+
+/// A model's <ToonMaterial> specs' colours (a list; one object is a list of one), as tc{i}_col_r..b keyed by the frame
+/// (raea-sys-material's sync_model_toons sets them on the toon materials spec i made). The `toon` column, read once
+/// when the model's materials are swapped, held the first frame's colour for good: Ch1 v7.4's dais (its palette went
+/// from dusk to night at f11550) stayed the first frame's colour through a batch, 16.6 dB at the boundary. A spec missing
+/// from a frame, or without a colour, holds the first frame's.
+fn toon_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, its: &[Item]) {
+    let list = |it: &Item| match it.props.get("toon") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(v @ Value::Object(_)) => vec![v.clone()],
+        _ => Vec::new(),
+    };
+    let first = list(&its[0]);
+    let all: Vec<Vec<Value>> = its.iter().map(list).collect();
+    for (i, s0) in first.iter().enumerate() {
+        let Some(h0) = s0.get("color").and_then(Value::as_str).and_then(hex_of) else { continue };
+        let c: Vec<[f64; 3]> = all.iter().map(|l| rgb(&l.get(i).and_then(|s| s.get("color")).and_then(Value::as_str).and_then(hex_of).unwrap_or_else(|| h0.clone()))).collect();
+        for (j, name) in ["col_r", "col_g", "col_b"].iter().enumerate() {
+            exact(p, row, id, &format!("tc{i}_{name}"), &c.iter().map(|v| v[j]).collect::<Vec<_>>());
         }
     }
 }

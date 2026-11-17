@@ -273,6 +273,7 @@ impl Engine {
         e.drawn = Some(e.app.world().resource::<Clock>().0);
         // updates pipelined from here on (raea_sys_frame::pipe), but for a live draw's own
         e.pipe = raea_sys_frame::pipe::Pipe::new();
+        super::load::state_dump(&mut e.app, "fresh");
         // a live game's frame on one thread (lightspeed F2): its scene is small, and the multi-threaded executor's task
         // hand-offs cost more than its systems (arena3d's frame work p50 2.7-3.4 -> 1.9-2.6 ms, p99 3.9-4.6 -> 2.7-3.5,
         // paired). RAEA_BEVY_EXECUTOR=single|multi picks for every engine; renders stay multi-threaded otherwise
