@@ -1174,7 +1174,8 @@ pub struct ShotBake {
 pub fn read_shot(p: &Path, dir: &Path) -> R<ShotBake> {
     let at = |e: String| format!("{}: {e}", p.display());
     let b = std::fs::read(p).map_err(|e| at(e.to_string()))?;
-    let (t, bin) = split_kept(zstd::decode_all(&b[..]).map_err(|e| at(e.to_string()))?).map_err(at)?;
+    // unpacked within the bake bound (a zstd bomb is refused before it allocates past it)
+    let (t, bin) = split_kept(unzstd_capped(&b, bake_max_bytes()).map_err(at)?).map_err(at)?;
     let v: Value = serde_json::from_str(&placed(&t, dir)).map_err(|e| at(e.to_string()))?;
     drop(t);
     if let Some(why) = stale(&v, dir) {
