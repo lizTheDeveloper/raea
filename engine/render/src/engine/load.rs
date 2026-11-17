@@ -27,7 +27,17 @@ impl Engine {
                 return Ok(());
             }
         }
-        plugins::await_loads(&mut self.app)
+        // the guard's firings logged, with their rate over the play so far: an open-time preload should leave it ~never
+        static FIRES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = *START.get_or_init(std::time::Instant::now);
+        let waiting = self.app.world().get_resource::<plugins::Loading>().map_or(0, |l| l.0.len());
+        let t = std::time::Instant::now();
+        let r = plugins::await_loads(&mut self.app);
+        let n = FIRES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let mins = (start.elapsed().as_secs_f64() / 60.0).max(1.0 / 60.0);
+        eprintln!("raea live: texture guard fired (#{n}, {:.1}/min): {waiting} load(s) waited {:.0} ms", n as f64 / mins, t.elapsed().as_secs_f64() * 1e3);
+        r
     }
 
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
