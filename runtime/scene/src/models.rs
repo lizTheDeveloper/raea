@@ -41,7 +41,7 @@ pub(crate) fn models_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         if let Some(Value::Array(a)) = first.get("graph") {
             let parts: Vec<Value> = a.iter().map(|g| serde_json::json!({ "kind": g.get("kind"), "clip": g.get("clip"), "parent": g.get("parent"), "mask": g.get("mask") })).collect();
             row.insert("graph".into(), V::s(Value::Array(parts).to_string()));
-            for i in 0..a.len().min(16) {
+            for i in 0..a.len().min(GRAPH_NODES) {
                 for (k, col, d) in [("weight", "w", 1.0), ("time", "t", 0.0)] {
                     let vals: Vec<f64> = its.iter().map(|it| it.props.get("graph").and_then(|x| x.get(i)).map(|c| n(c.as_object().unwrap_or(&Default::default()), k, d)).unwrap_or(d)).collect();
                     column(p, &mut row, &id, GRAPH_COLS[i].iter().find(|c| c.ends_with(col)).unwrap(), &vals);

@@ -175,7 +175,7 @@ impl LiveScene {
                         }
                     }
                     if let Some(Value::Array(a)) = it.props.get("graph") {
-                        for (i, c) in a.iter().enumerate().take(16) {
+                        for (i, c) in a.iter().enumerate().take(GRAPH_NODES) {
                             let o = c.as_object().cloned().unwrap_or_default();
                             put(GRAPH_COLS[i][0], n(&o, "weight", 1.0));
                             put(GRAPH_COLS[i][1], n(&o, "time", 0.0));
