@@ -136,7 +136,10 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         let id = format!("mesh{m}");
         let mut row = BTreeMap::new();
         row.insert("id".into(), V::S(id.clone()));
-        row.insert("shape".into(), V::S(shape.to_string()));
+        // its shape keyed by the frame when it changes (a <BufferMesh> remade every frame: the multiverse veils'
+        // ripple), where it was the first frame's for a whole batch; one with a line break in it holds the first's
+        let shapes: Vec<String> = its.iter().map(|i| i.shape.as_deref().unwrap_or(&shape).to_string()).collect();
+        keyed_strings(p, &mut row, &id, "shape", &shapes);
         let mat = |i: &Item| i.material.as_ref().map(|m| m.props.clone()).unwrap_or_default();
         let mats: Vec<std::sync::Arc<Map<String, Value>>> = its.iter().map(mat).collect();
         let basic = its[0].material.as_ref().is_some_and(|m| &*m.kind == "MeshBasicMaterial");

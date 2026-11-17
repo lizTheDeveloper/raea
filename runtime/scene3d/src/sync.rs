@@ -358,9 +358,16 @@ pub fn sync_camera(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut placed: L
             }
         }
         // a clear keyed frame by frame (bg_r..bg_a, sRGB: a holder's background that changes, runtime/export program.rs)
-        if let (Some(r), Some(mut c)) = (v.get("bg_r"), cam) {
-            let want = Color::srgba(r.num() as f32, num(v, "bg_g", 0.0), num(v, "bg_b", 0.0), num(v, "bg_a", 1.0));
-            if !matches!(c.clear_color, ClearColorConfig::Custom(have) if have == want) {
+        // the clear: keyed bg_r..bg_a, else a camera's own `bg` (live play sends it as it changes; spawn_camera reads it
+        // the same way)
+        let want = match (v.get("bg_r"), v.get("bg")) {
+            (Some(r), _) => Some(Color::srgba(r.num() as f32, num(v, "bg_g", 0.0), num(v, "bg_b", 0.0), num(v, "bg_a", 1.0))),
+            (None, Some(b @ V::S(_))) => Some(colour(Some(b), [0.0, 0.0, 0.0, 1.0])),
+            _ => None,
+        };
+        if let (Some(want), Some(mut c)) = (want, cam) {
+            // (a camera that clears nothing, `clear: "none"`, keeps drawing over what's there)
+            if !matches!(c.clear_color, ClearColorConfig::None) && !matches!(c.clear_color, ClearColorConfig::Custom(have) if have == want) {
                 c.clear_color = ClearColorConfig::Custom(want);
             }
         }

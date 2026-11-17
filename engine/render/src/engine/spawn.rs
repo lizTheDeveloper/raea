@@ -262,6 +262,11 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
                 }
                 None => mesh,
             };
+            // the shape it was made with, for a shape keyed by the frame (sync_shapes); a three.js shader's mesh is
+            // fitted to its shader, so it keeps its first
+            if three.is_none() {
+                world.entity_mut(e).insert(ShapeNow { expr: expr.clone(), own: false });
+            }
             // the surface (emissive, opacity, unlit, clearcoat, a picture map...) and transform: scene3d
             let mat = scene3d::material(world, t, inserted, dir)?;
             // rot_x/y/z in radians and scale (or scale_x/y/z), as sync_meshes moves every mesh frame by frame
@@ -381,4 +386,40 @@ pub(crate) fn spawn_3d(world: &mut World, e: Entity, t: &Tup, inserted: &[Tup], 
         _ => {}
     }
     Ok(())
+}
+
+/// The shape a mesh row's Mesh was last made from (spawn_3d), and whether that Mesh is its own (sync_shapes made it)
+/// rather than the one equal parts share.
+#[derive(Component)]
+pub(crate) struct ShapeNow {
+    expr: String,
+    own: bool,
+}
+
+/// A mesh whose shape the frame changes (a keyed `shape`: a <BufferMesh> remade every frame, as the multiverse veils'
+/// ripple is) made again from the frame's shape, into a Mesh of its own (never the shared one equal parts hold, so a
+/// changing shape doesn't fill the share with a mesh a frame). It drew the batch's first frame's shape throughout.
+pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
+    for (e, mut now, mut m) in &mut q {
+        let Some(v) = frame.vals(e) else { continue };
+        let Some(expr) = raea_sys_frame::keyed(|k| v.get(k).cloned(), "shape") else { continue };
+        if expr == now.expr {
+            continue;
+        }
+        let uvs = scene3d::has_maps(&v) || grid::grid_of(&v).is_some();
+        let tangents = raea_sys_material::maps::needs_tangents(&v);
+        let (attrs, packed) = (match v.get("attributes") { Some(V::S(a)) => a.clone(), _ => String::new() }, v.get("compressed").is_some_and(V::truthy));
+        match raea_sys_material::mesh::shape_mesh("mesh", &expr, uvs, tangents).and_then(|mesh| raea_sys_material::mesh::finished(mesh, &attrs, packed)) {
+            Ok(mesh) => {
+                if now.own {
+                    let _ = meshes.insert(&m.0, mesh);
+                } else {
+                    m.0 = meshes.add(mesh);
+                    now.own = true;
+                }
+                now.expr = expr;
+            }
+            Err(err) => eprintln!("raea: a mesh's shape for this frame: {err}"),
+        }
+    }
 }

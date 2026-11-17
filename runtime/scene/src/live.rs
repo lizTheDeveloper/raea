@@ -62,7 +62,7 @@ pub(crate) const MORPH_COLS: [&str; 64] = ["morph0", "morph1", "morph2", "morph3
 pub(crate) fn live_dynamic(kind: &str) -> &'static [&'static str] {
     match kind {
         "light" => &["lux", "lumens", "x", "y", "z", "dir_x", "dir_y", "dir_z", "rot_qx", "rot_qy", "rot_qz", "rot_qw", "inner", "outer", "frame_sets", "frame_set_i"],
-        "mesh" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "col_r", "col_g", "col_b", "rough", "metal", "emissive_k", "opacity", "sh_r", "sh_g", "sh_b", "rim_k", "spec_k", "outline_w", "pass", "inst"],
+        "mesh" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "shape", "col_r", "col_g", "col_b", "rough", "metal", "emissive_k", "opacity", "sh_r", "sh_g", "sh_b", "rim_k", "spec_k", "outline_w", "pass", "inst"],
         "model" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "anim_t", "mix0_t", "mix0_w", "mix1_t", "mix1_w", "mix2_t", "mix2_w", "mix3_t", "mix3_w", "morph0", "morph1", "morph2", "morph3", "morph4", "morph5", "morph6", "morph7", "morph8", "morph9", "morph10", "morph11", "morph12", "morph13", "morph14", "morph15", "morph16", "morph17", "morph18", "morph19", "morph20", "morph21", "morph22", "morph23", "morph24", "morph25", "morph26", "morph27", "morph28", "morph29", "morph30", "morph31", "morph32", "morph33", "morph34", "morph35", "morph36", "morph37", "morph38", "morph39", "morph40", "morph41", "morph42", "morph43", "morph44", "morph45", "morph46", "morph47", "morph48", "morph49", "morph50", "morph51", "morph52", "morph53", "morph54", "morph55", "morph56", "morph57", "morph58", "morph59", "morph60", "morph61", "morph62", "morph63", "g0_w", "g0_t", "g1_w", "g1_t", "g2_w", "g2_t", "g3_w", "g3_t", "g4_w", "g4_t", "g5_w", "g5_t", "g6_w", "g6_t", "g7_w", "g7_t", "g8_w", "g8_t", "g9_w", "g9_t", "g10_w", "g10_t", "g11_w", "g11_t", "g12_w", "g12_t", "g13_w", "g13_t", "g14_w", "g14_t", "g15_w", "g15_t", "look", "glitch_explode", "glitch_scramble", "glitch_jitter", "glitch_snap", "glitch_smear_x", "glitch_smear_y", "glitch_smear_z", "glitch_seed", "cloth_frame", "screen_power", "pass", "inst"],
         "panel" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "screen_power", "screen_bright", "pass", "sheet_frame", "sheet_cols", "sheet_rows", "src"],
         "decal" => &["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "scale_x", "scale_y", "scale_z", "visible", "col_r", "col_g", "col_b", "opacity", "rough", "metal"],
@@ -130,7 +130,7 @@ impl LiveScene {
     pub(crate) fn camera_diff(sent: &mut BTreeMap<String, V>, cam: &BTreeMap<String, V>) -> Option<raea_core_program::eval::Tup> {
         let mut vals = BTreeMap::new();
         // and each frame's post-processing table and page background (RR1: render = play), and its shot (RR2)
-        let keyed = |k: &str| cam_keyed(k) || matches!(k, "frame_sets" | "frame_set_i" | "bg_r" | "bg_g" | "bg_b" | "bg_a" | "shot");
+        let keyed = |k: &str| cam_keyed(k) || matches!(k, "frame_sets" | "frame_set_i" | "bg_r" | "bg_g" | "bg_b" | "bg_a" | "bg" | "shot");
         // the ambient and the shot back to 0 when the row stops holding them (no light; the first camera's shot again)
         for k in cam.keys().map(String::as_str).filter(|k| keyed(k)).chain(["ambient", "shot"]) {
             let v = cam.get(k).cloned().or_else(|| (matches!(k, "ambient" | "shot") && sent.contains_key(k)).then_some(V::N(0.0)));

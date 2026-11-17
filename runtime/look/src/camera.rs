@@ -94,6 +94,14 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
         }
         if let Some(b) = first.get("bg").and_then(Value::as_str) {
             row.insert("bg".into(), V::S(b.into()));
+            // and keyed (bg_r..bg_a, sRGB, sync_camera's clear) when a later frame's differs, unless a holder's
+            // background keys it already: it was the first frame's clear for a whole batch
+            let per: Vec<[f64; 4]> = its.iter().map(|i| i.props.get("bg").and_then(Value::as_str).unwrap_or(b)).map(|c| rgba_of(c).unwrap_or([0.0, 0.0, 0.0, 1.0])).collect();
+            if !row.contains_key("bg_r") && per.iter().any(|c| *c != per[0]) {
+                for (k, name) in ["bg_r", "bg_g", "bg_b", "bg_a"].into_iter().enumerate() {
+                    column(p, row, id, name, &per.iter().map(|c| c[k]).collect::<Vec<_>>());
+                }
+            }
         }
         // its viewport (Bevy's Viewport: physical px from the target's top left)
         let vp = |k: &str, i: usize| first.get("viewport").and_then(|v| v.get(k)).and_then(|v| v.get(i)).and_then(Value::as_f64);
