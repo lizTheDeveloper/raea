@@ -367,7 +367,7 @@ fn keyed_rows(world: &mut World) {
 
 fn s(vals: &BTreeMap<String, V>, k: &str) -> Option<String> {
     match vals.get(k) {
-        Some(V::S(x)) => Some(x.clone()),
+        Some(V::S(x)) => Some(x.to_string()),
         _ => None,
     }
 }

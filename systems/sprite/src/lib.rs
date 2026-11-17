@@ -118,7 +118,7 @@ pub fn spawn_sprite(world: &mut World, e: Entity, t: &Tup, image: Handle<Image>,
         }
     }
     // a picture of an atlas (TextureAtlasBuilder): its `atlas_pick`, or the whole atlas
-    let src = match v.get("src") { Some(V::S(s)) => s.clone(), _ => String::new() };
+    let src = match v.get("src") { Some(V::S(s)) => s.to_string(), _ => String::new() };
     let picked = atlas::pick(world, &src, v.get("atlas_pick").map(|p| p.num().max(0.0) as usize))?;
     let texture_atlas = picked.or_else(|| (cols > 1 || rows > 1).then(|| {
         let layout = world.resource_mut::<Assets<TextureAtlasLayout>>().add(TextureAtlasLayout::from_grid(UVec2::new(cw, ch), cols, rows, None, None));
@@ -189,10 +189,10 @@ pub fn spawn_shape(world: &mut World, e: Entity, t: &Tup, texture: Option<Handle
     };
     let mut mesh = match (&primitive, v.get("shape")) {
         (Some(p), _) => raea_sys_mesh::primitive_mesh(p).map_err(|e| format!("Shape2D {}: {e}", t.id))?,
-        (None, Some(V::S(s))) if s == "circle" => Mesh::from(Circle::new(w / 2.0)),
-        (None, Some(V::S(s))) if s == "ellipse" => Mesh::from(Ellipse::new(w / 2.0, h / 2.0)),
-        (None, Some(V::S(s))) if s == "triangle" => Mesh::from(Triangle2d::new(Vec2::new(0.0, h / 2.0), Vec2::new(-w / 2.0, -h / 2.0), Vec2::new(w / 2.0, -h / 2.0))),
-        (None, Some(V::S(s))) if s == "polygon" => Mesh::from(RegularPolygon::new(w / 2.0, num(v, "sides", 5.0).max(3.0) as u32)),
+        (None, Some(V::S(s))) if &**s == "circle" => Mesh::from(Circle::new(w / 2.0)),
+        (None, Some(V::S(s))) if &**s == "ellipse" => Mesh::from(Ellipse::new(w / 2.0, h / 2.0)),
+        (None, Some(V::S(s))) if &**s == "triangle" => Mesh::from(Triangle2d::new(Vec2::new(0.0, h / 2.0), Vec2::new(-w / 2.0, -h / 2.0), Vec2::new(w / 2.0, -h / 2.0))),
+        (None, Some(V::S(s))) if &**s == "polygon" => Mesh::from(RegularPolygon::new(w / 2.0, num(v, "sides", 5.0).max(3.0) as u32)),
         _ => Mesh::from(Rectangle::new(w, h)),
     };
     // per-vertex linear colours (Mesh::ATTRIBUTE_COLOR), which ColorMaterial multiplies its colour and texture by
@@ -206,8 +206,8 @@ pub fn spawn_shape(world: &mut World, e: Entity, t: &Tup, texture: Option<Handle
     }
     let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
     let alpha_mode = match v.get("alpha") {
-        Some(V::S(a)) if a == "opaque" => AlphaMode2d::Opaque,
-        Some(V::S(a)) if a == "mask" => AlphaMode2d::Mask(num(v, "alpha_cutoff", 0.5)),
+        Some(V::S(a)) if &**a == "opaque" => AlphaMode2d::Opaque,
+        Some(V::S(a)) if &**a == "mask" => AlphaMode2d::Mask(num(v, "alpha_cutoff", 0.5)),
         _ => AlphaMode2d::Blend,
     };
     let uv_transform = uv_of(v);

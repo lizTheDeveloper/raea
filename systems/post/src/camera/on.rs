@@ -15,7 +15,7 @@ pub fn shadows(world: &mut World, e: Entity, vals: &Vals) {
             m.size = if vals.contains_key("shadow_map") { size / 2 } else { 1024 };
         }
     }
-    let filter = match vals.get("shadow_filter") { Some(V::S(s)) if s == "hardware" => bevy::light::ShadowFilteringMethod::Hardware2x2, _ => bevy::light::ShadowFilteringMethod::Gaussian };
+    let filter = match vals.get("shadow_filter") { Some(V::S(s)) if &**s == "hardware" => bevy::light::ShadowFilteringMethod::Hardware2x2, _ => bevy::light::ShadowFilteringMethod::Gaussian };
     world.entity_mut(e).insert(filter);
 }
 
@@ -76,7 +76,7 @@ pub fn fog(world: &mut World, e: Entity, vals: &Vals) {
 pub fn tonemap(world: &mut World, e: Entity, vals: &Vals) {
     let Some(V::S(tm)) = vals.get("tonemap") else { return };
     use bevy::core_pipeline::tonemapping::Tonemapping as T;
-    let t = match tm.as_str() {
+    let t = match tm.as_ref() {
         "none" => T::None,
         "reinhard" => T::Reinhard,
         "aces" => T::AcesFitted,
@@ -145,7 +145,7 @@ pub fn vignette(world: &mut World, e: Entity, vals: &Vals) {
 pub fn aa(world: &mut World, e: Entity, vals: &Vals) {
     if let Some(V::S(q)) = vals.get("ssao").filter(|_| !preview()) {
         use bevy::pbr::{ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel as Q};
-        let quality_level = match q.as_str() { "low" => Q::Low, "high" => Q::High, "ultra" => Q::Ultra, _ => Q::Medium };
+        let quality_level = match q.as_ref() { "low" => Q::Low, "high" => Q::High, "ultra" => Q::Ultra, _ => Q::Medium };
         world.entity_mut(e).insert(ScreenSpaceAmbientOcclusion {
             quality_level,
             constant_object_thickness: num(vals, "ssao_thickness", 0.25),
@@ -154,10 +154,10 @@ pub fn aa(world: &mut World, e: Entity, vals: &Vals) {
         });
     }
     match vals.get("aa") {
-        Some(V::S(m)) if m == "smaa" && !preview() => {
+        Some(V::S(m)) if &**m == "smaa" && !preview() => {
             world.entity_mut(e).insert(bevy::anti_alias::smaa::Smaa { preset: bevy::anti_alias::smaa::SmaaPreset::High });
         }
-        Some(V::S(m)) if m == "fxaa" && !preview() => {
+        Some(V::S(m)) if &**m == "fxaa" && !preview() => {
             world.entity_mut(e).insert(bevy::anti_alias::fxaa::Fxaa::default());
         }
         _ => {}
@@ -169,7 +169,7 @@ pub fn aa(world: &mut World, e: Entity, vals: &Vals) {
 pub fn dof(world: &mut World, e: Entity, vals: &Vals) {
     if let Some(f) = vals.get("dof_aperture").map(V::num).filter(|_| vals.contains_key("dof_max")) {
         use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
-        let mode = if matches!(vals.get("dof_mode"), Some(V::S(m)) if m == "gaussian") { DepthOfFieldMode::Gaussian } else { DepthOfFieldMode::Bokeh };
+        let mode = if matches!(vals.get("dof_mode"), Some(V::S(m)) if &**m == "gaussian") { DepthOfFieldMode::Gaussian } else { DepthOfFieldMode::Bokeh };
         // the background counts as far as the camera sees, not infinitely far (its blur would be the largest)
         world.entity_mut(e).insert(DepthOfField { mode, focal_distance: num(vals, "focus", 5.0), aperture_f_stops: f as f32, max_circle_of_confusion_diameter: num(vals, "dof_max", 64.0), max_depth: num(vals, "far", 100.0), ..default() });
     }

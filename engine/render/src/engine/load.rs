@@ -141,7 +141,7 @@ impl Engine {
             if t.kind != "entity" || world.get::<Camera>(e).is_none() {
                 continue;
             }
-            let own = inserted.iter().any(|c| c.kind == "component" && c.vals.get("target").is_some_and(|v| matches!(v, V::S(x) if *x == t.id)) && c.vals.get("type").is_some_and(|v| matches!(v, V::S(x) if x.ends_with("RenderTarget"))));
+            let own = inserted.iter().any(|c| c.kind == "component" && c.vals.get("target").is_some_and(|v| matches!(v, V::S(x) if **x == *t.id)) && c.vals.get("type").is_some_and(|v| matches!(v, V::S(x) if x.ends_with("RenderTarget"))));
             if !own {
                 world.entity_mut(e).insert(RenderTarget::Image(self.target.clone().into()));
             }

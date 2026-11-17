@@ -24,7 +24,7 @@ pub fn slot_masks(masks: &[Option<String>], slots: &mut [raea_core_k::Slot], f: 
 /// A row's mask expression, if it has one.
 pub fn mask_of(v: &std::collections::BTreeMap<String, V>) -> Option<String> {
     match v.get("mask") {
-        Some(V::S(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(V::S(s)) if !s.trim().is_empty() => Some(s.to_string()),
         _ => None,
     }
 }

@@ -38,7 +38,7 @@ pub fn sprites(tracks: &[Track], p: &mut Program) {
         let its = filled(track);
         let id = format!("sprite{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
         // keyed: the picture, a "render:NAME" a frame may switch (Bevy's compute_shader_game_of_life swaps two)
         keyed_strings(p, &mut row, &id, "src", &srcs_of(&its));
@@ -55,7 +55,7 @@ pub fn sprites(tracks: &[Track], p: &mut Program) {
         // and its <Material> (Bevy's SpriteMaterial, systems/sprite)
         for (prop, col) in [("sampler", "texture_sampler"), ("image_mode", "image_mode"), ("shader", "shader")] {
             if let Some(s) = first.get(prop) {
-                row.insert(col.into(), V::S(s.to_string()));
+                row.insert(col.into(), V::s(s.to_string()));
             }
         }
         for (prop, col) in [("flipX", "flip_x"), ("flipY", "flip_y"), ("tileX", "tile_x"), ("tileY", "tile_y")] {
@@ -76,11 +76,11 @@ pub fn shapes(tracks: &[Track], p: &mut Program) {
         let its = filled(track);
         let id = format!("shape2d{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
         // a native <Text2d>: its spec, each font file found as staticFile's /media/ is (raea-sys-sprite's text2d.rs)
-        if let Some(spec) = first.get("text") { row.insert("text".into(), V::S(text_spec(spec))); }
-        row.insert("shape".into(), V::S(first.get("shape").and_then(Value::as_str).unwrap_or("rect").to_string()));
+        if let Some(spec) = first.get("text") { row.insert("text".into(), V::s(text_spec(spec))); }
+        row.insert("shape".into(), V::s(first.get("shape").and_then(Value::as_str).unwrap_or("rect").to_string()));
         let size = first.get("size").and_then(Value::as_array);
         let at = |i: usize| size.and_then(|a| a.get(i)).and_then(Value::as_f64).unwrap_or(100.0);
         row.insert("w".into(), V::N(at(0)));
@@ -88,11 +88,11 @@ pub fn shapes(tracks: &[Track], p: &mut Program) {
         row.insert("sides".into(), V::N(n(first, "sides", 5.0)));
         // its ColorMaterial's texture (a path, or { path, sampler }) and AlphaMode2d ("opaque", "blend", or "mask" with its cutoff)
         let tex = first.get("texture");
-        if let Some(t) = tex.and_then(|t| t.as_str().or(t.get("path").and_then(Value::as_str))) { row.insert("texture".into(), V::S(src_path(t))); }
+        if let Some(t) = tex.and_then(|t| t.as_str().or(t.get("path").and_then(Value::as_str))) { row.insert("texture".into(), V::s(src_path(t))); }
         // as JSON: the texture's sampler (raea-sys-sampler's), the uv_transform (an Affine2), the mesh's Mesh::ATTRIBUTE_COLOR, its own Material2d and a Bevy primitive
-        for (col, v) in [("texture_sampler", tex.and_then(|t| t.get("sampler"))), ("uv_transform", first.get("uv_transform")), ("vertex_colors", first.get("vertex_colors")), ("shader", first.get("shader")), ("primitive", first.get("primitive"))] { if let Some(v) = v { row.insert(col.into(), V::S(v.to_string())); } }
+        for (col, v) in [("texture_sampler", tex.and_then(|t| t.get("sampler"))), ("uv_transform", first.get("uv_transform")), ("vertex_colors", first.get("vertex_colors")), ("shader", first.get("shader")), ("primitive", first.get("primitive"))] { if let Some(v) = v { row.insert(col.into(), V::s(v.to_string())); } }
         match first.get("alpha_mode") {
-            Some(Value::String(a)) => { row.insert("alpha".into(), V::S(a.to_lowercase())); }
+            Some(Value::String(a)) => { row.insert("alpha".into(), V::s(a.to_lowercase())); }
             Some(Value::Object(m)) => { row.insert("alpha".into(), V::S("mask".into())); row.insert("alpha_cutoff".into(), V::N(n(m, "Mask", 0.5))); }
             _ => {}
         }

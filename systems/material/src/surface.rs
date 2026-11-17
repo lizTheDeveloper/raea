@@ -32,7 +32,7 @@ pub fn of(world: &mut World, t: &Tup, inserted: &[Tup], dir: &Path) -> Result<Ve
         let mut vals = BTreeMap::new();
         for (k, v) in &spec {
             match v {
-                serde_json::Value::String(s) => vals.insert(k.clone(), V::S(s.clone())),
+                serde_json::Value::String(s) => vals.insert(k.clone(), V::s(s.clone())),
                 serde_json::Value::Number(n) => vals.insert(k.clone(), V::N(n.as_f64().unwrap_or(0.0))),
                 _ => None,
             };

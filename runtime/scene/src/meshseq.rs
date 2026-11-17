@@ -25,7 +25,7 @@ pub(super) fn glitch_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id:
 /// `cloth_frame`. The engine puts that frame's positions and normals on the part's mesh and the skin poses them.
 pub(super) fn cloth_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, its: &[Item]) {
     let Some(src) = its.iter().find_map(|i| i.props.get("cloth").and_then(|c| c.get("src")).and_then(Value::as_str)) else { return };
-    row.insert("cloth".into(), V::S(src_path(src)));
+    row.insert("cloth".into(), V::s(src_path(src)));
     let f = |i: &Item| i.props.get("cloth").and_then(|c| c.get("frame")).and_then(Value::as_f64).unwrap_or(0.0);
     column(p, row, id, "cloth_frame", &its.iter().map(f).collect::<Vec<_>>());
 }
@@ -38,11 +38,11 @@ pub(super) fn rows(tracks: &[Track], p: &mut Program) {
         let its = filled(track);
         let id = format!("meshseq{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
-        row.insert("src".into(), V::S(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
+        row.insert("src".into(), V::s(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
         if let Some(m) = first.get("map").and_then(Value::as_str) {
-            row.insert("map".into(), V::S(src_path(m)));
+            row.insert("map".into(), V::s(src_path(m)));
         }
         for (prop, col, d) in KEYED {
             if its.iter().any(|i| i.props.contains_key(*prop)) || *prop == "frame" {
@@ -57,7 +57,7 @@ pub(super) fn rows(tracks: &[Track], p: &mut Program) {
             }
         }
         if let Some(c) = hex(first.get("attenuationColor")) {
-            row.insert("atten_color".into(), V::S(c));
+            row.insert("atten_color".into(), V::s(c));
         }
         if first.get("doubleSided") == Some(&Value::Bool(true)) {
             row.insert("double_sided".into(), V::N(1.0));
@@ -66,7 +66,7 @@ pub(super) fn rows(tracks: &[Track], p: &mut Program) {
             column(p, &mut row, &id, "opacity", &its.iter().map(|i| n(&i.props, "opacity", 1.0)).collect::<Vec<_>>());
         }
         let colors: Vec<String> = its.iter().map(|i| hex(i.props.get("color")).unwrap_or("#ffffff".into())).collect();
-        row.insert("color".into(), V::S(colors[0].clone()));
+        row.insert("color".into(), V::s(colors[0].clone()));
         if colors.iter().any(|c| *c != colors[0]) {
             let c: Vec<[f64; 3]> = colors.iter().map(|c| rgb(c)).collect();
             for (k, name) in ["col_r", "col_g", "col_b"].iter().enumerate() {

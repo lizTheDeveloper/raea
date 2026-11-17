@@ -107,7 +107,7 @@ fn defaults(kind: usize) -> ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, [f32; 
 /// The procedural surface a mesh row asks for, or None (no `proc` column, or a pattern this doesn't know)
 pub fn of(vals: &BTreeMap<String, V>) -> Option<Procedural> {
     let Some(V::S(name)) = vals.get("proc") else { return None };
-    let kind = PATTERNS.iter().position(|p| *p == name.as_str())?;
+    let kind = PATTERNS.iter().position(|p| *p == name.as_ref())?;
     let (a, b, gap, ra, rb, scale, tile) = defaults(kind);
     let rgb = |col: &str, d: [f32; 3]| {
         let c = match vals.get(col) {

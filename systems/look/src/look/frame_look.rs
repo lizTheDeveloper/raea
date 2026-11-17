@@ -43,7 +43,7 @@ pub fn sync_frame_look(
         }
     }
     let mode = match v.get("frame_look") {
-        Some(V::S(m)) => Some(m.as_str()),
+        Some(V::S(m)) => Some(m.as_ref()),
         _ => None,
     };
     let Some(mode) = mode else {

@@ -54,7 +54,7 @@ pub fn lower(path: &Path) -> Result<Lowered, String> {
     let (w, h) = page.size();
     let frames = (duration * fps - 1e-6).ceil().max(1.0) as i64;
     let n = |x: f64| V::N(x);
-    let s = |x: &str| V::S(x.to_string());
+    let s = |x: &str| V::s(x);
     let mut rows = vec![row("camera", "cam", &[("bg", s("#ffffff"))])];
     // the first frame at or after t (a clip shows on frames whose time is inside its window)
     let frame = |t: f64| (t * fps - 1e-6).ceil();

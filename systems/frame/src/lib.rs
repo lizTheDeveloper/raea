@@ -113,13 +113,13 @@ impl Row<'_> {
         match self {
             Row::Cols(c, r) => match &**c.cols.get(k)? {
                 eval::Col::Any(x) => match x[*r].as_ref()? {
-                    V::S(s) => Some(s.as_str()),
+                    V::S(s) => Some(&**s),
                     _ => None,
                 },
                 _ => None,
             },
             Row::Map(m) => match m.get(k)? {
-                V::S(s) => Some(s.as_str()),
+                V::S(s) => Some(&**s),
                 _ => None,
             },
         }
@@ -424,7 +424,7 @@ impl FrameRows {
                 Some(rows) => {
                     for (r, v) in rows.iter().enumerate() {
                         if let Some(V::S(s)) = v.get(*list) {
-                            found.entry(r).or_default()[i] = Some(s.clone());
+                            found.entry(r).or_default()[i] = Some(s.to_string());
                         }
                     }
                 }
@@ -432,7 +432,7 @@ impl FrameRows {
                     let Some(col) = self.cols.cols.get(*list) else { continue };
                     for r in 0..self.cols.len() {
                         if let Some(V::S(s)) = col.get(r) {
-                            found.entry(r).or_default()[i] = Some(s);
+                            found.entry(r).or_default()[i] = Some(s.to_string());
                         }
                     }
                 }

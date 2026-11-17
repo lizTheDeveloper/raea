@@ -11,7 +11,7 @@ use bevy::camera::Viewport;
 pub fn camera_pass(world: &mut World, e: Entity, vals: &BTreeMap<String, V>) {
     let Some(c) = world.get::<Camera>(e) else { return };
     let order = vals.get("order").map_or(c.order, |v| v.num() as isize);
-    let clear = if matches!(vals.get("clear"), Some(V::S(s)) if s == "none") { ClearColorConfig::None } else { c.clear_color };
+    let clear = if matches!(vals.get("clear"), Some(V::S(s)) if &**s == "none") { ClearColorConfig::None } else { c.clear_color };
     let n = |k: &str| vals.get(k).map(|v| v.num().max(0.0) as u32);
     let viewport = match (n("vp_x"), n("vp_y"), n("vp_w"), n("vp_h")) {
         (Some(x), Some(y), Some(w), Some(h)) => Some(Viewport { physical_position: UVec2::new(x, y), physical_size: UVec2::new(w.max(1), h.max(1)), ..default() }),

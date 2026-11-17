@@ -303,7 +303,7 @@ fn placed(v: &BTreeMap<String, V>) -> (Vec3, Vec3) {
 }
 
 fn lin(h: &str, d: [f32; 4]) -> Vec4 {
-    Vec4::from_array(colour(Some(&V::S(h.to_string())), d).to_linear().to_f32_array())
+    Vec4::from_array(colour(Some(&V::s(h.to_string())), d).to_linear().to_f32_array())
 }
 
 fn params(v: &BTreeMap<String, V>, s: &Spec, bands: f32, sun: Vec3) -> VolumeParams {
@@ -385,7 +385,7 @@ pub fn sync_volumes(
         .single()
         .ok()
         .and_then(|c| frame.vals(c))
-        .filter(|v| matches!(v.get("frame_look"), Some(V::S(s)) if s == "paint"))
+        .filter(|v| matches!(v.get("frame_look"), Some(V::S(s)) if &**s == "paint"))
         .map(|v| num(&v, "paint_bands", 3.0).clamp(1.0, 8.0))
         .unwrap_or(0.0);
     for (e, mut vol) in &mut q {

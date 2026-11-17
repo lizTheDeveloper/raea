@@ -28,9 +28,9 @@ fn each_camera_after_the_first_is_a_row_with_its_order_clear_and_viewport() {
     assert_eq!([n(&first, "vp_x"), n(&first, "vp_y"), n(&first, "vp_w"), n(&first, "vp_h")], [Some(0.0), Some(0.0), Some(640.0), Some(360.0)]);
     assert_eq!(first.get("order"), None);
     let second = &more[0];
-    assert!(matches!(second.get("id"), Some(V::S(s)) if s == "cam1"));
-    assert!(matches!(second.get("bg"), Some(V::S(s)) if s == "#2B2C2F"));
-    assert!(matches!(second.get("clear"), Some(V::S(s)) if s == "none"));
+    assert!(matches!(second.get("id"), Some(V::S(s)) if &**s == "cam1"));
+    assert!(matches!(second.get("bg"), Some(V::S(s)) if &**s == "#2B2C2F"));
+    assert!(matches!(second.get("clear"), Some(V::S(s)) if &**s == "none"));
     assert_eq!([n(second, "order"), n(second, "vp_x"), n(second, "vp_y")], [Some(1.0), Some(640.0), Some(360.0)]);
     assert_eq!(n(second, "x"), Some(150.0));
 }

@@ -19,7 +19,7 @@ pub fn sync_pictures(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut mats: R
         let Some(v) = frame.vals(e) else { continue };
         let k = num(&v, "src_k", pics.shown as f32).round().max(0.0) as usize;
         let (src, dir) = match (&pics.live, v.get("src")) {
-            (Some((shown, dir)), Some(V::S(s))) if s != shown => (s.clone(), dir.clone()),
+            (Some((shown, dir)), Some(V::S(s))) if **s != **shown => (s.to_string(), dir.clone()),
             (None, _) if k != pics.shown => match pics.paths.get(k) {
                 Some(p) => (p.to_string_lossy().to_string(), PathBuf::new()),
                 None => continue,

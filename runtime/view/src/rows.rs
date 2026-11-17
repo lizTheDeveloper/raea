@@ -13,7 +13,7 @@ pub const KINDS_2D: &[&str] = &["image"];
 pub fn row2d(t: &Tup, all: &[Tup]) -> (String, serde_json::Value) {
     let vals = &t.vals;
     let parent = match vals.get("parent") {
-        Some(V::S(p)) if !p.is_empty() => all.iter().find(|r| &r.id == p && is_2d(&r.kind) && r.id != t.id),
+        Some(V::S(p)) if !p.is_empty() => all.iter().find(|r| r.id.as_str() == &**p && is_2d(&r.kind) && r.id != t.id),
         _ => None,
     };
     let at = parent.and_then(|p| p.vals.get("from")).map(|f| f.num()).unwrap_or(0.0);

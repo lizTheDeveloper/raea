@@ -12,7 +12,7 @@ fn a_prop_becomes_columns() {
     let r = row(json!({ "wear": { "amount": 0.7, "rust": 0.4, "chipColor": "#202020", "bogus": 1 } }));
     assert_eq!(r.len(), 3);
     assert!(matches!(r.get("wear_amount"), Some(V::N(n)) if *n == 0.7));
-    assert!(matches!(r.get("wear_chip_color"), Some(V::S(s)) if s == "#202020"));
+    assert!(matches!(r.get("wear_chip_color"), Some(V::S(s)) if &**s == "#202020"));
     assert!(row(json!({ "color": "#fff" })).is_empty());
 }
 
