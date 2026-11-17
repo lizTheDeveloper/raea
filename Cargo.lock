@@ -15071,6 +15071,7 @@ dependencies = [
 name = "raea-runtime-encode"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "raea-core-program",
  "raea-gpu-device",
  "raea-io-home",
