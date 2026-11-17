@@ -302,8 +302,9 @@ pub fn spawn_glyph(world: &mut World, e: Entity, id: &str, vals: &BTreeMap<Strin
 /// Each block where the frame's row puts it, shown or hidden (its glyphs move with their own rows: sync_meshes).
 pub fn sync_texts(frame: Res<FrameRows>, mut q: Query<(Entity, &mut Transform, &mut Visibility), With<TextBlock>>) {
     for (e, mut t, mut vis) in &mut q {
-        let Some(v) = frame.vals(e) else { continue };
-        let nt = transform_of(&v);
+        // read where its values are (FrameRows::row), not made into a map each frame
+        let Some(v) = frame.row(e) else { continue };
+        let nt = v.transform();
         if *t != nt {
             *t = nt;
         }

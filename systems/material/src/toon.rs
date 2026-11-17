@@ -418,6 +418,14 @@ pub fn spawn_mesh(world: &mut World, e: Entity, vals: &BTreeMap<String, V>, mesh
 
 /// The frame's toon values onto each toon mesh (as sync_meshes does for standard ones): base colour, opacity,
 /// emissive, the shadow colour, rim and highlight strength, and its outline's width and opacity.
+/// A time added to its total when dropped (RAEA_NATIVE_TRACE).
+struct TimedEnd(&'static str, std::time::Instant);
+impl Drop for TimedEnd {
+    fn drop(&mut self) {
+        raea_sys_frame::sys_time(self.0, self.1);
+    }
+}
+
 pub fn sync_toon(
     frame: Res<FrameRows>,
     mut mats: ResMut<Assets<ToonMaterial>>,
@@ -427,13 +435,15 @@ pub fn sync_toon(
     mut commands: Commands,
 ) {
     const KEYED: [&str; 10] = ["col_r", "opacity", "emissive_k", "em_r", "rough", "sh_r", "rim_k", "spec_k", "outline_w", "metal"];
+    let t_sys = std::time::Instant::now();
     let mut changed_opacity: HashMap<Entity, (f32, Color)> = HashMap::new();
     for (e, toon, mut h, shared) in &mut parts {
-        let Some(v) = frame.vals(e) else { continue };
-        let v = &v;
-        if !KEYED.iter().any(|k| v.contains_key(*k)) {
+        // a part none of whose keyed columns its row has is passed over without making its values (FrameRows::row)
+        if !frame.row(e).is_some_and(|r| KEYED.iter().any(|k| r.contains_key(k))) {
             continue;
         }
+        let Some(v) = frame.vals(e) else { continue };
+        let v = &v;
         let Some(cur) = mats.get(&h.0) else { continue };
         let mut base = cur.base.base_color;
         if v.contains_key("col_r") {
@@ -473,6 +483,9 @@ pub fn sync_toon(
         }
         changed_opacity.insert(e, (opacity, base.with_alpha(1.0)));
     }
+    raea_sys_frame::sys_time("sync_toon: parts", t_sys);
+    let t_sys = std::time::Instant::now();
+    let _timed = TimedEnd("sync_toon: hulls", t_sys);
     for (he, hull, mut h, shared) in &mut hulls {
         let Some(&(opacity, base)) = changed_opacity.get(&hull.of) else { continue };
         let Ok((_, toon, _, _)) = parts.get(hull.of) else { continue };

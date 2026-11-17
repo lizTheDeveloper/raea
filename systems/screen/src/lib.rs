@@ -281,14 +281,20 @@ fn pose_nodes(frame: Res<FrameRows>, models: Query<Entity, With<ModelReady>>, ki
                 let sc = (col(7), col(8), col(9));
                 for d in ds {
                     let Ok((_, mut t)) = nodes.get_mut(*d) else { continue };
+                    let mut nt = *t;
                     if let (Some(x), Some(y), Some(z)) = p {
-                        t.translation = Vec3::new(x, y, z);
+                        nt.translation = Vec3::new(x, y, z);
                     }
                     if let (Some(x), Some(y), Some(z), Some(w)) = q {
-                        t.rotation = Quat::from_xyzw(x, y, z, w);
+                        nt.rotation = Quat::from_xyzw(x, y, z, w);
                     }
                     if let (Some(x), Some(y), Some(z)) = sc {
-                        t.scale = Vec3::new(x, y, z);
+                        nt.scale = Vec3::new(x, y, z);
+                    }
+                    // written only when a bit of it differs: a write that changes nothing still marks the node's tree
+                    // changed, and transform propagation walks every marked tree (RAEA_WRITE_SAME=1: written every frame)
+                    if raea_sys_frame::write_same() || !raea_sys_frame::same_transform(&t, &nt) {
+                        *t = nt;
                     }
                 }
             }

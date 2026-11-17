@@ -308,16 +308,24 @@ pub fn cached_map(world: &mut World, key: String, kind: MapKind, repeat: bool, s
 
 /// Whether a mesh row has any texture map (it then needs texture coordinates; a normal map needs tangents too).
 pub fn has_maps(vals: &BTreeMap<String, V>) -> bool {
-    any_map(vals, &["map", "normal_map", "rough_map", "metal_map", "mr_map", "ao_map", "emissive_map", "clearcoat_normal_map"])
+    has_maps_by(|k| vals.get(k).cloned())
 }
+
+/// `has_maps` of a row read through `get` (a row where its values are: FrameRows::row).
+pub fn has_maps_by(get: impl Fn(&str) -> Option<V>) -> bool {
+    MAP_COLS.iter().any(|k| get(k).is_some_and(|v| v.truthy()))
+}
+
+const MAP_COLS: [&str; 8] = ["map", "normal_map", "rough_map", "metal_map", "mr_map", "ao_map", "emissive_map", "clearcoat_normal_map"];
 
 /// Whether a mesh row has a normal map, its own or its clearcoat's: its mesh then needs tangents.
 pub fn needs_tangents(vals: &BTreeMap<String, V>) -> bool {
-    any_map(vals, &["normal_map", "clearcoat_normal_map"])
+    needs_tangents_by(|k| vals.get(k).cloned())
 }
 
-fn any_map(vals: &BTreeMap<String, V>, keys: &[&str]) -> bool {
-    keys.iter().any(|k| vals.get(*k).is_some_and(V::truthy))
+/// `needs_tangents` of a row read through `get`.
+pub fn needs_tangents_by(get: impl Fn(&str) -> Option<V>) -> bool {
+    ["normal_map", "clearcoat_normal_map"].iter().any(|k| get(k).is_some_and(|v| v.truthy()))
 }
 
 /// A mesh row's surface: the standard material from its columns.

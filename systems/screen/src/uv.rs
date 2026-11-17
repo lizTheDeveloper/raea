@@ -125,9 +125,9 @@ pub fn mesh_screens(
     mut screen_images: ResMut<ScreenImages>,
 ) {
     for (e, mesh) in &meshes {
-        let Some(v) = frame.vals(e) else { continue };
+        let Some(v) = frame.row(e) else { continue };
         commands.entity(e).insert(ScreensDone);
-        let Some(spec) = json(v.get("surface")) else { continue };
+        let Some(spec) = json(v.get("surface").as_ref()) else { continue };
         let name = spec.get("name").and_then(serde_json::Value::as_str).unwrap_or("surface").to_string();
         let (w, h) = spec_size(&spec);
         let img = match screen_images.0.get(&name) {
@@ -153,7 +153,7 @@ pub fn mesh_screens(
             }
         }
         let mut p = params(&spec, Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::ZERO);
-        p.res.w = num(&v, "screen_power", 1.0);
+        p.res.w = v.num("screen_power", 1.0);
         let mat = mats.add(CrtMaterial { p, image: img, blend: see_through(&spec) });
         commands.entity(e).remove::<MeshMaterial3d<StandardMaterial>>().insert((MeshMaterial3d(mat.clone()), Screen { mat, row: e }));
     }

@@ -67,6 +67,23 @@ pub fn sys_times() -> Vec<(&'static str, f64, u64)> {
     std::mem::take(&mut *SYS_TIMES.lock().unwrap()).into_iter().map(|(k, ns, n)| (k, ns as f64 / 1e6, n)).collect()
 }
 
+/// Whether a transform is written even when it would hold the same bits (RAEA_WRITE_SAME=1; off: a write that changes
+/// nothing is left out, so transform propagation doesn't walk a still tree).
+pub fn write_same() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAEA_WRITE_SAME").as_deref() == Ok("1"))
+}
+
+/// Whether two transforms hold the same bits (so writing one over the other changes nothing downstream: not even a
+/// -0.0 for a 0.0, which `==` calls equal).
+pub fn same_transform(a: &Transform, b: &Transform) -> bool {
+    let bits = |t: &Transform| {
+        let (p, r, s) = (t.translation.to_array(), t.rotation.to_array(), t.scale.to_array());
+        [p[0], p[1], p[2], r[0], r[1], r[2], r[3], s[0], s[1], s[2]].map(f32::to_bits)
+    };
+    bits(a) == bits(b)
+}
+
 /// A row's values at a frame, as `FrameRows::row` lends them: in the frame's columns, or a map.
 pub enum Row<'a> {
     Cols(&'a eval::Cols, usize),
@@ -149,11 +166,6 @@ impl Row<'_> {
     }
 }
 
-fn keep_moving_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAEA_KEEP_MOVING").as_deref() != Ok("0"))
-}
-
 fn keep_still_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RAEA_KEEP_STILL").as_deref() != Ok("0"))
@@ -205,9 +217,9 @@ pub struct FrameRows {
     /// each row's values this frame as `vals` makes them, made on its first ask: six of the 3D's systems read every
     /// row, and many_foxes' thousand foxes were each made six times a frame (FC1b)
     made: Vec<std::sync::OnceLock<BTreeMap<String, V>>>,
-    /// whether a row's made values were asked for since the last frame: a moving row's kept map is brought up to the
-    /// next frame only if it was (one a warm-up made and nothing reads now is dropped, not patched every frame)
-    read: Vec<std::sync::atomic::AtomicBool>,
+    /// the rows some frame changes (the timeline's not `still`), found once per timeline: what a new frame forgets of
+    /// the made values, so it passes over the still rows' thousands without looking at them
+    moving_rows: Vec<usize>,
 }
 
 impl FrameRows {
@@ -220,8 +232,6 @@ impl FrameRows {
     pub fn set_cols(&mut self, cols: eval::Cols) {
         self.made.clear();
         self.made.resize_with(cols.len(), Default::default);
-        self.read.clear();
-        self.read.resize_with(cols.len(), Default::default);
         self.cols = cols;
     }
 
@@ -230,60 +240,37 @@ impl FrameRows {
     pub fn next_frame(&mut self, cols: eval::Cols, timeline: &std::sync::Arc<raea_core_program::timeline::Timeline>) {
         let same = keep_still_on() && self.live.is_none() && self.made.len() == cols.len() && self.timeline.as_ref().is_some_and(|t| std::sync::Arc::ptr_eq(t, timeline));
         if !same {
+            if !self.timeline.as_ref().is_some_and(|t| std::sync::Arc::ptr_eq(t, timeline)) || self.moving_rows.is_empty() {
+                self.moving_rows = (0..cols.len()).filter(|r| !timeline.still(*r)).collect();
+            }
             self.timeline = Some(timeline.clone());
             self.set_cols(cols);
             return;
         }
-        // a moving row's values made on an earlier frame are brought to this frame in place: only the columns some frame
-        // changes of it are read again (its map, keys and other values kept), so a frame allocates next to nothing
-        // (RAEA_KEEP_MOVING=0: made again from scratch). A row with a table is made again (its sets are laid on).
-        let patch = keep_moving_on();
+        // a moving row's values made on an earlier frame are forgotten, and made again if a system asks this frame
+        // (`vals`): nearly every system reads a row where it is (`row`), so a frame makes a few dozen maps, and patching
+        // every kept moving map to the frame (pc222's kept-row patch) walked all the rows to find them (RAEA_KEEP_MOVING
+        // is gone with it). A row with a table is made again too (its sets are laid on).
         if sys_timing() {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| {
-                let moving = (0..cols.len()).filter(|r| !timeline.still(*r)).count();
                 let made = self.made.iter().filter(|m| m.get().is_some()).count();
-                let mc: usize = (0..cols.len()).map(|r| timeline.moving(r).len()).sum();
-                eprintln!("raea native: rows {}, moving {moving} ({mc} moving cells), made last frame {made}, columns {}, with tables {}", cols.len(), cols.cols.len(), self.looks.len());
+                let mc: usize = self.moving_rows.iter().map(|r| timeline.moving(*r).len()).sum();
+                eprintln!("raea native: rows {}, moving {} ({mc} moving cells), made last frame {made}, columns {}, with tables {}", cols.len(), self.moving_rows.len(), cols.cols.len(), self.looks.len());
             });
         }
-        // each moving column found in this frame's columns once
-        let (names, ix) = timeline.moving_indexed();
-        let found: Vec<Option<&eval::Col>> = names.iter().map(|c| cols.cols.get(c).map(|a| &**a)).collect();
         let t_loop = std::time::Instant::now();
-        for (r, m) in self.made.iter_mut().enumerate() {
-            if timeline.still(r) && !self.looks.contains_key(&r) {
-                continue;
-            }
-            if !patch || self.looks.contains_key(&r) {
+        for &r in &self.moving_rows {
+            if let Some(m) = self.made.get_mut(r) {
                 drop(m.take());
-                continue;
-            }
-            if m.get().is_some() && !self.read.get(r).is_some_and(|x| x.swap(false, std::sync::atomic::Ordering::Relaxed)) {
-                drop(m.take());
-                continue;
-            }
-            let Some(map) = m.get_mut() else { continue };
-            for &ci in ix.get(r).map_or(&[][..], Vec::as_slice) {
-                let (c, col) = (&names[ci as usize], found[ci as usize]);
-                // unchanged (most of a frame's values): nothing copied
-                if col.map_or(!map.contains_key(c), |col| col.is(r, map.get(c))) {
-                    continue;
-                }
-                match col.and_then(|col| col.get(r)) {
-                    Some(v) => match map.get_mut(c) {
-                        Some(slot) => *slot = v,
-                        None => {
-                            map.insert(c.clone(), v);
-                        }
-                    },
-                    None => {
-                        map.remove(c);
-                    }
-                }
             }
         }
-        sys_time("next_frame: rows patched", t_loop);
+        for r in self.looks.keys() {
+            if let Some(m) = self.made.get_mut(*r) {
+                drop(m.take());
+            }
+        }
+        sys_time("next_frame: moving rows forgotten", t_loop);
         let t = std::time::Instant::now();
         self.cols = cols;
         sys_time("next_frame: last frame's columns dropped", t);
@@ -392,9 +379,6 @@ impl FrameRows {
                     }
                     v
                 };
-                if let Some(x) = self.read.get(r) {
-                    x.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
                 Some(match self.made.get(r) {
                     Some(m) => std::borrow::Cow::Borrowed(m.get_or_init(make)),
                     None => std::borrow::Cow::Owned(make()),

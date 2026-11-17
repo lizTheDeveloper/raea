@@ -50,7 +50,14 @@ pub fn grid_models(
     stds: Res<Assets<StandardMaterial>>,
     mut grids: ResMut<Assets<GridMaterial>>,
 ) {
+    if !frame.may_have("grid_cell") {
+        return;
+    }
     for e in &models {
+        // (a model without a grid_cell has no grid: grid_of's none, found without making its whole values)
+        if !frame.row(e).is_some_and(|r| r.contains_key("grid_cell")) {
+            continue;
+        }
         let Some(vals) = frame.vals(e) else { continue };
         let Some(mut grid) = grid_of(&vals) else { continue };
         grid.p.mode = 1.0;

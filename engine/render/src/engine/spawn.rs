@@ -410,19 +410,35 @@ pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>
     // about 50 ms), then set
     let mut todo: Vec<(Entity, String, bool, bool, String, bool)> = Vec::new();
     for (e, now, _) in &q {
-        let Some(v) = frame.vals(e) else { continue };
+        // read where its values are (FrameRows::row): the whole map is made only for a shape that changed
+        let Some(r) = frame.row(e) else { continue };
         // a hidden mesh keeps the shape it has; it's made again on the frame it shows (its shape then differs)
-        if v.get("visible").is_some_and(|x| !x.truthy()) {
+        if r.get("visible").is_some_and(|x| !x.truthy()) {
             continue;
         }
-        let Some(expr) = raea_sys_frame::keyed(|k| v.get(k).cloned(), "shape") else { continue };
+        // the frame's shape (raea_sys_frame::keyed's), borrowed from the column's text: copied out only when it changed
+        // (a BufferMesh's shape is its whole buffer, and every frame copied each one to compare it)
+        let (list, k, one) = (r.get("shapes"), r.get("shape_k"), r.get("shape"));
+        let expr: &str = match (&list, &k) {
+            (Some(V::S(l)), Some(k)) => match l.split('\n').nth(k.num().round().max(0.0) as usize) {
+                Some(x) => x,
+                None => continue,
+            },
+            _ => match &one {
+                Some(V::S(s)) => s,
+                _ => continue,
+            },
+        };
         if expr == now.expr {
             continue;
         }
-        let uvs = scene3d::has_maps(&v) || grid::grid_of(&v).is_some();
-        let tangents = raea_sys_material::maps::needs_tangents(&v);
-        let attrs = match v.get("attributes") { Some(V::S(a)) => a.to_string(), _ => String::new() };
-        todo.push((e, expr, uvs, tangents, attrs, v.get("compressed").is_some_and(V::truthy)));
+        let expr = expr.to_string();
+        // what the new mesh needs, read where the row's values are (Ch2 remakes ~400 shapes a frame: each made its
+        // row's whole map to read these, and forgot it the next frame). A grid needs UVs: grid_of's grid_cell above 0.
+        let uvs = raea_sys_material::maps::has_maps_by(|k| r.get(k)) || r.num("grid_cell", 0.0) > 0.0;
+        let tangents = raea_sys_material::maps::needs_tangents_by(|k| r.get(k));
+        let attrs = r.text("attributes").unwrap_or_default().to_string();
+        todo.push((e, expr, uvs, tangents, attrs, r.get("compressed").is_some_and(|c| c.truthy())));
     }
     if todo.is_empty() {
         return;
