@@ -517,10 +517,13 @@ fn prog_bin(p: &Program, st: &mut Strs) -> Vec<u8> {
         }
     }
     u(&mut b, p.keys.len());
+    let mut index: Vec<(u32, u32, usize, u64)> = Vec::with_capacity(p.keys.len());
     for ((id, c), ks) in &p.keys {
-        u(&mut b, st.of(id) as usize);
-        u(&mut b, st.of(c) as usize);
+        let (ii, ci) = (st.of(id), st.of(c));
+        u(&mut b, ii as usize);
+        u(&mut b, ci as usize);
         u(&mut b, ks.len());
+        index.push((ii, ci, ks.len(), b.len() as u64));
         ks.iter().for_each(|k| b.extend_from_slice(&k.0.to_le_bytes()));
         ks.iter().for_each(|k| b.extend_from_slice(&k.1.to_bits().to_le_bytes()));
         let e0 = ks.first().map_or("linear", |k| k.2.as_str());
@@ -532,6 +535,18 @@ fn prog_bin(p: &Program, st: &mut Strs) -> Vec<u8> {
             ks.iter().for_each(|k| u(&mut b, st.of(&k.2) as usize));
         }
     }
+    // the track index (a player slicing by frame range seeks a track here, then binary-searches its frames), and the
+    // trailer: where the index starts, and "IDX4"
+    let at = b.len() as u64;
+    u(&mut b, index.len());
+    for (ii, ci, n, off) in index {
+        u(&mut b, ii as usize);
+        u(&mut b, ci as usize);
+        u(&mut b, n);
+        b.extend_from_slice(&off.to_le_bytes());
+    }
+    b.extend_from_slice(&at.to_le_bytes());
+    b.extend_from_slice(b"IDX4");
     b
 }
 
@@ -597,9 +612,12 @@ fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
         }
         p.spawns.push((kind, rows));
     }
+    let mut seen: Vec<(usize, usize, usize, u64)> = Vec::new();
     for _ in 0..c.count(13)? {
-        let (id, col) = (s(c.u32()?)?, s(c.u32()?)?);
+        let (ii, ci) = (c.u32()?, c.u32()?);
+        let (id, col) = (s(ii)?, s(ci)?);
         let n = c.count(16)?;
+        seen.push((ii, ci, n, c.at as u64));
         let fs: Vec<i64> = (0..n).map(|_| c.u64().map(|x| x as i64)).collect::<R<_>>()?;
         let vs: Vec<f64> = (0..n).map(|_| c.u64().map(f64::from_bits)).collect::<R<_>>()?;
         let eases: Vec<String> = match c.u8()? {
@@ -609,8 +627,18 @@ fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
         };
         p.keys.insert((id, col), fs.into_iter().zip(vs).zip(eases).map(|((f, v), e)| (f, v, e)).collect());
     }
-    if c.at != bin.len() {
-        return Err("the bake's 3D has bytes past its end".into());
+    // the track index must say what the keys said, and the trailer where it starts
+    let at = c.at as u64;
+    if c.count(20)? != seen.len() {
+        return Err("the bake's track index doesn't match its keys".into());
+    }
+    for &(ii, ci, n, off) in &seen {
+        if (c.u32()?, c.u32()?, c.u32()?, c.u64()?) != (ii, ci, n, off) {
+            return Err("the bake's track index doesn't match its keys".into());
+        }
+    }
+    if c.u64()? != at || c.take(4)? != b"IDX4" || c.at != bin.len() {
+        return Err("the bake's 3D has a bad trailer or bytes past its end".into());
     }
     Ok(p)
 }
@@ -1564,6 +1592,26 @@ mod bin_tests {
         assert!(same(&p, &q));
         // the big shape stored once
         assert_eq!(st.list.iter().filter(|s| s.starts_with("mesh(")).count(), 1);
+    }
+
+    #[test]
+    fn track_index_locates_frames() {
+        let p = sample();
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        let n = bin.len();
+        assert_eq!(&bin[n - 4..], b"IDX4");
+        let at = u64::from_le_bytes(bin[n - 12..n - 4].try_into().unwrap()) as usize;
+        let tracks = u32::from_le_bytes(bin[at..at + 4].try_into().unwrap()) as usize;
+        assert_eq!(tracks, p.keys.len());
+        for (k, ((id, col), ks)) in p.keys.iter().enumerate() {
+            let e = &bin[at + 4 + k * 20..at + 4 + (k + 1) * 20];
+            let w = |i: usize| u32::from_le_bytes(e[i..i + 4].try_into().unwrap()) as usize;
+            assert_eq!((st.list[w(0)].as_str(), st.list[w(4)].as_str(), w(8)), (id.as_str(), col.as_str(), ks.len()));
+            let off = u64::from_le_bytes(e[12..20].try_into().unwrap()) as usize;
+            let f0 = i64::from_le_bytes(bin[off..off + 8].try_into().unwrap());
+            assert_eq!(f0, ks[0].0);
+        }
     }
 
     #[test]
