@@ -139,7 +139,7 @@ pub(crate) fn meshes_rows(tr: &Tracks, names: &[String], p: &mut Program) {
         // its shape keyed by the frame when it changes (a <BufferMesh> remade every frame: the multiverse veils'
         // ripple), where it was the first frame's for a whole batch; one with a line break in it holds the first's
         let shapes: Vec<String> = its.iter().map(|i| i.shape.as_deref().unwrap_or(&shape).to_string()).collect();
-        keyed_strings(p, &mut row, &id, "shape", &shapes);
+        keyed_strings(p, &mut row, &id, "shape", &settle_shapes(shapes));
         let mat = |i: &Item| i.material.as_ref().map(|m| m.props.clone()).unwrap_or_default();
         let mats: Vec<std::sync::Arc<Map<String, Value>>> = its.iter().map(mat).collect();
         let basic = its[0].material.as_ref().is_some_and(|m| &*m.kind == "MeshBasicMaterial");
@@ -438,5 +438,84 @@ mod light_rotation_tests {
         assert_eq!(light_rotation(&sun(serde_json::json!({ "rotation": q }), Mat4::IDENTITY)), Some(q));
         assert_eq!(light_rotation(&sun(serde_json::json!({ "rotation": q }), Mat4::from_translation(Vec3::X))), None);
         assert_eq!(light_rotation(&sun(serde_json::json!({ "target": [0, 0, 0] }), Mat4::IDENTITY)), None);
+    }
+}
+
+/// A frame's shape that differs from the one kept before it only by float noise (the same expression, every number
+/// within 1e-5 of it, relative) is that one: Ch2's shore cones animated their radii by 3e-7 a frame, and each change
+/// made the engine build the mesh again (478 meshes a frame). A real change (a plane growing 0.3% a frame) is kept.
+pub(crate) fn settle_shapes(shapes: Vec<String>) -> Vec<String> {
+    fn split(s: &str) -> (String, Vec<f64>) {
+        let (mut tpl, mut nums, mut cur) = (String::with_capacity(s.len()), Vec::new(), String::new());
+        let flush = |cur: &mut String, tpl: &mut String, nums: &mut Vec<f64>| {
+            if cur.is_empty() {
+                return;
+            }
+            match cur.parse::<f64>() {
+                Ok(v) if cur != "-" && cur != "." => {
+                    nums.push(v);
+                    tpl.push('#');
+                }
+                _ => tpl.push_str(cur),
+            }
+            cur.clear();
+        };
+        let mut prev_word = false;
+        for c in s.chars() {
+            let numeric = c.is_ascii_digit() || c == '.' || (c == '-' && cur.is_empty()) || ((c == 'e' || c == 'E') && !cur.is_empty() && !prev_word) || (c == '-' && cur.ends_with(['e', 'E']));
+            if numeric && !(prev_word && cur.is_empty()) {
+                cur.push(c);
+            } else {
+                flush(&mut cur, &mut tpl, &mut nums);
+                tpl.push(c);
+                prev_word = c.is_ascii_alphabetic() || c == '_';
+                continue;
+            }
+            prev_word = false;
+        }
+        flush(&mut cur, &mut tpl, &mut nums);
+        (tpl, nums)
+    }
+    let mut kept: Option<(String, String, Vec<f64>)> = None;
+    shapes
+        .into_iter()
+        .map(|s| {
+            if let Some((ks, kt, kn)) = &kept {
+                if *ks == s {
+                    return s;
+                }
+                let (t, n) = split(&s);
+                if t == *kt && n.len() == kn.len() && n.iter().zip(kn).all(|(a, b)| (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1e-3)) {
+                    return ks.clone();
+                }
+                kept = Some((s.clone(), t, n));
+                return s;
+            }
+            let (t, n) = split(&s);
+            kept = Some((s.clone(), t, n));
+            s
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::settle_shapes;
+
+    #[test]
+    fn float_noise_keeps_the_shape_and_real_changes_go_through() {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let a = "rotate(cone(1.2429999999999999, 1.2429965861953773, 1.1999999999999995), -90, 0, 0)";
+        let b = "rotate(cone(1.2429999999999999, 1.2429962642174277, 1.1999999999999995), -90, 0, 0)";
+        assert_eq!(settle_shapes(v(&[a, b])), v(&[a, a]));
+        let p = "plane(0, 0, 1, 1.451171835074451, 1.451171835074451)";
+        let q = "plane(0, 0, 1, 1.4558055717374923, 1.4558055717374923)";
+        assert_eq!(settle_shapes(v(&[p, q])), v(&[p, q]));
+        // a different expression is never merged
+        assert_eq!(settle_shapes(v(&["box(1, 1, 1)", "sphere(1)"])), v(&["box(1, 1, 1)", "sphere(1)"]));
+        // drift is measured from the shape kept, so many tiny steps still add up to a change
+        let steps: Vec<String> = (0..50).map(|i| format!("torus({}, 0.5)", 1.0 + i as f64 * 4e-6)).collect();
+        let out = settle_shapes(steps);
+        assert!(out.iter().collect::<std::collections::BTreeSet<_>>().len() > 1);
     }
 }
