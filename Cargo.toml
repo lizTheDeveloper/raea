@@ -351,6 +351,10 @@ vello_encoding = { path = "vendor/vello_encoding" }
 # (changes marked "raea:"): raea-page blends a bevy_ui page as Bevy does (bevy_ui on Blitz). No upstream
 # equivalent yet (linebender/vello blends the encoded values).
 vello_shaders = { path = "vendor/vello_shaders" }
+# vello 0.11.0 with a raw output (set_raw_output): fine writes each pixel's f32 blend state to an Rgba32Float target
+# instead of encoding it (changes marked "raea:"), so raea-page's slot cache keeps a page's pieces exactly and blends
+# the layered 3D between them as fine would. No upstream equivalent.
+vello = { path = "vendor/vello" }
 # Firewheel 0.12 on Bevy 0.20: bevy_reflect 0.20 and a glam-33 feature (BillyDM/Firewheel#144; changes marked "raea:")
 firewheel = { path = "vendor/firewheel" }
 firewheel-core = { path = "vendor/firewheel-core" }

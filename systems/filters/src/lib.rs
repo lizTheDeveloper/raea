@@ -10,6 +10,8 @@
 mod painter;
 mod passes;
 mod premul;
+/// a page cut at its layered slot, for raea-page's slot cache
+pub mod split;
 mod primitives;
 
 pub use painter::Painter;

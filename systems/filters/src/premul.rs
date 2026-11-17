@@ -61,7 +61,8 @@ pub fn straight_target(device: &wgpu::Device, size: wgpu::Extent3d) -> wgpu::Tex
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: TextureFormat::Rgba8UnormSrgb,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
+        // (bound as Rgba8Unorm by raea-page's slot cache, which reads its bytes as Vello's atlas copy of it does)
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[TextureFormat::Rgba8Unorm],
     })
 }

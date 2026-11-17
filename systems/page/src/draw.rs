@@ -33,6 +33,17 @@ pub struct Vello {
     pub straightened: HashMap<AssetId<Image>, wgpu::Texture>,
     /// a premultiplied placed texture's straight copy, by its placeholder's blob
     pub straight_placed: HashMap<u64, wgpu::Texture>,
+    /// pages drawn without Vello across their layered slot (slot_cache.rs), and each placed texture as the page's image
+    /// reads it (its straight copy) and its origin, by placeholder blob
+    pub slot_cache: Option<crate::slot_cache::SlotCache>,
+    pub slot_textures: HashMap<u64, (wgpu::Texture, (u32, u32))>,
+}
+
+/// The placeholder blobs of textures placed on pages (`view_at`), for the page's paint to cut at (slot_cache.rs).
+static SLOT_BLOBS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn slot_blobs() -> Vec<u64> {
+    SLOT_BLOBS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// H7's views (docs/blitz-bevy.feature): wherever a page draws `image`, Vello draws the top left of `texture` instead,
@@ -55,6 +66,13 @@ pub struct Placed {
 
 /// `view`, the element's picture a box of the texture, straight or made so.
 pub fn view_at(app: &mut App, image: vello::peniko::ImageData, placed: Option<Placed>) {
+    {
+        let mut b = SLOT_BLOBS.lock().unwrap_or_else(|e| e.into_inner());
+        b.retain(|x| *x != image.data.id());
+        if placed.is_some() {
+            b.push(image.data.id());
+        }
+    }
     if let Some(r) = app.get_sub_app_mut(RenderApp) {
         r.world_mut().resource_mut::<Vello>().pending.push((image, placed));
     }
@@ -75,9 +93,9 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
         return;
     }
     let device = device.wgpu_device();
-    let mut split: Vec<String> = Vec::new();
-    split_wait(device, &mut split, "before".into());
-    let Vello { renderer, scratch, premul, passes, prints, pending, image_views, straightened, straight_placed } = &mut *vello;
+    let mut split_log: Vec<String> = Vec::new();
+    split_wait(device, &mut split_log, "before".into());
+    let Vello { renderer, scratch, premul, passes, prints, pending, image_views, straightened, straight_placed, slot_cache, slot_textures } = &mut *vello;
     let premul = premul.get_or_insert_with(|| Premul::new(device));
     // the host's 3D views: each image's texture drawn in place of its placeholder (it changes each frame); a
     // premultiplied one's straight copy, made first
@@ -126,7 +144,7 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
         (p.premultiplied, p.opaque) = (false, false);
     }
     queue.submit([straighten.finish()]);
-    split_wait(device, &mut split, format!("straighten({})", pending.len()));
+    split_wait(device, &mut split_log, format!("straighten({})", pending.len()));
     // a view's texture changes under the same paint: any view placed this frame draws every page again
     let views = !pending.is_empty();
     let renderer = renderer.get_or_insert_with(|| bevy::platform::cell::SyncCell::new({
@@ -165,12 +183,16 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
     }));
     let renderer = renderer.get();
     for (image, placed) in pending.drain(..) {
+        match &placed {
+            Some(p) => slot_textures.insert(image.data.id(), (p.texture.clone(), p.origin)),
+            None => slot_textures.remove(&image.data.id()),
+        };
         let at = placed.map(|p| wgpu::TexelCopyTextureInfoBase { texture: p.texture, mip_level: 0, origin: wgpu::Origin3d { x: p.origin.0, y: p.origin.1, z: 0 }, aspect: wgpu::TextureAspect::All });
         renderer.override_image(&image, at);
     }
     let passes = passes.get_or_insert_with(|| raea_sys_filters::Passes::new(device));
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raea-page premul") });
-    for &(ref handle, px, ref scene, ref layers, print, straight, linear) in &todo {
+    for &(ref handle, px, ref scene, ref layers, print, straight, linear, ref split) in &todo {
         let Some(gpu) = images.get(handle) else { continue };
         if !views && !REDRAW_FULL.load(std::sync::atomic::Ordering::Relaxed) && prints.get(&handle.id()) == Some(&print) {
             continue;
@@ -204,7 +226,7 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             }
             let out = passes.run(device, &mut passes_encoder, layer, &drawn);
             queue.submit([passes_encoder.finish()]);
-            split_wait(device, &mut split, format!("layer{}x{}", layer.size.0, layer.size.1));
+            split_wait(device, &mut split_log, format!("layer{}x{}", layer.size.0, layer.size.1));
             let at = wgpu::TexelCopyTextureInfoBase { texture: out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All };
             renderer.override_image(&layer.image, Some(at));
         }
@@ -215,6 +237,28 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             }
         }).or_insert_with(|| (storage(device, px), px));
         let params = vello::RenderParams { base_color: vello::peniko::Color::TRANSPARENT, width: px.x, height: px.y, antialiasing_method: vello::AaConfig::Area };
+        // a page cut at its layered slot: its pieces kept, the slot's texture blended between them (slot_cache.rs)
+        if let Some(sp) = split.as_ref()
+            && let Some(slot) = sp.slot
+            && let Some((slot_tex, origin)) = slot_textures.get(&slot.blob)
+            && bump_guard(device, px.x, px.y).is_ok()
+        {
+            let cache = slot_cache.get_or_insert_with(|| crate::slot_cache::SlotCache::new(device));
+            let drawn = cache.draw(device, &queue, handle.id(), px, sp, linear, (slot_tex, *origin), tex, |s, target| {
+                vello::set_raw_output(true);
+                let r = renderer.render_to_texture(device, &queue, s, target, &params).map_err(|e| format!("vello, a slot cache piece: {e}"));
+                vello::set_raw_output(false);
+                r
+            });
+            split_wait(device, &mut split_log, format!("slot cache {}x{} ({} segments)", px.x, px.y, sp.segments.len()));
+            match drawn {
+                Ok(()) => {
+                    premul_page(device, &mut encoder, premul, tex, gpu, straight);
+                    continue;
+                }
+                Err(e) => error!("raea-page: the slot cache: {e}; drawn by Vello"),
+            }
+        }
         if std::env::var_os("RAEA_VELLO_BUMP_USE").is_some() {
             bump_use("page", scene, px.x, px.y);
         }
@@ -232,8 +276,7 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             renderer.mark_override_image_dirty(&layer.image);
         }
         let drew = skipped::render(renderer, device, &queue, scene, tex, &params, "a page");
-        split_wait(device, &mut split, format!("page{}x{}(views {views}, layers {})", px.x, px.y, layers.len()));
-        let view = tex.create_view(&default());
+        split_wait(device, &mut split_log, format!("page{}x{}(views {views}, layers {})", px.x, px.y, layers.len()));
         for layer in layers {
             renderer.override_image(&layer.image, None);
         }
@@ -244,33 +287,12 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             error!("raea-page: {err}");
             continue;
         }
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raea-page premul"),
-            layout: &premul.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
-        });
-        let target = gpu.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(TextureFormat::Rgba8UnormSrgb), ..default() });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("raea-page premul"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(if straight { &premul.straight } else { &premul.pipeline });
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..3, 0..1);
+        premul_page(device, &mut encoder, premul, tex, gpu, straight);
     }
     queue.submit([encoder.finish()]);
-    split_wait(device, &mut split, "premul".into());
+    split_wait(device, &mut split_log, "premul".into());
     if split_on() {
-        eprintln!("raea-page split: given {}: {}", todo.len(), split.join(", "));
+        eprintln!("raea-page split: given {}: {}", todo.len(), split_log.join(", "));
     }
     vello::low_level::vello_encoding::set_blend_linear(false);
     passes.recycle();
@@ -297,6 +319,33 @@ fn split_wait(device: &wgpu::Device, log: &mut Vec<String>, what: String) {
     let t = std::time::Instant::now();
     let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) });
     log.push(format!("{what} {:.2}", t.elapsed().as_secs_f64() * 1000.0));
+}
+
+/// The page's Vello texture `tex` premultiplied into its image (`gpu`), straight when its image is straight alpha.
+fn premul_page(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, premul: &Premul, tex: &wgpu::Texture, gpu: &GpuImage, straight: bool) {
+    let view = tex.create_view(&default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raea-page premul"),
+        layout: &premul.layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
+    });
+    let target = gpu.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(TextureFormat::Rgba8UnormSrgb), ..default() });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("raea-page premul"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(if straight { &premul.straight } else { &premul.pipeline });
+    pass.set_bind_group(0, &bind, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 /// The texture Vello draws a page into: Rgba8Unorm with storage binding, read by the premultiply pass.
