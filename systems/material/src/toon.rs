@@ -36,10 +36,20 @@ pub struct ToonParams {
     pub colors: [Vec4; 8],
 }
 
+/// Bindless where the device has it (as StandardMaterial is): every toon material's params in one storage array, so
+/// toon parts of different colours share a bind group and batch by mesh (Ch1 @22800's 530 toon materials were 530
+/// batch sets in every view). Without bindless, the params are a uniform at binding 100, as before.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+#[data(100, ToonParams, binding_array(101))]
+#[bindless(index_table(range(100..101), binding(102)))]
 pub struct ToonExt {
-    #[uniform(100)]
     pub params: ToonParams,
+}
+
+impl bevy::render::render_resource::AsBindGroupShaderType<ToonParams> for ToonExt {
+    fn as_bind_group_shader_type(&self, _: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> ToonParams {
+        self.params
+    }
 }
 
 impl MaterialExtension for ToonExt {
@@ -323,10 +333,19 @@ fn sharing() -> bool {
     std::env::var("RAEA_SHARE_ASSETS").map_or(true, |v| v != "0")
 }
 
+// (diagnosis: RAEA_SHARE_TOON_ONLY=toon|ink|hull shares that kind alone)
+fn shares(kind: &str) -> bool {
+    sharing() && std::env::var("RAEA_SHARE_TOON_ONLY").map_or(true, |v| v == kind) && ROW_SHARES.with(|c| c.get())
+}
+
+thread_local! {
+    static ROW_SHARES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 /// The ToonMaterial equal to `m`, field for field (its Debug form: every field, a texture by its handle), made the
 /// first time; and whether it's shared.
 fn shared_toon(world: &mut World, m: ToonMaterial) -> (Handle<ToonMaterial>, bool) {
-    if !sharing() {
+    if !shares("toon") {
         return (world.resource_mut::<Assets<ToonMaterial>>().add(m), false);
     }
     let key = format!("{:?}{:?}", m.base, m.extension);
@@ -339,7 +358,7 @@ fn shared_toon(world: &mut World, m: ToonMaterial) -> (Handle<ToonMaterial>, boo
 }
 
 fn shared_ink(world: &mut World, m: OutlineMaterial) -> (Handle<OutlineMaterial>, bool) {
-    if !sharing() {
+    if !shares("ink") {
         return (world.resource_mut::<Assets<OutlineMaterial>>().add(m), false);
     }
     let key = format!("{m:?}");
@@ -353,20 +372,36 @@ fn shared_ink(world: &mut World, m: OutlineMaterial) -> (Handle<OutlineMaterial>
 
 /// The hull of `mesh` (hull_mesh), made once a mesh when sharing.
 fn shared_hull(world: &mut World, mesh: &Handle<Mesh>) -> Option<Handle<Mesh>> {
-    if sharing() && let Some(h) = world.get_resource::<ToonShare>().and_then(|s| s.hulls.get(&mesh.id())).cloned() {
+    if shares("hull") && let Some(h) = world.get_resource::<ToonShare>().and_then(|s| s.hulls.get(&mesh.id())).cloned() {
         return h;
     }
     let hull = world.resource::<Assets<Mesh>>().get(mesh).and_then(hull_mesh);
     let h = hull.map(|m| world.resource_mut::<Assets<Mesh>>().add(m));
-    if sharing() {
+    if shares("hull") {
         world.get_resource_or_insert_with(ToonShare::default).hulls.insert(mesh.id(), h.clone());
     }
     h
 }
 
+/// (diagnosis: RAEA_SHARE_TOON_BITS=mask,value shares only the rows whose id's FNV-1a hash has those bits)
+fn row_shares(world: &World, e: Entity) -> bool {
+    let Ok(v) = std::env::var("RAEA_SHARE_TOON_BITS") else { return true };
+    let mut it = v.split(',').filter_map(|x| x.trim().parse::<u64>().ok());
+    let (Some(mask), Some(want)) = (it.next(), it.next()) else { return true };
+    let id = world.get::<raea_sys_frame::store::RowKey>(e).map(|k| format!("{}/{}", k.kind, k.id)).unwrap_or_default();
+    let h = id.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    let on = h & mask == want;
+    if on && std::env::var_os("RAEA_SHARE_TOON_LIST").is_some() {
+        eprintln!("raea: toon shared row {id}");
+    }
+    on
+}
+
 /// A mesh row's toon surface and outline (spawn_3d): `base` is the standard material its columns make.
 pub fn spawn_mesh(world: &mut World, e: Entity, vals: &BTreeMap<String, V>, mesh: &Handle<Mesh>, base: StandardMaterial) {
     let Some(spec) = ToonSpec::of(vals).into_iter().next() else { return };
+    let row = row_shares(world, e);
+    ROW_SHARES.with(|c| c.set(row));
     let color = base.base_color;
     let opacity = color.alpha();
     let (mat, shared) = shared_toon(world, material(base, &spec, Some(vals)));
