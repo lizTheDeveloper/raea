@@ -15,9 +15,10 @@ impl Engine {
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
         // the clocks and physics as a fresh engine's, before the new program's rows set any of them
         pristine_restore(self.app.world_mut());
-        self.load_shared(prog, inserted, None)?;
-        // after the last program's text is gone and before the new one's is drawn into it
+        // the text atlas emptied before the new program's text is spawned, as a fresh engine's is (emptied after the
+        // spawn, the new text was never drawn into it: a kept engine's repeat of Ch5 lost its clock's numerals)
         text3d::reset_atlas(self.app.world_mut());
+        self.load_shared(prog, inserted, None)?;
         for _ in 0..8 {
             self.app.update();
         }
