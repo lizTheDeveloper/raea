@@ -294,6 +294,7 @@ split-debuginfo = "packed"
 # the combined build's control: the vendor set the lanes bring (unmodified registry copies), none of their code
 bevy_render = { path = "vendor/bevy_render" }
 bevy_rich_text3d = { path = "vendor/bevy_rich_text3d" }
+vello = { path = "vendor/vello" }
 # the MP4 muxer, vendored
 muxide = { path = "vendor/muxide" }
 # usvg 0.48.1 spacing a chunk's last letter as Chrome does (changes marked "raea:", docs/layout-reads.feature LR10)
