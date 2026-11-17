@@ -221,22 +221,30 @@ enum ModelState {
 
 /// Each model's clip at the frame's time (anim_t seconds): seeked, never advanced by the clock, so the pose is a
 /// function of the frame.
-pub fn sync_models(frame: Res<FrameRows>, clips: Res<Assets<bevy::animation::AnimationClip>>, models: Query<(Entity, &Model3d)>, mut players: Query<&mut AnimationPlayer>, mut graphs: ResMut<Assets<AnimationGraph>>) {
+/// A model's row is read where its values are (FrameRows::row), and the g{i}_ and mix{i}_ column names are made once,
+/// not formatted per node per frame.
+pub fn sync_models(frame: Res<FrameRows>, clips: Res<Assets<bevy::animation::AnimationClip>>, models: Query<(Entity, &Model3d)>, mut players: Query<&mut AnimationPlayer>, mut graphs: ResMut<Assets<AnimationGraph>>, mut names: Local<(Vec<[String; 2]>, Vec<[String; 2]>)>) {
+    let (gk, mk) = &mut *names;
     for (e, m) in &models {
         let ModelState::Ready { player: Some((p, node, ref clip)) } = m.state else { continue };
-        let Some(v) = frame.vals(e) else { continue };
+        let Some(v) = frame.row(e) else { continue };
+        let looped = v.get("anim_loop").is_none_or(|x| x.truthy());
         if let Some((h, made)) = &m.built {
             // an authored graph: each clip seeked to its time and weighted as its player animation; a blend or add
             // node's weight on the graph (changed only when it changes: a changed graph is re-threaded)
             let Ok(mut pl) = players.get_mut(p) else { continue };
+            while gk.len() < made.len() {
+                let i = gk.len();
+                gk.push([format!("g{i}_w"), format!("g{i}_t")]);
+            }
             for (i, (n, c)) in made.iter().enumerate() {
-                let w = num(&v, &format!("g{i}_w"), 1.0).max(0.0);
+                let w = v.num(&gk[i][0], 1.0).max(0.0);
                 match c {
                     Some(c) => {
-                        let mut at = num(&v, &format!("g{i}_t"), 0.0).max(0.0);
+                        let mut at = v.num(&gk[i][1], 0.0).max(0.0);
                         let len = clips.get(c).map(|c| c.duration()).unwrap_or(0.0);
                         if len > 0.0 {
-                            at = if flag(&v, "anim_loop", true) { at % len } else { at.min(len) };
+                            at = if looped { at % len } else { at.min(len) };
                         }
                         if let Some(a) = pl.animation_mut(*n) {
                             if a.seek_time() != at || !a.is_paused() {
@@ -263,13 +271,17 @@ pub fn sync_models(frame: Res<FrameRows>, clips: Res<Assets<bevy::animation::Ani
         if !m.mixer.is_empty() {
             // each blended clip at its own time and weight
             let Ok(mut pl) = players.get_mut(p) else { continue };
+            while mk.len() < m.mixer.len() {
+                let i = mk.len();
+                mk.push([format!("mix{i}_t"), format!("mix{i}_w")]);
+            }
             for (i, (n, c)) in m.mixer.iter().enumerate() {
-                let mut at = num(&v, &format!("mix{i}_t"), 0.0).max(0.0);
+                let mut at = v.num(&mk[i][0], 0.0).max(0.0);
                 let len = clips.get(c).map(|c| c.duration()).unwrap_or(0.0);
                 if len > 0.0 {
-                    at = if flag(&v, "anim_loop", true) { at % len } else { at.min(len) };
+                    at = if looped { at % len } else { at.min(len) };
                 }
-                let w = num(&v, &format!("mix{i}_w"), 1.0).max(0.0);
+                let w = v.num(&mk[i][1], 1.0).max(0.0);
                 if let Some(a) = pl.animation_mut(*n) {
                     if a.seek_time() != at || !a.is_paused() {
                         a.seek_to(at).pause();
@@ -281,11 +293,11 @@ pub fn sync_models(frame: Res<FrameRows>, clips: Res<Assets<bevy::animation::Ani
             }
             continue;
         }
-        let mut at = num(&v, "anim_t", 0.0).max(0.0);
+        let mut at = v.num("anim_t", 0.0).max(0.0);
         // looped (anim_loop, the default) or held on its last pose
         let len = clips.get(clip).map(|c| c.duration()).unwrap_or(0.0);
         if len > 0.0 {
-            at = if flag(&v, "anim_loop", true) { at % len } else { at.min(len) };
+            at = if looped { at % len } else { at.min(len) };
         }
         if let Ok(mut pl) = players.get_mut(p) {
             if let Some(a) = pl.animation_mut(node) {
@@ -299,12 +311,17 @@ pub fn sync_models(frame: Res<FrameRows>, clips: Res<Assets<bevy::animation::Ani
 
 /// Each model's morph targets at the frame's weights (morph{i}), by target name (the mesh's morph_target_names) or index,
 /// on every MorphWeights in its scene that has that target.
-pub fn sync_morphs(frame: Res<FrameRows>, models: Query<(Entity, &Model3d)>, kids: Query<&Children>, mut weights: Query<&mut bevy::mesh::morph::MorphWeights>, meshes: Res<Assets<Mesh>>, mut err: ResMut<Error>) {
+pub fn sync_morphs(frame: Res<FrameRows>, models: Query<(Entity, &Model3d)>, kids: Query<&Children>, mut weights: Query<&mut bevy::mesh::morph::MorphWeights>, meshes: Res<Assets<Mesh>>, mut err: ResMut<Error>, mut keys: Local<Vec<String>>) {
     for (e, m) in &models {
         if m.morphs.is_empty() || !matches!(m.state, ModelState::Ready { .. }) {
             continue;
         }
-        let Some(v) = frame.vals(e) else { continue };
+        // read where its values are (FrameRows::row), the morph{i} names made once
+        let Some(v) = frame.row(e) else { continue };
+        while keys.len() < m.morphs.len() {
+            let i = keys.len();
+            keys.push(format!("morph{i}"));
+        }
         let mut found = vec![false; m.morphs.len()];
         for d in descendants(e, &kids) {
             let Ok(mut mw) = weights.get_mut(d) else { continue };
@@ -317,7 +334,7 @@ pub fn sync_morphs(frame: Res<FrameRows>, models: Query<(Entity, &Model3d)>, kid
                 };
                 let Some(ix) = ix else { continue };
                 found[i] = true;
-                let w = num(&v, &format!("morph{i}"), 0.0) as f32;
+                let w = v.num(&keys[i], 0.0);
                 if mw.weights()[ix] != w {
                     mw.weights_mut()[ix] = w;
                 }

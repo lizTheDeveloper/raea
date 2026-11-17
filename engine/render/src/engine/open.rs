@@ -133,6 +133,10 @@ impl Engine {
         if stats::wanted() {
             stats::install(&mut app);
         }
+        // RAEA_CPU_CENSUS=1: transforms written and propagated, a line every 30 updates (census.rs)
+        if census::wanted() {
+            census::install(&mut app);
+        }
         // raea's modules as Bevy plugins, in the order they were installed one by one (raea_plugins.rs), then the
         // registered Bevy plugins and the frame clock they step by (plugins.rs; nothing when none are)
         app.add_plugins((raea_plugins::RaeaPlugins, raea_plugins::RegisteredPlugins { fps: prog.fps, lean: plugins::LEAN.load(std::sync::atomic::Ordering::Relaxed) && !plugins::steps(inserted) }));
@@ -144,6 +148,11 @@ impl Engine {
         super::tsort::install(&mut app);
         // opaque, alpha-masked, prepass and shadow draws in the scene's own order (dsort.rs)
         super::dsort::install(&mut app);
+        // RAEA_CPU_CENSUS_AMBIGUITY=1: Bevy lists every pair of systems that touch the same data with no order between
+        // them, in the main world's frame schedules and the render world's (census.rs: which order a plugin set flips)
+        if census::wanted() && std::env::var_os("RAEA_CPU_CENSUS_AMBIGUITY").is_some() {
+            census::ambiguity(&mut app);
+        }
         // overlapping fog volumes composited in one order whatever frames came before (raea-sys-fog's FogRank)
         app.sub_app_mut(bevy::render::RenderApp)
             .init_resource::<scene3d::FogOrder>()

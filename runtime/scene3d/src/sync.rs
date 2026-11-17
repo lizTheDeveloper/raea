@@ -551,8 +551,9 @@ pub fn sync_bones(
         let pairs = match bones {
             Some(b) => b.0.clone(),
             None => {
-                let Some(v) = frame.vals(e) else { continue };
-                let (Some(V::S(joints)), Some(V::S(rows))) = (v.get("bone_joints"), v.get("bone_rows")) else { continue };
+                // (read where it is: most models have no bones, and each frame made every one's values to find out)
+                let Some(v) = frame.row(e) else { continue };
+                let (Some(joints), Some(rows)) = (v.text("bone_joints"), v.text("bone_rows")) else { continue };
                 let tree = descendants(e, &kids);
                 let mut pairs = Vec::new();
                 for (joint, row) in joints.split(',').zip(rows.split(',')).filter(|(j, _)| !j.is_empty()) {

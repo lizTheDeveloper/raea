@@ -6,6 +6,8 @@
 static ALLOC: raea_core_alloc::Counting = raea_core_alloc::Counting;
 
 fn main() {
+    // the `spans` build's per-span sums (raea-render engine/spans.rs); nothing in any other build
+    raea_render::engine::Engine::spans_global();
     let code = raea_cli::main();
     // On Linux a finished raea leaves without the C library's exit handlers: the NVIDIA driver's own teardown ran there
     // while Bevy's task pools and render threads still held the device, and some hosts (driver 575.51, a pool member)

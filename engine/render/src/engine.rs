@@ -48,6 +48,11 @@ mod tsort;
 mod dsort;
 // RAEA_SCENE_STATS: what each frame hands the GPU (draw calls, instances, meshes, materials, lights, stage times)
 mod stats;
+/// RAEA_CPU_CENSUS=1: transforms written, propagation, systems per schedule (census.rs)
+mod census;
+/// the `spans` feature: each span's time summed in the process (spans.rs)
+#[cfg(feature = "spans")]
+mod spans;
 mod output;
 // RT1: each frame's motion vectors and depth, for a neural or denoising pass after the render
 mod aov;
@@ -435,6 +440,20 @@ impl Engine {
     /// The App's World, to change (raea-web: its canvas window and the camera that shows the target on it).
     pub fn world_mut(&mut self) -> &mut World {
         self.app.world_mut()
+    }
+
+    /// The `spans` build: every span's time summed from the start of the process (spans.rs); call first thing in main.
+    /// Without the feature, nothing.
+    pub fn spans_global() {
+        #[cfg(feature = "spans")]
+        spans::global();
+    }
+
+    /// RAEA_CPU_CENSUS=1: each schedule's systems and the entities, main and render worlds (census.rs). Off, nothing.
+    pub fn census(&mut self) {
+        if census::wanted() {
+            census::print_worlds(&mut self.app);
+        }
     }
 
     /// The image every frame is drawn into (w x h, and the tag row under it).

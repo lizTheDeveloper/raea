@@ -234,6 +234,10 @@ pub fn sync_looks(
     let (w, h) = (edit.prog.width, edit.prog.height);
     let mut made = false;
     for (e, look) in &models {
+        // a model with no look yet and no `look` column: passed over without making its whole values
+        if look.is_none() && !frame.row(e).is_some_and(|r| r.contains_key("look")) {
+            continue;
+        }
         let Some(v) = frame.vals(e) else { continue };
         let v = &v;
         if look.is_none() {
@@ -406,10 +410,11 @@ pub fn sync_flat(
     mut std: ResMut<Assets<StandardMaterial>>,
 ) {
     for (e, flat) in &mut models {
-        let Some(v) = frame.vals(e) else { continue };
-        if !v.get("flat").is_some_and(V::truthy) {
+        // (`flat` read where it is: most models aren't, and each frame made every one's values to find out)
+        if !frame.row(e).and_then(|r| r.get("flat")).is_some_and(|f| f.truthy()) {
             continue;
         }
+        let Some(v) = frame.vals(e) else { continue };
         let Some(mut flat) = flat else {
             commands.entity(e).insert(Flat::default());
             continue;
