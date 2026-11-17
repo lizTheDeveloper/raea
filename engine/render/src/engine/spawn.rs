@@ -408,6 +408,11 @@ pub(crate) struct ShapeNow {
 pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>>, mut q: Query<(Entity, &mut ShapeNow, &mut Mesh3d)>) {
     // the meshes whose shape this frame changes, made across the cores (Ch2's shore: 478 meshes a frame, one by one
     // about 50 ms), then set
+    // RAEA_SHAPES_OFF=1 (test): every mesh keeps its first shape, the bound on what remaking them costs
+    if std::env::var_os("RAEA_SHAPES_OFF").is_some() {
+        return;
+    }
+    let t0 = std::time::Instant::now();
     let mut todo: Vec<(Entity, String, bool, bool, String, bool)> = Vec::new();
     for (e, now, _) in &q {
         let Some(v) = frame.vals(e) else { continue };
@@ -432,6 +437,7 @@ pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>
             s.spawn(async move { (*e, expr.clone(), raea_sys_material::mesh::shape_mesh("mesh", expr, *uvs, *tangents).and_then(|mesh| raea_sys_material::mesh::finished(mesh, attrs, *packed))) });
         }
     });
+    let (t_made, n) = (t0.elapsed().as_secs_f64() * 1e3, made.len());
     for (e, expr, mesh) in made {
         let Ok((_, mut now, mut m)) = q.get_mut(e) else { continue };
         match mesh {
@@ -448,5 +454,9 @@ pub(crate) fn sync_shapes(frame: Res<FrameRows>, mut meshes: ResMut<Assets<Mesh>
             }
             Err(err) => eprintln!("raea: a mesh's shape for this frame: {err}"),
         }
+    }
+    // RAEA_SHAPES_TRACE=1: the shapes this frame remade and what they cost (made across the cores; in all, set too)
+    if std::env::var_os("RAEA_SHAPES_TRACE").is_some() {
+        eprintln!("raea shapes: {n} remade, {t_made:.1} ms made, {:.1} ms in all", t0.elapsed().as_secs_f64() * 1e3);
     }
 }
