@@ -13,13 +13,13 @@ impl Engine {
     /// (load_shared) and warmed up by the same 8 updates (finish_build), its device, pipelines, models and textures
     /// kept. A served process's next native shot (docs/native-shots.md).
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
-        self.reload_with(&std::sync::Arc::new(prog.clone()), inserted, None)
+        self.reload_with(&std::sync::Arc::new(prog.clone()), inserted, None, false)
     }
 
     /// As reload, the program shared with the caller rather than copied (a Ch5 Program is hundreds of MB): the live
     /// player's shot switch (`play --shots`) and a served native shot.
     pub fn reload_arc(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup]) -> Result<(), String> {
-        self.reload_with(prog, inserted, None)
+        self.reload_with(prog, inserted, None, false)
     }
 
     /// As reload, with what Engine::prepare made ahead (off this thread): its timeline and maps are taken, not made
@@ -27,10 +27,60 @@ impl Engine {
     pub fn reload_prepared(&mut self, p: super::prepare::Prepared) -> Result<(), String> {
         let super::prepare::Prepared { prog, inserted, timeline, maps, .. } = p;
         raea_sys_material::maps::prefetch_install(maps);
-        self.reload_with(&prog, &inserted, Some(timeline))
+        self.reload_with(&prog, &inserted, Some(timeline), false)
     }
 
-    fn reload_with(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>) -> Result<(), String> {
+    /// As reload_prepared, the live rows set over the last shot (set_rows_over: `raea play --shots --cast`'s characters)
+    /// kept as they are, entities, meshes and models, after the new shot's rows: only the Program's rows are reloaded.
+    /// Refused, with nothing changed, when a kept row would collide with the new Program's (kind, id) or is text (the
+    /// glyph atlas is emptied for the new shot): the caller reloads plainly and sets its rows again. Not a capture path:
+    /// a render's reload (reload_with) is unchanged.
+    pub fn reload_prepared_keeping(&mut self, p: super::prepare::Prepared) -> Result<(), String> {
+        self.keepable(&p.inserted)?;
+        let super::prepare::Prepared { prog, inserted, timeline, maps, .. } = p;
+        raea_sys_material::maps::prefetch_install(maps);
+        self.reload_with(&prog, &inserted, Some(timeline), true)
+    }
+
+    /// As reload_arc, keeping the live rows (reload_prepared_keeping).
+    pub fn reload_arc_keeping(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup]) -> Result<(), String> {
+        self.keepable(inserted)?;
+        self.reload_with(prog, inserted, None, true)
+    }
+
+    /// Whether a keeping reload (reload_*_keeping) can keep this engine's live rows with `inserted` as the new rows: none
+    /// of them text, none named as one of the new rows. Checked again by the keeping reloads themselves.
+    pub fn keepable(&self, inserted: &[Tup]) -> Result<(), String> {
+        let world = self.app.world();
+        let fr = world.resource::<FrameRows>();
+        if fr.live.is_none() || fr.live_from == 0 {
+            return Ok(());
+        }
+        let new: std::collections::HashSet<(&str, &str)> = inserted.iter().map(|t| (t.kind.as_str(), t.id.as_str())).collect();
+        for &e in store::rows(world).iter().skip(fr.live_from) {
+            let Some(k) = store::key(world, e) else { continue };
+            if k.kind == "text" || k.kind == "glyph" {
+                return Err(format!("live row {} {} is text: the glyph atlas is emptied for the new shot", k.kind, k.id));
+            }
+            if new.contains(&(k.kind.as_str(), k.id.as_str())) {
+                return Err(format!("live row {} {} is also the new shot's", k.kind, k.id));
+            }
+        }
+        Ok(())
+    }
+
+    fn reload_with(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>, keep: bool) -> Result<(), String> {
+        // the live rows kept (keep: the reload_*_keeping entries, checked by keepable): their entities and values
+        // (moved out, not copied: the FrameRows they're in is replaced by the load)
+        let kept: Vec<(Entity, BTreeMap<String, V>)> = match keep {
+            true => {
+                let world = self.app.world_mut();
+                let from = world.resource::<FrameRows>().live_from;
+                let vals = if from > 0 { world.resource_mut::<FrameRows>().live.take().unwrap_or_default() } else { Vec::new() };
+                store::rows(world).iter().skip(from).copied().zip(vals).collect()
+            }
+            false => Vec::new(),
+        };
         // the clocks and physics as a fresh engine's, before the new program's rows set any of them
         let t = std::time::Instant::now();
         pristine_restore(self.app.world_mut());
@@ -42,7 +92,7 @@ impl Engine {
         let held = scene3d::model_handles(self.app.world_mut());
         let prev: std::collections::HashMap<String, Handle<Image>> = self.app.world_mut().get_resource_mut::<scene3d::Maps>().map(|mut m| std::mem::take(&mut m.0)).unwrap_or_default();
         self.app.world_mut().insert_resource(raea_sys_material::maps::PrevMaps(prev));
-        let r = self.load_shared_arc(prog, inserted, timeline);
+        let r = self.load_inner(prog, inserted, timeline, kept);
         self.app.world_mut().remove_resource::<raea_sys_material::maps::PrevMaps>();
         r?;
         let t_load = t.elapsed().as_secs_f64() * 1e3;
@@ -68,6 +118,12 @@ impl Engine {
 
     /// As load_shared, the program shared with the caller (the Edit holds this Arc, not a copy).
     pub fn load_shared_arc(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>) -> Result<(), String> {
+        self.load_inner(prog, inserted, timeline, Vec::new())
+    }
+
+    /// load_shared_arc, with live rows `kept` from the load before (reload_*_keeping): they stay as they are and come
+    /// after the new rows (FrameRows.live_from), outside the timeline, which is made from the new rows alone.
+    fn load_inner(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>, kept: Vec<(Entity, BTreeMap<String, V>)>) -> Result<(), String> {
         if (prog.width, prog.height) != self.size() {
             return Err("the edit's size changed: make a new Engine".into());
         }
@@ -89,9 +145,10 @@ impl Engine {
                 self.warm = false;
         }
         // the rows go through the store; what else the last load spawned (overlay, tag, raea's leftovers) goes too
-        store::clear(world);
+        let keep: Vec<Entity> = kept.iter().map(|k| k.0).collect();
+        store::clear_keeping(world, &keep);
         world.despawn_all::<With<Mirror>>();
-        let ents = store::load(world, inserted);
+        let ents = store::load_more(world, inserted);
         mem_mark("load: rows stored");
         #[cfg(feature = "native")]
         let mut rows2d: Vec<(String, serde_json::Value, Entity)> = Vec::new();
@@ -220,6 +277,17 @@ impl Engine {
         world.insert_resource(raea_sys_frame::tables::Cuts::of(prog));
         world.insert_resource(raea_sys_frame::shots::Shots::of(prog));
         world.insert_resource(FrameRows::new(ix));
+        // the kept live rows after the new ones, as they were (their entities, meshes and models untouched)
+        if !kept.is_empty() {
+            let n = store::rows(world).len();
+            store::append(world, &keep);
+            let mut fr = world.resource_mut::<FrameRows>();
+            for (k, (e, _)) in kept.iter().enumerate() {
+                fr.ix.insert(*e, n + k);
+            }
+            fr.live_from = n;
+            fr.live = Some(kept.into_iter().map(|k| k.1).collect());
+        }
         let Some(cam) = camera else { return Err("the edit needs a camera: INSERT INTO camera (id, ...) VALUES (...)".into()) };
         let models = world.query::<&scene3d::Model3d>().iter(world).count();
         let h = prog.height as f32;

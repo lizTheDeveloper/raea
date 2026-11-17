@@ -735,3 +735,26 @@ pub fn triangles(m: &Mesh, vertices: usize) -> Vec<[usize; 3]> {
 /// What a load spawned besides the rows (overlay, tag), despawned by the next load; the rows go through the store.
 #[derive(Component)]
 pub struct Mirror;
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    /// Live rows over a timeline (Engine::set_rows_over): rows before live_from are the timeline's, the rest `live`'s
+    #[test]
+    fn live_rows_over_a_timeline_are_chosen_per_row() {
+        let mut fr = FrameRows::default();
+        assert!(fr.timeline_on() && !fr.is_live(0));
+        fr.live = Some(vec![[("y".to_string(), V::N(7.0))].into()]);
+        assert!(!fr.timeline_on() && fr.is_live(0), "live_from 0: every row live, as a game's scene");
+        fr.live_from = 2;
+        assert!(fr.timeline_on());
+        assert!(!fr.is_live(1) && fr.live_row(1).is_none());
+        assert!(fr.is_live(2));
+        assert_eq!(fr.live_row(2).and_then(|r| r.get("y")), Some(&V::N(7.0)));
+        assert_eq!(fr.at(2, "y"), Some(V::N(7.0)));
+        assert_eq!(fr.at(1, "y"), None, "a timeline row reads the columns (none here)");
+        fr.live_row_mut(2).unwrap().insert("y".into(), V::N(8.0));
+        assert_eq!(fr.at(2, "y"), Some(V::N(8.0)));
+    }
+}

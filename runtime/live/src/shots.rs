@@ -206,10 +206,27 @@ impl Live {
         let was_prepared = prepared.is_some();
         // the cut: the shot prepared ahead installed (switch: Engine::reload_prepared), else reloaded from its shared
         // Program (reload_arc: no copy)
-        let reloaded = match (self.scene.as_mut(), prepared) {
-            (Some(e), Some(p)) => Some(e.reload_prepared(p)),
-            (Some(e), None) => Some(e.reload_arc(&prog, &raea_render::inserted_of(&prog))),
-            (None, _) => None,
+        // with a cast, its rows are kept across the cut (reload_*_keeping: its entities, meshes and models stay, only the
+        // Program's rows are reloaded), so the cut doesn't set the whole cast in again. Refused (a kept row colliding with
+        // the new shot's, or text): said, and a plain reload with the cast set in afresh
+        let casting = self.cast.is_some();
+        let inserted_np = prepared.is_none().then(|| raea_render::inserted_of(&prog));
+        let keep = casting
+            && match (self.scene.as_ref(), prepared.as_ref().map(|p| p.inserted.as_slice()).or(inserted_np.as_deref())) {
+                (Some(e), Some(ins)) => match e.keepable(ins) {
+                    Ok(()) => true,
+                    Err(why) => {
+                        eprintln!("raea play --cast: shot {i}: the cast isn't kept across this cut ({why}): set in again");
+                        false
+                    }
+                },
+                _ => false,
+            };
+        let cast_kept = keep;
+        let reloaded = match (self.scene.as_mut(), prepared, inserted_np) {
+            (Some(e), Some(p), _) => Some(if keep { e.reload_prepared_keeping(p) } else { e.reload_prepared(p) }),
+            (Some(e), None, Some(ins)) => Some(if keep { e.reload_arc_keeping(&prog, &ins) } else { e.reload_arc(&prog, &ins) }),
+            _ => None,
         };
         let kept = match reloaded {
             Some(r) => match r {
@@ -233,9 +250,12 @@ impl Live {
         if let Some(s) = self.shots.as_mut() {
             s.at = Some(i);
         }
-        // the engine holds only the new shot's rows now: the cast is set into it whole at its next step
+        // the engine holds only the new shot's rows now (unless the cast was kept): the cast is set into it whole at its
+        // next step
         if let Some(c) = self.cast.as_mut() {
-            c.reset();
+            if !(kept && cast_kept) {
+                c.reset();
+            }
             // a shot whose rows reach the cast's ids: the cast is stopped, loudly (never drawn colliding)
             if let Err(why) = super::cast::Cast::clear_of(&prog) {
                 eprintln!("raea play --cast: {why}; the cast is off from here");

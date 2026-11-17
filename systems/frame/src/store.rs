@@ -101,6 +101,33 @@ pub fn clear(world: &mut World) {
     world.despawn_all::<bevy::prelude::With<RowKey>>();
 }
 
+/// Remove every row but `keep` (live rows over a timeline, kept across a reload: Engine::reload_*_keeping). The kept
+/// rows leave the order and are put back after the new rows with `append`.
+pub fn clear_keeping(world: &mut World, keep: &[Entity]) {
+    let s = schema(world);
+    s.order.clear();
+    s.by.clear();
+    let gone: Vec<Entity> = world.query_filtered::<Entity, bevy::prelude::With<RowKey>>().iter(world).filter(|e| !keep.contains(e)).collect();
+    for e in gone {
+        world.despawn(e);
+    }
+}
+
+/// Rows kept by clear_keeping put back after the rows in the order, as they were.
+pub fn append(world: &mut World, keep: &[Entity]) {
+    for &e in keep {
+        let Some(k) = world.get::<RowKey>(e).cloned() else { continue };
+        let s = schema(world);
+        s.order.push(e);
+        s.by.entry(k.kind).or_default().insert(k.id, e);
+    }
+}
+
+/// Add `rows` after the rows there are (in order), clearing nothing.
+pub fn load_more(world: &mut World, rows: &[Tup]) -> Vec<Entity> {
+    rows.iter().map(|t| spawn(world, t)).collect()
+}
+
 /// Replace the rows with `rows` (in order).
 pub fn load(world: &mut World, rows: &[Tup]) -> Vec<Entity> {
     clear(world);
@@ -249,5 +276,24 @@ mod tests {
         let a = find(&s.world, "title", "a").unwrap();
         despawn(&mut s.world, a);
         assert_eq!(s.tups().len(), 2);
+    }
+
+    /// A keeping reload (live rows over a shot, kept across its cut): the old program's rows go, the kept rows stay as
+    /// they were and come after the new program's, which alone make the base (gather before append)
+    #[test]
+    fn kept_rows_come_after_the_new_rows() {
+        let t = |k: &str, id: &str, y: f64| Tup { kind: k.into(), id: id.into(), vals: [("y".into(), V::N(y))].into() };
+        let mut s = Store::new(&[t("mesh", "mesh0", 1.0), t("mesh", "mesh1", 2.0)]);
+        let cast = spawn(&mut s.world, &t("model", "model1000000", 9.0));
+        clear_keeping(&mut s.world, &[cast]);
+        assert!(rows(&s.world).is_empty() && find(&s.world, "mesh", "mesh0").is_none());
+        let ents = load_more(&mut s.world, &[t("mesh", "mesh0", 3.0), t("camera", "cam", 0.0)]);
+        assert_eq!(gather(&s.world).to_tups().len(), 2, "the base is the new rows only");
+        append(&mut s.world, &[cast]);
+        assert_eq!(rows(&s.world), &[ents[0], ents[1], cast]);
+        assert_eq!(find(&s.world, "model", "model1000000"), Some(cast));
+        assert_eq!(get(&s.world, cast, "y"), Some(V::N(9.0)));
+        assert_eq!(get(&s.world, ents[0], "y"), Some(V::N(3.0)));
+        assert_eq!(s.world.query::<&RowKey>().iter(&s.world).count(), 3, "the old program's rows are gone");
     }
 }
