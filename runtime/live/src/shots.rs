@@ -15,10 +15,20 @@ pub(crate) struct Shots {
     /// the shots read in (their commits are in the timeline, their Program here); at most the one playing and its
     /// neighbours: a chapter's bakes parsed whole would be tens of GB
     progs: std::collections::HashMap<usize, Arc<raea_core_program::ir::Program>>,
-    /// the next shot, being read on a thread
-    ahead: Option<(usize, std::sync::mpsc::Receiver<R<raea_runtime_export::ShotBake>>)>,
+    /// the next shot, being read on a thread, and prepared there for the engine (its rows, timeline and decoded maps:
+    /// raea_render::engine::Prepared, so the cut only installs it)
+    ahead: Option<(usize, std::sync::mpsc::Receiver<R<Ahead>>)>,
+    /// the next shot as prepared ahead, until the cut takes it
+    prepared: Option<(usize, raea_render::engine::Prepared)>,
     /// the shot the engine holds now
     at: Option<usize>,
+}
+
+/// A shot read (and prepared) on the read-ahead thread
+pub(crate) struct Ahead {
+    ops: Vec<(i64, Vec<String>)>,
+    prog: Option<Arc<raea_core_program::ir::Program>>,
+    prepared: Option<raea_render::engine::Prepared>,
 }
 
 /// A bake's first stepped frame, from the start of its JSON (the ops follow the assets), without reading it all
@@ -84,8 +94,8 @@ impl Live {
         let page = raea_runtime_page::BevyPage::new(w, h, &dir)?;
         let brand = raea_runtime_react::scene::page_css(&dir, w, &js);
         let start = spans[0].0;
-        let mut live = Live { app, dir: dir.clone(), page, brand, dirty: true, mixer: None, mixer_failed: false, lag: (0.0, std::time::Instant::now()), w, h, fps, frames: total, responsive: false, js, master: None, master_wav: None, game_master: None, game_gain: None, scene_rx: None, scene: None, live3d: None, frame: 0, pads: Vec::new(), pointer: Default::default(), made: Default::default(), sound_buf: Vec::new(), holders: Vec::new(), baked: Some(Arc::new(baked)), applied: -1, session: new_session(), shots: Some(Shots { files: spans, progs: Default::default(), ahead: None, at: None }), cast: None };
-        live.take_shot(0, first);
+        let mut live = Live { app, dir: dir.clone(), page, brand, dirty: true, mixer: None, mixer_failed: false, lag: (0.0, std::time::Instant::now()), w, h, fps, frames: total, responsive: false, js, master: None, master_wav: None, game_master: None, game_gain: None, scene_rx: None, scene: None, live3d: None, frame: 0, pads: Vec::new(), pointer: Default::default(), made: Default::default(), sound_buf: Vec::new(), holders: Vec::new(), baked: Some(Arc::new(baked)), applied: -1, session: new_session(), shots: Some(Shots { files: spans, progs: Default::default(), ahead: None, prepared: None, at: None }), cast: None };
+        live.take_shot(0, first.ops, first.prog.map(Arc::new));
         trim();
         live.frame = start;
         live.replay(start);
@@ -101,16 +111,19 @@ impl Live {
 
     /// A shot read in: its commits laid into the timeline, its Program kept; every other shot but the next let go (a
     /// Program holds its shot's every frame: about 42 MB a frame held on Ch5, Lane C; a bake is ~2 MB to read again).
-    fn take_shot(&mut self, i: usize, b: raea_runtime_export::ShotBake) {
+    fn take_shot(&mut self, i: usize, ops: Vec<(i64, Vec<String>)>, prog: Option<Arc<raea_core_program::ir::Program>>) {
         let (Some(s), Some(baked)) = (self.shots.as_mut(), self.baked.as_mut()) else { return };
         let Some(t) = Arc::get_mut(baked) else { return };
-        for (f, batches) in b.ops {
+        for (f, batches) in ops {
             if f >= 0 && (f as usize) < t.frame_ops.len() {
                 t.frame_ops[f as usize] = batches;
             }
         }
-        if let Some(p) = b.prog {
-            s.progs.insert(i, Arc::new(p));
+        if let Some(p) = prog {
+            s.progs.insert(i, p);
+        }
+        if s.prepared.as_ref().is_some_and(|(k, _)| *k != i && *k != i + 1) {
+            s.prepared = None;
         }
         let gone: Vec<usize> = s.progs.keys().copied().filter(|&k| k != i && k != i + 1).collect();
         for k in gone {
@@ -134,19 +147,26 @@ impl Live {
                 Some((k, rx)) if k == i => rx.recv().map_err(|e| e.to_string()).and_then(|r| r),
                 _ => {
                     let p = self.shots.as_ref().unwrap().files[i].2.clone();
-                    raea_runtime_export::read_shot(&p, &self.dir)
+                    raea_runtime_export::read_shot(&p, &self.dir).map(|b| Ahead { ops: b.ops, prog: b.prog.map(Arc::new), prepared: None })
                 }
             };
             match read {
-                Ok(b) => self.take_shot(i, b),
+                Ok(a) => {
+                    if let (Some(p), Some(s)) = (a.prepared, self.shots.as_mut()) {
+                        s.prepared = Some((i, p));
+                    }
+                    self.take_shot(i, a.ops, a.prog)
+                }
                 Err(e) => eprintln!("raea play --shots: shot {i}: {e}"),
             }
             trim();
             raea_io_trace::event("shot_read", serde_json::json!({"shot": i, "waited_ms": t.elapsed().as_secs_f64() * 1e3}));
             eprintln!("raea play --shots: shot {i} read (waited {:.0} ms), {}", t.elapsed().as_secs_f64() * 1e3, mem());
         }
-        // the next shot read ahead while this one plays
+        // the next shot read ahead while this one plays, and prepared there for the engine (Engine::Prepared: the maps
+        // it holds now aren't decoded again)
         let dir = self.dir.clone();
+        let have = self.scene.as_ref().map(|e| e.map_sources()).unwrap_or_default();
         if let Some(s) = self.shots.as_mut()
             && s.ahead.is_none()
             && i + 1 < s.files.len()
@@ -154,7 +174,19 @@ impl Live {
         {
             let p = s.files[i + 1].2.clone();
             let (tx, rx) = std::sync::mpsc::channel();
-            if std::thread::Builder::new().name("raea shot ahead".into()).spawn(move || { let _ = tx.send(raea_runtime_export::read_shot(&p, &dir)); }).is_ok() {
+            let ahead = move || -> R<Ahead> {
+                let b = raea_runtime_export::read_shot(&p, &dir)?;
+                let prog = b.prog.map(Arc::new);
+                let prepared = prog.clone().and_then(|g| match raea_render::engine::Prepared::new(g, &dir, &have) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        eprintln!("raea play --shots: the next shot wasn't prepared ahead ({e}); it reloads at the cut");
+                        None
+                    }
+                });
+                Ok(Ahead { ops: b.ops, prog, prepared })
+            };
+            if std::thread::Builder::new().name("raea shot ahead".into()).spawn(move || { let _ = tx.send(ahead()); }).is_ok() {
                 s.ahead = Some((i + 1, rx));
             }
         }
@@ -163,10 +195,24 @@ impl Live {
             return;
         }
         let Some(prog) = s.progs.get(&i).cloned() else { return };
+        let prepared = match s.prepared.take() {
+            Some((k, p)) if k == i => Some(p),
+            other => {
+                s.prepared = other;
+                None
+            }
+        };
         let t = std::time::Instant::now();
-        let inserted = raea_render::inserted_of(&prog);
-        let kept = match self.scene.as_mut() {
-            Some(e) => match e.reload(&prog, &inserted) {
+        let was_prepared = prepared.is_some();
+        // the cut: the shot prepared ahead installed (switch: Engine::reload_prepared), else reloaded from its shared
+        // Program (reload_arc: no copy)
+        let reloaded = match (self.scene.as_mut(), prepared) {
+            (Some(e), Some(p)) => Some(e.reload_prepared(p)),
+            (Some(e), None) => Some(e.reload_arc(&prog, &raea_render::inserted_of(&prog))),
+            (None, _) => None,
+        };
+        let kept = match reloaded {
+            Some(r) => match r {
                 Ok(()) => true,
                 Err(why) => {
                     eprintln!("raea play --shots: the engine didn't take shot {i} ({why}); a fresh one");
@@ -177,6 +223,7 @@ impl Live {
         };
         if !kept {
             self.scene = None;
+            let inserted = raea_render::inserted_of(&prog);
             // the shot's Program shared with the engine, not copied (mem2: Engine::new_live_arc)
             match raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, &self.dir) {
                 Ok(e) => self.scene = Some(e),
@@ -191,8 +238,8 @@ impl Live {
             c.reset();
         }
         trim();
-        raea_io_trace::event("shot", serde_json::json!({"shot": i, "ms": t.elapsed().as_secs_f64() * 1e3, "reloaded": kept}));
-        eprintln!("raea play --shots: shot {i} (from frame {}) in {:.0} ms ({}, {})", self.shots.as_ref().map_or(0, |s| s.files[i].0), t.elapsed().as_secs_f64() * 1e3, if kept { "engine reloaded" } else { "engine opened" }, mem());
+        raea_io_trace::event("shot", serde_json::json!({"shot": i, "ms": t.elapsed().as_secs_f64() * 1e3, "reloaded": kept, "prepared": was_prepared}));
+        eprintln!("raea play --shots: shot {i} (from frame {}) in {:.0} ms ({}, {})", self.shots.as_ref().map_or(0, |s| s.files[i].0), t.elapsed().as_secs_f64() * 1e3, if kept && was_prepared { "engine reloaded, prepared ahead" } else if kept { "engine reloaded" } else { "engine opened" }, mem());
     }
 }
 
