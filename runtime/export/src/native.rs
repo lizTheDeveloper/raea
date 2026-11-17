@@ -81,12 +81,19 @@ fn cgroup_room_gb() -> Option<f64> {
     let own = std::fs::read_to_string("/proc/self/cgroup").ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string())));
     for dir in own.iter().map(|p| format!("/sys/fs/cgroup{p}")).chain(std::iter::once("/sys/fs/cgroup".to_string())) {
         if let (Some(max), Some(cur)) = (num(&format!("{dir}/memory.max")), num(&format!("{dir}/memory.current"))) {
-            return Some(((max - cur) / 1073741824.0).max(0.0));
+            return Some(((max - cur + stat_key(&format!("{dir}/memory.stat"), "inactive_file")) / 1073741824.0).max(0.0));
         }
     }
     // v1: memory.limit_in_bytes (a huge number when unlimited) and memory.usage_in_bytes
     let (max, cur) = (num("/sys/fs/cgroup/memory/memory.limit_in_bytes")?, num("/sys/fs/cgroup/memory/memory.usage_in_bytes")?);
-    (max < 1e15).then(|| ((max - cur) / 1073741824.0).max(0.0))
+    (max < 1e15).then(|| ((max - cur + stat_key("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file")) / 1073741824.0).max(0.0))
+}
+
+/// A cgroup memory.stat line's value (bytes), 0 when absent. The usage counts the page cache, so the room a bake has
+/// gives back the inactive file cache the kernel reclaims first (Lane G2: 60948090's 35.6 GB "current" was 31.4 GB of
+/// file cache and 3.7 GB anonymous; without it a member whose cache grew after rq batches planned one runtime).
+fn stat_key(path: &str, key: &str) -> f64 {
+    std::fs::read_to_string(path).ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix(' ')).and_then(|v| v.trim().parse::<f64>().ok()))).unwrap_or(0.0)
 }
 
 /// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and as many as its share of
