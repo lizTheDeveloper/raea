@@ -59,6 +59,8 @@ impl Live {
         // the first one read now: the composition's size, rate and length, and the frames its commits begin
         let first = raea_runtime_export::read_shot(&files[0].1, &dir)?;
         let (w, h, fps, total) = (first.w, first.h, first.fps, first.total);
+        // the header is checked before anything is sized by it (a crafted bake's `total` would size the timeline)
+        header_ok(w, h, fps, total, first.ops.iter().map(|o| o.0).max().unwrap_or(0)).map_err(|e| format!("{}: {e}", files[0].1.display()))?;
         // each bake runs to the frame before the next one's first (the last: its own last)
         let last0 = first.ops.last().map_or(files[0].0, |o| o.0);
         let spans: Vec<(i64, i64, PathBuf)> = files.iter().enumerate().map(|(i, (lo, p))| (*lo, files.get(i + 1).map_or(if i == 0 { last0 } else { lo + (last0 - files[0].0) }, |n| n.0 - 1), p.clone())).collect();
@@ -190,6 +192,28 @@ impl Live {
     }
 }
 
+/// The most frames a chapter's timeline is made for (about 3.8 days at 30 fps): a timeline is a Vec per frame
+const MAX_FRAMES: i64 = 10_000_000;
+
+/// A bake header's size, rate and length, refused unless sane: w and h in 1..=16384, fps finite in (0, 1000], total
+/// in 1..=MAX_FRAMES and past the last frame its commits name (read_shot turns a NaN total into 0 and an infinite one
+/// into i64::MAX, both refused here).
+fn header_ok(w: u32, h: u32, fps: f64, total: i64, last_op: i64) -> R<()> {
+    if !(1..=16384).contains(&w) || !(1..=16384).contains(&h) {
+        return Err(format!("the bake's size {w}x{h} is out of range (1..=16384)"));
+    }
+    if !fps.is_finite() || fps <= 0.0 || fps > 1000.0 {
+        return Err(format!("the bake's rate {fps} is out of range (0..=1000 fps)"));
+    }
+    if !(1..=MAX_FRAMES).contains(&total) {
+        return Err(format!("the bake's length {total} frames is out of range (1..={MAX_FRAMES})"));
+    }
+    if last_op < 0 || last_op >= total {
+        return Err(format!("the bake's commits reach frame {last_op}, outside its {total} frames"));
+    }
+    Ok(())
+}
+
 /// glibc keeps freed memory in its arenas: a parsed bake's JSON tree (several GB) stays resident after it's dropped
 /// unless it's handed back. (macOS's allocator returns it on its own.)
 fn trim() {
@@ -204,4 +228,45 @@ fn trim() {
 
 fn raea_export_read(p: &Path, dir: &Path) -> R<raea_runtime_export::ShotBake> {
     raea_runtime_export::read_shot(p, dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sane_header_passes() {
+        assert!(header_ok(1920, 1080, 30.0, 6000, 4050).is_ok());
+        assert!(header_ok(1, 1, 1000.0, MAX_FRAMES, MAX_FRAMES - 1).is_ok());
+    }
+
+    #[test]
+    fn a_size_out_of_range_is_refused() {
+        for (w, h) in [(0, 1080), (1920, 0), (16385, 1080), (1920, 16385), (u32::MAX, u32::MAX)] {
+            assert!(header_ok(w, h, 30.0, 6000, 10).is_err(), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_rate_out_of_range_is_refused() {
+        for fps in [0.0, -30.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1000.5] {
+            assert!(header_ok(1920, 1080, fps, 6000, 10).is_err(), "{fps}");
+        }
+    }
+
+    #[test]
+    fn a_length_out_of_range_is_refused() {
+        // read_shot's `as i64`: NaN -> 0, +inf -> i64::MAX, -inf -> i64::MIN
+        for total in [0, -1, i64::MIN, i64::MAX, MAX_FRAMES + 1] {
+            assert!(header_ok(1920, 1080, 30.0, total, 0).is_err(), "{total}");
+        }
+        assert_eq!(f64::NAN as i64, 0);
+        assert_eq!(f64::INFINITY as i64, i64::MAX);
+    }
+
+    #[test]
+    fn commits_outside_the_length_are_refused() {
+        assert!(header_ok(1920, 1080, 30.0, 6000, 6000).is_err());
+        assert!(header_ok(1920, 1080, 30.0, 6000, -1).is_err());
+    }
 }
