@@ -1345,6 +1345,10 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     if let Some(s) = sink {
         s.finish()?;
     }
+    // RAEA_CPU_CENSUS=1: the schedules' systems and the worlds' entities (raea-render census.rs)
+    if let Some(e) = cx.scene3d.as_mut() {
+        e.census();
+    }
     if trace() {
         let n = wanted.len().max(1) as f64;
         let p = *PARTS.lock().unwrap();

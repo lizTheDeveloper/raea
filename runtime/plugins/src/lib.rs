@@ -355,6 +355,8 @@ fn keyed_rows(world: &mut World) {
         }
         last.into_values().filter(|r| k.applied.get(&(r.0, r.1.clone())) != Some(&r.3)).cloned().collect()
     };
+    let t_apply = std::time::Instant::now();
+    let n_due = due.len();
     for (e, ty, v, from) in due {
         let done = match e {
             Some(e) => insert_reflect(world, e, &ty, &v).map_err(|err| format!("component {ty}: {err}")),
@@ -364,6 +366,13 @@ fn keyed_rows(world: &mut World) {
             world.resource_mut::<Error>().0 = Some(err);
         }
         world.resource_mut::<Keyed>().applied.insert((e, ty), from);
+    }
+    // (RAEA_NATIVE_TRACE: the rows applied this frame, and their time)
+    if n_due > 0 {
+        raea_sys_frame::sys_time("keyed_rows: rows applied (calls = frames with any)", t_apply);
+        for _ in 0..n_due {
+            raea_sys_frame::sys_time("keyed_rows: rows applied, counted", std::time::Instant::now());
+        }
     }
 }
 
