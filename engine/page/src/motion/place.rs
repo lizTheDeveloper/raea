@@ -24,6 +24,11 @@ impl BlitzPage {
         Ok(())
     }
 
+    /// Whether the page has any <Screen> sub-pages (as last synced).
+    pub fn has_subs(&self) -> bool {
+        !self.subs.is_empty()
+    }
+
     /// The <Screen>s not in `keep` gone.
     pub fn retain_subs(&mut self, keep: &[String]) {
         let gone: Vec<String> = self.subs.keys().filter(|k| !keep.contains(k)).cloned().collect();

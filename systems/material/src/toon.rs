@@ -36,10 +36,20 @@ pub struct ToonParams {
     pub colors: [Vec4; 8],
 }
 
+/// Bindless where the device has it (as StandardMaterial is): every toon material's params in one storage array, so
+/// toon parts of different colours share a bind group and batch by mesh (Ch1 @22800's 530 toon materials were 530
+/// batch sets in every view). Without bindless, the params are a uniform at binding 100, as before.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+#[data(100, ToonParams, binding_array(101))]
+#[bindless(index_table(range(100..101), binding(102)))]
 pub struct ToonExt {
-    #[uniform(100)]
     pub params: ToonParams,
+}
+
+impl bevy::render::render_resource::AsBindGroupShaderType<ToonParams> for ToonExt {
+    fn as_bind_group_shader_type(&self, _: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> ToonParams {
+        self.params
+    }
 }
 
 impl MaterialExtension for ToonExt {
@@ -282,7 +292,7 @@ pub fn hull_mesh(m: &Mesh) -> Option<Mesh> {
 /// skin goes with it, so the hull is posed as the mesh is, and so do a morphed mesh's weights (a glTF mesh's refer to
 /// its node's MorphWeights, so the hull follows the same animation).
 fn spawn_hull(world: &mut World, of: Entity, mesh: Handle<Mesh>, mat: OutlineMaterial) {
-    let mat = world.resource_mut::<Assets<OutlineMaterial>>().add(mat);
+    let (mat, shared_mat) = shared_ink(world, mat);
     let skin = world.get::<bevy::mesh::skinning::SkinnedMesh>(of).cloned();
     let morph = world.get::<bevy::mesh::morph::MeshMorphWeights>(of).cloned();
     let mut hull = world.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::default(), Visibility::Inherited, NotShadowCaster, NotShadowReceiver, OutlineHull { of }));
@@ -293,23 +303,116 @@ fn spawn_hull(world: &mut World, of: Entity, mesh: Handle<Mesh>, mat: OutlineMat
     if let Some(morph) = morph {
         hull.insert(morph);
     }
+    if shared_mat {
+        hull.insert(SharedInk);
+    }
     let h = hull.id();
     world.entity_mut(of).add_child(h);
+}
+
+/// A toon part whose ToonMaterial other parts hold too (`shared_toon`): sync_toon copies it before changing it.
+#[derive(Component)]
+pub struct SharedToon;
+
+/// An outline hull whose OutlineMaterial other hulls hold too: sync_toon copies it before changing it.
+#[derive(Component)]
+pub struct SharedInk;
+
+/// Equal toon parts share their assets, as equal standard parts do (runtime/scene3d share.rs): one ToonMaterial per
+/// value, one OutlineMaterial per value, one hull per mesh. N equal parts then hold one material handle, so Bevy's
+/// batching draws them as one in each view (Ch1 @22800: 2,294 toon parts were 2,295 material bind groups and as many
+/// shadow batches). RAEA_SHARE_ASSETS=0 makes every part its own again.
+#[derive(Resource, Default)]
+struct ToonShare {
+    mats: HashMap<String, Handle<ToonMaterial>>,
+    inks: HashMap<String, Handle<OutlineMaterial>>,
+    hulls: HashMap<AssetId<Mesh>, Option<Handle<Mesh>>>,
+}
+
+fn sharing() -> bool {
+    std::env::var("RAEA_SHARE_ASSETS").map_or(true, |v| v != "0")
+}
+
+// (diagnosis: RAEA_SHARE_TOON_ONLY=toon|ink|hull shares that kind alone)
+fn shares(kind: &str) -> bool {
+    sharing() && std::env::var("RAEA_SHARE_TOON_ONLY").map_or(true, |v| v == kind) && ROW_SHARES.with(|c| c.get())
+}
+
+thread_local! {
+    static ROW_SHARES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// The ToonMaterial equal to `m`, field for field (its Debug form: every field, a texture by its handle), made the
+/// first time; and whether it's shared.
+fn shared_toon(world: &mut World, m: ToonMaterial) -> (Handle<ToonMaterial>, bool) {
+    if !shares("toon") {
+        return (world.resource_mut::<Assets<ToonMaterial>>().add(m), false);
+    }
+    let key = format!("{:?}{:?}", m.base, m.extension);
+    if let Some(h) = world.get_resource::<ToonShare>().and_then(|s| s.mats.get(&key)).cloned() {
+        return (h, true);
+    }
+    let h = world.resource_mut::<Assets<ToonMaterial>>().add(m);
+    world.get_resource_or_insert_with(ToonShare::default).mats.insert(key, h.clone());
+    (h, true)
+}
+
+fn shared_ink(world: &mut World, m: OutlineMaterial) -> (Handle<OutlineMaterial>, bool) {
+    if !shares("ink") {
+        return (world.resource_mut::<Assets<OutlineMaterial>>().add(m), false);
+    }
+    let key = format!("{m:?}");
+    if let Some(h) = world.get_resource::<ToonShare>().and_then(|s| s.inks.get(&key)).cloned() {
+        return (h, true);
+    }
+    let h = world.resource_mut::<Assets<OutlineMaterial>>().add(m);
+    world.get_resource_or_insert_with(ToonShare::default).inks.insert(key, h.clone());
+    (h, true)
+}
+
+/// The hull of `mesh` (hull_mesh), made once a mesh when sharing.
+fn shared_hull(world: &mut World, mesh: &Handle<Mesh>) -> Option<Handle<Mesh>> {
+    if shares("hull") && let Some(h) = world.get_resource::<ToonShare>().and_then(|s| s.hulls.get(&mesh.id())).cloned() {
+        return h;
+    }
+    let hull = world.resource::<Assets<Mesh>>().get(mesh).and_then(hull_mesh);
+    let h = hull.map(|m| world.resource_mut::<Assets<Mesh>>().add(m));
+    if shares("hull") {
+        world.get_resource_or_insert_with(ToonShare::default).hulls.insert(mesh.id(), h.clone());
+    }
+    h
+}
+
+/// (diagnosis: RAEA_SHARE_TOON_BITS=mask,value shares only the rows whose id's FNV-1a hash has those bits)
+fn row_shares(world: &World, e: Entity) -> bool {
+    let Ok(v) = std::env::var("RAEA_SHARE_TOON_BITS") else { return true };
+    let mut it = v.split(',').filter_map(|x| x.trim().parse::<u64>().ok());
+    let (Some(mask), Some(want)) = (it.next(), it.next()) else { return true };
+    let id = world.get::<raea_sys_frame::store::RowKey>(e).map(|k| format!("{}/{}", k.kind, k.id)).unwrap_or_default();
+    let h = id.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    let on = h & mask == want;
+    if on && std::env::var_os("RAEA_SHARE_TOON_LIST").is_some() {
+        eprintln!("raea: toon shared row {id}");
+    }
+    on
 }
 
 /// A mesh row's toon surface and outline (spawn_3d): `base` is the standard material its columns make.
 pub fn spawn_mesh(world: &mut World, e: Entity, vals: &BTreeMap<String, V>, mesh: &Handle<Mesh>, base: StandardMaterial) {
     let Some(spec) = ToonSpec::of(vals).into_iter().next() else { return };
+    let row = row_shares(world, e);
+    ROW_SHARES.with(|c| c.set(row));
     let color = base.base_color;
     let opacity = color.alpha();
-    let mat = world.resource_mut::<Assets<ToonMaterial>>().add(material(base, &spec, Some(vals)));
+    let (mat, shared) = shared_toon(world, material(base, &spec, Some(vals)));
     world.entity_mut(e).insert((MeshMaterial3d(mat), Toon(spec.clone())));
-    if let Some(o) = outline_params(&spec, color.with_alpha(1.0), Some(vals), opacity) {
-        let hull = world.resource::<Assets<Mesh>>().get(mesh).and_then(hull_mesh);
-        if let Some(hull) = hull {
-            let h = world.resource_mut::<Assets<Mesh>>().add(hull);
-            spawn_hull(world, e, h, o);
-        }
+    if shared {
+        world.entity_mut(e).insert(SharedToon);
+    }
+    if let Some(o) = outline_params(&spec, color.with_alpha(1.0), Some(vals), opacity)
+        && let Some(h) = shared_hull(world, mesh)
+    {
+        spawn_hull(world, e, h, o);
     }
 }
 
@@ -319,12 +422,13 @@ pub fn sync_toon(
     frame: Res<FrameRows>,
     mut mats: ResMut<Assets<ToonMaterial>>,
     mut inks: ResMut<Assets<OutlineMaterial>>,
-    parts: Query<(Entity, &Toon, &MeshMaterial3d<ToonMaterial>)>,
-    hulls: Query<(&OutlineHull, &MeshMaterial3d<OutlineMaterial>)>,
+    mut parts: Query<(Entity, &Toon, &mut MeshMaterial3d<ToonMaterial>, Has<SharedToon>)>,
+    mut hulls: Query<(Entity, &OutlineHull, &mut MeshMaterial3d<OutlineMaterial>, Has<SharedInk>)>,
+    mut commands: Commands,
 ) {
     const KEYED: [&str; 10] = ["col_r", "opacity", "emissive_k", "em_r", "rough", "sh_r", "rim_k", "spec_k", "outline_w", "metal"];
     let mut changed_opacity: HashMap<Entity, (f32, Color)> = HashMap::new();
-    for (e, toon, h) in &parts {
+    for (e, toon, mut h, shared) in &mut parts {
         let Some(v) = frame.vals(e) else { continue };
         let v = &v;
         if !KEYED.iter().any(|k| v.contains_key(*k)) {
@@ -347,7 +451,18 @@ pub fn sync_toon(
         let want = if opacity < 1.0 || cur.base.base_color_texture.is_some() && cur.base.alpha_mode == AlphaMode::Blend { AlphaMode::Blend } else { AlphaMode::Opaque };
         let blend = v.contains_key("opacity") && !v.contains_key("alpha") && matches!(cur.base.alpha_mode, AlphaMode::Opaque | AlphaMode::Blend) && cur.base.alpha_mode != want;
         if cur.base.base_color != base || cur.base.emissive != emissive || cur.extension.params != p || blend {
-            if let Some(mut m) = mats.get_mut(&h.0) {
+            // a material other parts hold too (shared_toon): this part's change goes on a copy of its own
+            if shared {
+                let mut own = cur.clone();
+                own.base.base_color = base;
+                own.base.emissive = emissive;
+                own.extension.params = p;
+                if blend {
+                    own.base.alpha_mode = want;
+                }
+                h.0 = mats.add(own);
+                commands.entity(e).remove::<SharedToon>();
+            } else if let Some(mut m) = mats.get_mut(&h.0) {
                 m.base.base_color = base;
                 m.base.emissive = emissive;
                 m.extension.params = p;
@@ -358,14 +473,17 @@ pub fn sync_toon(
         }
         changed_opacity.insert(e, (opacity, base.with_alpha(1.0)));
     }
-    for (hull, h) in &hulls {
+    for (he, hull, mut h, shared) in &mut hulls {
         let Some(&(opacity, base)) = changed_opacity.get(&hull.of) else { continue };
-        let Ok((_, toon, _)) = parts.get(hull.of) else { continue };
+        let Ok((_, toon, _, _)) = parts.get(hull.of) else { continue };
         let v = frame.vals(hull.of);
         let Some(want) = outline_params(&toon.0, base, v.as_deref(), opacity) else { continue };
         let Some(cur) = inks.get(&h.0) else { continue };
         if cur.params != want.params || cur.blend != want.blend {
-            if let Some(mut m) = inks.get_mut(&h.0) {
+            if shared {
+                h.0 = inks.add(want);
+                commands.entity(he).remove::<SharedInk>();
+            } else if let Some(mut m) = inks.get_mut(&h.0) {
                 m.params = want.params;
                 m.blend = want.blend;
             }

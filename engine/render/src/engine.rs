@@ -41,6 +41,8 @@ pub(crate) use target::*;
 mod open;
 mod load;
 mod tsort;
+// RAEA_SCENE_STATS: what each frame hands the GPU (draw calls, instances, meshes, materials, lights, stage times)
+mod stats;
 mod output;
 // RT1: each frame's motion vectors and depth, for a neural or denoising pass after the render
 mod aov;

@@ -75,6 +75,8 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
         return;
     }
     let device = device.wgpu_device();
+    let mut split: Vec<String> = Vec::new();
+    split_wait(device, &mut split, "before".into());
     let Vello { renderer, scratch, premul, passes, prints, pending, image_views, straightened, straight_placed } = &mut *vello;
     let premul = premul.get_or_insert_with(|| Premul::new(device));
     // the host's 3D views: each image's texture drawn in place of its placeholder (it changes each frame); a
@@ -124,6 +126,7 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
         (p.premultiplied, p.opaque) = (false, false);
     }
     queue.submit([straighten.finish()]);
+    split_wait(device, &mut split, format!("straighten({})", pending.len()));
     // a view's texture changes under the same paint: any view placed this frame draws every page again
     let views = !pending.is_empty();
     let renderer = renderer.get_or_insert_with(|| bevy::platform::cell::SyncCell::new({
@@ -201,6 +204,7 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             }
             let out = passes.run(device, &mut passes_encoder, layer, &drawn);
             queue.submit([passes_encoder.finish()]);
+            split_wait(device, &mut split, format!("layer{}x{}", layer.size.0, layer.size.1));
             let at = wgpu::TexelCopyTextureInfoBase { texture: out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All };
             renderer.override_image(&layer.image, Some(at));
         }
@@ -228,6 +232,7 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             renderer.mark_override_image_dirty(&layer.image);
         }
         let drew = skipped::render(renderer, device, &queue, scene, tex, &params, "a page");
+        split_wait(device, &mut split, format!("page{}x{}(views {views}, layers {})", px.x, px.y, layers.len()));
         let view = tex.create_view(&default());
         for layer in layers {
             renderer.override_image(&layer.image, None);
@@ -263,6 +268,10 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
         pass.draw(0..3, 0..1);
     }
     queue.submit([encoder.finish()]);
+    split_wait(device, &mut split, "premul".into());
+    if split_on() {
+        eprintln!("raea-page split: given {}: {}", todo.len(), split.join(", "));
+    }
     vello::low_level::vello_encoding::set_blend_linear(false);
     passes.recycle();
     // the scenes given back for paint to reuse (ZeroHeap)
@@ -272,6 +281,22 @@ pub fn draw(mut scenes: ResMut<Scenes>, mut vello: ResMut<Vello>, device: Res<Re
             spare.push(d.2);
         }
     }
+}
+
+/// RAEA_PAGE_SPLIT=1: each page draw's GPU work waited for piece by piece, one line a draw on stderr (`raea-page split`):
+/// the pages given and drawn, each filtered layer and page by size, and the GPU ms of each. Off, nothing waits.
+fn split_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAEA_PAGE_SPLIT").is_some_and(|v| v != "0"))
+}
+
+fn split_wait(device: &wgpu::Device, log: &mut Vec<String>, what: String) {
+    if !split_on() {
+        return;
+    }
+    let t = std::time::Instant::now();
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) });
+    log.push(format!("{what} {:.2}", t.elapsed().as_secs_f64() * 1000.0));
 }
 
 /// The texture Vello draws a page into: Rgba8Unorm with storage binding, read by the premultiply pass.

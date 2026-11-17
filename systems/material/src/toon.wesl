@@ -20,6 +20,7 @@ import bevy_pbr::render::mesh_view_types;
 import bevy_pbr::render::clustered_forward as clustering;
 import bevy_pbr::render::shadows;
 import bevy_pbr::render::mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT;
+@if(BINDLESS) import bevy_pbr::render::mesh_bindings::mesh;
 @if(PREPASS_PIPELINE) import bevy_pbr::prepass::io::{VertexOutput, FragmentOutput};
 @if(PREPASS_PIPELINE) import bevy_pbr::deferred::functions::deferred_output;
 @if(!PREPASS_PIPELINE) import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
@@ -41,7 +42,15 @@ struct Toon {
     colors: array<vec4<f32>, 8>,
 }
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> toon: Toon;
+// the material's toon params: a uniform, or, bindless, its slot's entry in the storage array (toon.rs ToonExt)
+@if(!BINDLESS) @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> toon_uniform: Toon;
+struct ToonIndices {
+    material: u32,
+}
+@if(BINDLESS) @group(constants::MATERIAL_BIND_GROUP) @binding(102) var<storage> toon_indices: array<ToonIndices>;
+@if(BINDLESS) @group(constants::MATERIAL_BIND_GROUP) @binding(101) var<storage> toon_array: array<Toon>;
+// this fragment's params, read once at its start
+var<private> toon: Toon;
 
 const LUX: f32 = 8000.0;
 const AMBIENT: f32 = 400.0;
@@ -204,6 +213,13 @@ fn gather(N: vec3<f32>, V: vec3<f32>, P: vec4<f32>, world_normal: vec3<f32>, fra
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    @if(!BINDLESS) {
+        toon = toon_uniform;
+    }
+    @if(BINDLESS) {
+        let toon_slot = mesh[in.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
+        toon = toon_array[toon_indices[toon_slot].material];
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
 
