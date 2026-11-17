@@ -106,7 +106,7 @@ impl LiveScene {
                     cam.insert(name.into(), V::N(r6(c[k])));
                 }
             }
-            cam.insert("bg".into(), V::S(bg));
+            cam.insert("bg".into(), V::s(bg));
         }
         camera(all, p, &mut cam);
         // its post-processing as a table, so a frame's sky, fog, grade or depth of field replaces the last whole
@@ -191,7 +191,7 @@ impl LiveScene {
             };
             for mut row in rows {
                 let Some(V::S(lid)) = row.get("id").cloned() else { continue };
-                let Some(key) = local.get(&lid) else { continue };
+                let Some(key) = local.get(&*lid) else { continue };
                 let id = match self.ids.get(key.as_str()) {
                     Some(id) => id.clone(),
                     None => {
@@ -202,8 +202,8 @@ impl LiveScene {
                         id
                     }
                 };
-                live_id.insert(lid.clone(), id.clone());
-                row.insert("id".into(), V::S(id.clone()));
+                live_id.insert(lid.to_string(), id.clone());
+                row.insert("id".into(), V::s(id.clone()));
                 // a light's colour, shadows and shafts as a table, so a frame's replaces the last whole (as_table)
                 if kind == "light" {
                     as_table(&mut row, light_set_col);
@@ -218,21 +218,23 @@ impl LiveScene {
             for k in ["attach_to", "bone_rows"] {
                 if let Some(V::S(refs)) = row.get(k) {
                     let ids: Vec<&str> = refs.split(',').map(|r| live_id.get(r).map_or(r, String::as_str)).collect();
-                    row.insert(k.into(), V::S(ids.join(",")));
+                    row.insert(k.into(), V::s(ids.join(",")));
                 }
             }
         }
         // a target of a kind that keeps its render id (a sprite, a 2D shape) is that row's
-        let kept: std::collections::HashSet<String> = others.iter().filter_map(|(_, r)| match r.get("id") { Some(V::S(i)) => Some(i.clone()), _ => None }).collect();
+        let kept: std::collections::HashSet<String> = others.iter().filter_map(|(_, r)| match r.get("id") { Some(V::S(i)) => Some(i.to_string()), _ => None }).collect();
         for (kind, mut row) in others {
-            let Some(V::S(mut id)) = row.get("id").cloned() else { continue };
+            let Some(V::S(id)) = row.get("id").cloned() else { continue };
+            let mut id = id.to_string();
             if let Some(V::S(t)) = row.get("target").cloned() {
+                let t = t.to_string();
                 let Some(to) = (if t.starts_with("ent") || t.starts_with("text") || t == "cam" || kept.contains(&t) { Some(t.clone()) } else { live_id.get(&t).cloned() }) else { continue };
                 id = id.replacen(&t, &to, 1);
-                row.insert("id".into(), V::S(id.clone()));
-                row.insert("target".into(), V::S(to));
+                row.insert("id".into(), V::s(id.clone()));
+                row.insert("target".into(), V::s(to));
             }
-            out.push((kind, id, row));
+            out.push((kind, id.to_string(), row));
         }
         (cam, out)
     }

@@ -209,7 +209,7 @@ pub struct Splats {
 
 fn s(v: &BTreeMap<String, V>, k: &str) -> Option<String> {
     match v.get(k) {
-        Some(V::S(s)) => Some(s.clone()),
+        Some(V::S(s)) => Some(s.to_string()),
         _ => None,
     }
 }

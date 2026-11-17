@@ -118,7 +118,7 @@ pub fn get(world: &World, e: Entity, col: &str) -> Option<V> {
     }
     let p = ids[STR].and_then(|id| er.get_by_id(id).ok())?;
     // SAFETY: STR components are String
-    Some(V::S(unsafe { p.deref::<String>() }.clone()))
+    Some(V::s(unsafe { p.deref::<String>() }.clone()))
 }
 
 /// Set a row's column: the value goes in the component of its type (a column can hold numbers in one row and text in
@@ -176,7 +176,7 @@ pub fn gather(world: &World) -> Cols {
             let v = if let Some(p) = ids[NUM].and_then(|id| er.get_by_id(id).ok()) {
                 Some(V::N(unsafe { *p.deref::<f64>() }))
             } else {
-                ids[STR].and_then(|id| er.get_by_id(id).ok()).map(|p| V::S(unsafe { p.deref::<String>() }.clone()))
+                ids[STR].and_then(|id| er.get_by_id(id).ok()).map(|p| V::s(unsafe { p.deref::<String>() }.clone()))
             };
             if let Some(v) = v {
                 c.set(r, col, v);

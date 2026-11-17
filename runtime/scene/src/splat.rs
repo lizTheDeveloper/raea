@@ -38,11 +38,11 @@ pub(super) fn rows(tracks: &[Track], p: &mut Program) {
         let its = filled(track);
         let id = format!("splat{k}");
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(id.clone()));
+        row.insert("id".into(), V::s(id.clone()));
         let first = &its[0].props;
-        row.insert("src".into(), V::S(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
+        row.insert("src".into(), V::s(src_path(first.get("src").and_then(Value::as_str).unwrap_or(""))));
         if let Some(to) = its.iter().find_map(|i| i.props.get("morphTo").and_then(Value::as_str)) {
-            row.insert("morph_to".into(), V::S(src_path(to)));
+            row.insert("morph_to".into(), V::s(src_path(to)));
         }
         if let Some(c) = its.iter().find_map(|i| i.props.get("morphCrop").and_then(Value::as_f64)) {
             row.insert("morph_crop".into(), V::N(c));
@@ -79,7 +79,7 @@ pub(super) fn rows(tracks: &[Track], p: &mut Program) {
                 continue;
             }
             let colors: Vec<String> = its.iter().map(|i| hex(i.props.get(prop)).unwrap_or(d.into())).collect();
-            row.insert(col.into(), V::S(colors[0].clone()));
+            row.insert(col.into(), V::s(colors[0].clone()));
             if col == "tint" && colors.iter().any(|c| *c != colors[0]) {
                 let c: Vec<[f64; 3]> = colors.iter().map(|c| rgb(c)).collect();
                 for (k, name) in ["tint_r", "tint_g", "tint_b"].iter().enumerate() {

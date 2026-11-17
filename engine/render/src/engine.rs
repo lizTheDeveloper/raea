@@ -96,7 +96,7 @@ use raea_sys_post::motion_blur;
 use raea_sys_post::dof;
 use raea_sys_post::effect_stack;
 // Bevy plugins compiled in by a crate that registers them, driven by generic rows and stepped by the frame index
-use raea_runtime_plugins as plugins;
+pub use raea_runtime_plugins as plugins;
 /// raea's modules as Bevy plugins, gathered in RaeaPlugins (docs/sdk.feature S6a)
 pub mod raea_plugins;
 

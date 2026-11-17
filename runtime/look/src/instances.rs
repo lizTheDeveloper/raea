@@ -60,9 +60,9 @@ pub fn instances_column(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str
     if recounted {
         eprintln!("WARN  Instances {}: how many copies it has changes over the shot; a frame with another count holds the placements before it", its[0].props.get("name").and_then(Value::as_str).unwrap_or("?"));
     }
-    row.insert("inst".into(), V::S(lists[0].clone()));
+    row.insert("inst".into(), V::s(lists[0].clone()));
     if lists.len() > 1 {
-        row.insert("inst_all".into(), V::S(lists.join("|")));
+        row.insert("inst_all".into(), V::s(lists.join("|")));
         exact(p, row, id, "inst_k", &k);
     }
 }

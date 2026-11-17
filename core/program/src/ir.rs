@@ -3,11 +3,27 @@
 
 use std::collections::BTreeMap;
 
-/// A value in a column: numbers (booleans are 1 and 0) or strings.
+/// A value in a column: numbers (booleans are 1 and 0) or strings. A string is shared (`Arc<str>`): a value read out of
+/// a column, a row's map or a frame copies a pointer, not its text (Col::get made a String per cell read, and a heavy shot
+/// copied hundreds of MB of strings a row).
 #[derive(Debug, Clone, PartialEq)]
 pub enum V {
     N(f64),
-    S(String),
+    S(std::sync::Arc<str>),
+}
+
+impl V {
+    /// A string value from anything that makes one.
+    pub fn s(s: impl Into<std::sync::Arc<str>>) -> V {
+        V::S(s.into())
+    }
+    /// The text, when it's a string.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            V::S(s) => Some(s),
+            V::N(_) => None,
+        }
+    }
 }
 
 impl V {

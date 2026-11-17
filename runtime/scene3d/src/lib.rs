@@ -164,7 +164,7 @@ fn graph_col(vals: &BTreeMap<String, V>) -> Result<Vec<GraphPart>, String> {
             Some(p) => return Err(format!("graph node {i}: its parent {p} isn't an earlier node")),
         };
         let clip = match n.get("clip") {
-            Some(serde_json::Value::String(c)) => Some(V::S(c.clone())),
+            Some(serde_json::Value::String(c)) => Some(V::s(c.clone())),
             Some(serde_json::Value::Number(c)) => c.as_f64().map(V::N),
             _ => None,
         };
@@ -181,7 +181,7 @@ fn names_col(vals: &BTreeMap<String, V>, k: &str) -> Vec<V> {
     let Some(V::S(s)) = vals.get(k) else { return vec![] };
     let Ok(serde_json::Value::Array(a)) = serde_json::from_str::<serde_json::Value>(s) else { return vec![] };
     a.iter().filter_map(|x| match x {
-        serde_json::Value::String(n) => Some(V::S(n.clone())),
+        serde_json::Value::String(n) => Some(V::s(n.clone())),
         serde_json::Value::Number(n) => n.as_f64().map(V::N),
         _ => None,
     }).collect()
@@ -304,7 +304,7 @@ pub fn sync_morphs(frame: Res<FrameRows>, models: Query<(Entity, &Model3d)>, kid
             let len = mw.weights().len();
             for (i, key) in m.morphs.iter().enumerate() {
                 let ix = match key {
-                    V::S(n) => names.iter().position(|x| x == n),
+                    V::S(n) => names.iter().position(|x| x.as_str() == &**n),
                     V::N(x) => Some(*x as usize).filter(|&x| x < len),
                 };
                 let Some(ix) = ix else { continue };

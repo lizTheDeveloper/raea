@@ -19,6 +19,13 @@ pub struct Timeline {
     /// per row: the columns some frame changes from the base (none for a still row), so a system can read only those
     /// once it has applied the rest (FrameRows::moves_only)
     moving: Vec<Vec<String>>,
+    /// per row: every column it can hold on some frame (its base columns and the ones a frame changes), so a row's
+    /// values are made from its own few columns, not by asking every column of the edit (`row_cols`)
+    row_cols: Vec<Vec<String>>,
+    /// every column some row moves by, once (`moving_ix` indexes it): a frame finds each column once, not per row
+    moving_names: Vec<String>,
+    /// per row: `moving`'s columns as places in `moving_names`
+    moving_ix: Vec<Vec<u32>>,
 }
 
 impl Timeline {
@@ -50,7 +57,30 @@ impl Timeline {
             std::sync::Arc::new(w)
         }).collect();
         let written = (0..frames).map(|f| evaluated[fresh.partition_point(|&e| e <= f) - 1].clone()).collect();
-        Ok(Timeline { frames, base, written, still, moving })
+        let mut row_cols: Vec<Vec<String>> = moving.clone();
+        for (c, col) in base.cols.iter() {
+            for (r, cs) in row_cols.iter_mut().enumerate() {
+                if col.has(r) && !cs.contains(c) {
+                    cs.push(c.clone());
+                }
+            }
+        }
+        let mut moving_names: Vec<String> = Vec::new();
+        let mut at: HashMap<String, u32> = HashMap::new();
+        let moving_ix = moving
+            .iter()
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| {
+                        *at.entry(c.clone()).or_insert_with(|| {
+                            moving_names.push(c.clone());
+                            (moving_names.len() - 1) as u32
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Timeline { frames, base, written, still, moving, row_cols, moving_names, moving_ix })
     }
 
     /// Whether row r's value of any of `cols` differs from its base on some frame (it moves over the edit).
@@ -61,6 +91,16 @@ impl Timeline {
     /// The columns some frame changes row r's value of (none for a still row or one out of range).
     pub fn moving(&self, r: usize) -> &[String] {
         self.moving.get(r).map_or(&[], Vec::as_slice)
+    }
+
+    /// The columns any row moves by, and each row's as places among them (`moving`, indexed).
+    pub fn moving_indexed(&self) -> (&[String], &[Vec<u32>]) {
+        (&self.moving_names, &self.moving_ix)
+    }
+
+    /// Every column row r holds on some frame (None out of range): its values at any frame are these columns' there.
+    pub fn row_cols(&self, r: usize) -> Option<&[String]> {
+        self.row_cols.get(r).map(Vec::as_slice)
     }
 
     /// Whether row r's values are the same on every frame (out of range: false).

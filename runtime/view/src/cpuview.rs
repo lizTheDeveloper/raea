@@ -257,19 +257,20 @@ impl CpuView {
                 if f < from || f >= to || num(v, "opacity", 1.0) as f32 as f64 <= 0.0 {
                     continue;
                 }
-                let Some(V::S(src)) = v.get("src").cloned() else { return Err(format!("clip {}: no src", c.id)) };
+                let Some(V::S(src)) = v.get("src") else { return Err(format!("clip {}: no src", c.id)) };
+                let src = src.to_string();
                 let slot = {
-                    let s = slots_of.entry(src.clone()).or_insert(0);
+                    let s = slots_of.entry(src.to_string()).or_insert(0);
                     *s += 1;
                     *s - 1
                 };
                 let at = num(v, "src_in", 0.0) + (f - from) as f64 / fps;
-                if !self.decoders.contains_key(&(src.clone(), slot)) {
+                if !self.decoders.contains_key(&(src.to_string(), slot)) {
                     let p = raea_sys_frame::resolve_src(&self.rows, &src, &self.dir)?;
                     let d = self.backend.open_video(&p)?;
-                    self.decoders.insert((src.clone(), slot), d);
+                    self.decoders.insert((src.to_string(), slot), d);
                 }
-                let dec = self.decoders.get_mut(&(src.clone(), slot)).unwrap();
+                let dec = self.decoders.get_mut(&(src.to_string(), slot)).unwrap();
                 let (idx, dw, dh) = (dec.index_at(at), dec.info().width, dec.info().height);
                 need.push((c.clone(), src, slot, at, idx, dw, dh));
             }

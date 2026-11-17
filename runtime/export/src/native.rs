@@ -52,7 +52,19 @@ fn t_ms(t: std::time::Instant) -> f64 {
 }
 
 /// RAEA_NATIVE_TRACE: a drawn frame's time by part (ms summed): the page synced and painted, the 3D drawn, its target read back
-static PARTS: std::sync::Mutex<[f64; 3]> = std::sync::Mutex::new([0.0; 3]);
+static PARTS: std::sync::Mutex<[f64; 16]> = std::sync::Mutex::new([0.0; 16]);
+
+/// RAEA_GS_SERIAL=1 (with RAEA_NATIVE_TRACE): the GPU waited for after each part of the GPU path, so each part's GPU
+/// time shows on its own (parts 12..15), at the cost of the overlap
+pub(crate) fn serial_wait(k: usize) {
+    if trace() && std::env::var_os("RAEA_GS_SERIAL").is_some() {
+        if let Some(g) = raea_runtime_view::gpuview::paint_device() {
+            let t = std::time::Instant::now();
+            let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) });
+            part(k, t);
+        }
+    }
+}
 
 pub(crate) fn part(k: usize, t: std::time::Instant) {
     if trace() {
@@ -442,13 +454,13 @@ fn v_json(v: &V) -> Value {
     match v {
         V::N(x) if x.is_finite() => json!(x),
         V::N(x) => json!({ "nf": x.to_string() }),
-        V::S(s) => Value::String(s.clone()),
+        V::S(s) => Value::String(s.to_string()),
     }
 }
 
 fn v_of(j: &Value) -> V {
     match j {
-        Value::String(s) => V::S(s.clone()),
+        Value::String(s) => V::s(s.clone()),
         Value::Object(o) => V::N(o.get("nf").and_then(Value::as_str).and_then(|s| s.parse().ok()).unwrap_or(f64::NAN)),
         _ => V::N(j.as_f64().unwrap_or(0.0)),
     }
@@ -1159,6 +1171,8 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     let aov = AOV.load(std::sync::atomic::Ordering::Relaxed);
     let kept = if keeping_engine() { KEPT_ENGINE.with(|k| k.borrow_mut().take()).filter(|k| (k.0, k.1, k.2) == (w, h, aov)) } else { None };
     let reused = kept.is_some();
+    // a film shot's engine without the plugins its rows don't use (raea_runtime_plugins::install_lean)
+    raea_render::engine::plugins::LEAN.store(true, std::sync::atomic::Ordering::Relaxed);
     cx.scene3d = match prog {
     None => {
         if let Some(k) = kept {
@@ -1343,6 +1357,32 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             ring.made(),
             t_ms(tw)
         );
+        if let Some(e) = cx.scene3d.as_mut() {
+            let w = e.world_mut();
+            let mut q = w.query::<(Option<&bevy::light::PointLight>, Option<&bevy::light::SpotLight>, Option<&bevy::light::DirectionalLight>)>();
+            let (mut p, mut ps, mut sp, mut sps, mut d, mut ds) = (0, 0, 0, 0, 0, 0);
+            for (a, b, c) in q.iter(w) {
+                if let Some(a) = a { p += 1; ps += a.shadow_maps_enabled as usize; }
+                if let Some(b) = b { sp += 1; sps += b.shadow_maps_enabled as usize; }
+                if let Some(c) = c { d += 1; ds += c.shadow_maps_enabled as usize; }
+            }
+            let meshes = w.query::<&bevy::mesh::Mesh3d>().iter(w).count();
+            let casters = w.query_filtered::<&bevy::mesh::Mesh3d, bevy::prelude::Without<bevy::light::NotShadowCaster>>().iter(w).count();
+            eprintln!("raea native: lights: point {p} ({ps} with shadows), spot {sp} ({sps}), directional {d} ({ds}); meshes {meshes}, {casters} casting shadows");
+        }
+        let pc = |i: usize| raea_sys_shader::own_live::PATCHED[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;
+        eprintln!("raea native: own:uniforms a frame: {:.1} applied, {:.1} changed, {:.1} storage buffers written", pc(0), pc(1), pc(2));
+        let fast = |i: usize| bevy::render::material_bind_groups::RAEA_FAST[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;
+        eprintln!("raea native: materials a frame: {:.1} updated in place, {:.1} made again", fast(0), fast(1));
+        let mut by: Vec<_> = raea_sys_frame::VALS_BY.lock().unwrap().iter().map(|(k, v)| (*v, *k)).collect();
+        by.sort_by(|a, b| b.0.cmp(&a.0));
+        for (c, (f, l)) in by.iter().take(12) {
+            eprintln!("raea native: vals from {f}:{l}: {:.0} a frame", *c as f64 / n);
+        }
+        for (k, ms, calls) in raea_sys_frame::sys_times() {
+            eprintln!("raea native: system {k}: {:.2} ms a frame ({calls} calls)", ms / n);
+        }
+        eprintln!("raea native: gpu path per frame (ms): live3d {:.2}, page sync {:.2}, page draw {:.2}, screens {:.2}, 3D update {:.2}, feed {:.2}, start copy {:.2}, finish copy {:.2}, black+send {:.2}, png encode (writer threads) {:.2}; serial GPU waits: page {:.2}, 3D {:.2}, feed+copy {:.2}", p[3] / n, p[4] / n, p[5] / n, p[6] / n, p[7] / n, p[12] / n, p[8] / n, p[9] / n, p[10] / n, p[11] / n, p[13] / n, p[14] / n, p[15] / n);
     }
     raea_runtime_react::startup_mark("native: frames written");
     let clipping = FED_CLIPPING.lock().unwrap().take().and_then(|t| t.join().ok()).unwrap_or_default();

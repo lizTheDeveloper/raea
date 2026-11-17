@@ -67,18 +67,19 @@ impl GpuView {
                 continue;
             }
             let Some(V::S(src)) = v.get("src") else { return Err(format!("clip {}: no src", c.id)) };
+            let src = &src.to_string();
             let slot = {
-                let s = slots_of.entry(src.clone()).or_insert(0);
+                let s = slots_of.entry(src.to_string()).or_insert(0);
                 *s += 1;
                 *s - 1
             };
             let at = num(v, "src_in", 0.0) + (f - from) as f64 / fps;
-            if !self.decoders.contains_key(&(src.clone(), slot)) {
+            if !self.decoders.contains_key(&(src.to_string(), slot)) {
                 let p = raea_sys_frame::resolve_src(&self.rows, src, &self.dir)?;
                 let d = self.backend.open_video(&p)?;
-                self.decoders.insert((src.clone(), slot), d);
+                self.decoders.insert((src.to_string(), slot), d);
             }
-            let dec = self.decoders.get_mut(&(src.clone(), slot)).unwrap();
+            let dec = self.decoders.get_mut(&(src.to_string(), slot)).unwrap();
             // the pool is keyed by the frame's index, known without decoding: a frame in the pool isn't decoded again
             let idx = dec.index_at(at);
             let (dw, dh) = (dec.info().width, dec.info().height);
