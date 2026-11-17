@@ -210,21 +210,21 @@ pub fn cached(expr: &str) -> Result<std::sync::Arc<Tris>, String> {
         if !*kept {
             *kept = true;
             if let Some(p) = kept::place(expr).filter(|p| !p.exists()) {
-                kept::write(&p, t);
+                kept::write(&p, expr, t);
             }
         }
         return Ok(t.clone());
     }
     // made by this build before, on disk (kept.rs): read back as it was written
     let kept = kept::place(expr);
-    let (t, on_disk) = match kept.as_deref().and_then(kept::read) {
+    let (t, on_disk) = match kept.as_deref().and_then(|p| kept::read(p, expr)) {
         Some(t) => (std::sync::Arc::new(t), true),
         None => {
             let t0 = std::time::Instant::now();
             let t = std::sync::Arc::new(tris(&solid(expr)?));
             let dear = t0.elapsed() >= std::time::Duration::from_millis(50);
             if let (Some(p), true) = (&kept, dear) {
-                kept::write(p, &t);
+                kept::write(p, expr, &t);
             }
             (t, dear)
         }
@@ -270,16 +270,41 @@ mod tests {
     fn a_kept_mesh_reads_back_as_it_was_written() {
         let dir = std::env::temp_dir().join(format!("raea-shape-kept-{}", std::process::id()));
         let p = dir.join("a.tris");
-        let t = tris(&solid("minus(box(2, 2, 2), cylinder(0.5, 3))").unwrap());
-        assert!(kept::read(&p).is_none());
-        kept::write(&p, &t);
-        let back = kept::read(&p).unwrap();
+        let e = "minus(box(2, 2, 2), cylinder(0.5, 3))";
+        let t = tris(&solid(e).unwrap());
+        assert!(kept::read(&p, e).is_none());
+        kept::write(&p, e, &t);
+        let back = kept::read(&p, e).unwrap();
         assert_eq!(back.positions.iter().flatten().map(|x| x.to_bits()).collect::<Vec<_>>(), t.positions.iter().flatten().map(|x| x.to_bits()).collect::<Vec<_>>());
         assert_eq!(back.normals.iter().flatten().map(|x| x.to_bits()).collect::<Vec<_>>(), t.normals.iter().flatten().map(|x| x.to_bits()).collect::<Vec<_>>());
         // a file cut short isn't a mesh
         let whole = std::fs::read(&p).unwrap();
         std::fs::write(&p, &whole[..whole.len() - 5]).unwrap();
-        assert!(kept::read(&p).is_none());
+        assert!(kept::read(&p, e).is_none());
+        // a mesh byte changed: its hash refuses it
+        let mut bad = whole.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        std::fs::write(&p, &bad).unwrap();
+        assert!(kept::read(&p, e).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_kept_mesh_is_never_served_for_another_expression() {
+        // a forced collision: expression A's mesh kept where expression B's would be (as if their names collided, or a
+        // file was planted there); B's read refuses it, A's still reads it
+        let dir = std::env::temp_dir().join(format!("raea-shape-collide-{}", std::process::id()));
+        let (a, b) = ("box(1, 1, 1)", "box(1, 1, 2)");
+        let p = dir.join("same-name.tris");
+        kept::write(&p, a, &tris(&solid(a).unwrap()));
+        let before = kept::REFUSED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(kept::read(&p, b).is_none());
+        assert!(kept::REFUSED.load(std::sync::atomic::Ordering::Relaxed) > before);
+        assert!(kept::read(&p, a).is_some());
+        // the key covers the length-prefixed expression: no two expressions share one, and the names differ
+        assert_ne!(kept::key(a), kept::key(b));
+        assert_ne!(kept::key("ab"), kept::key("a\u{0}b"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

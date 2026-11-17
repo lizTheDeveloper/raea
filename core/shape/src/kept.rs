@@ -10,6 +10,10 @@
 //! (2048), oldest first, when a process first uses it; a process writes at most 4096 solids and 512 MB; lib.rs's
 //! `cached` writes a solid only once it's asked for twice, or took 50 ms or more to make (a one-off expression made
 //! every frame never reaches the disk).
+//!
+//! Checked (security review): a file is named by a blake3 of the length-prefixed expression and the made_by() tag
+//! (`key`), and carries the whole key and a blake3 of its mesh in its header; `read` refuses a file kept for another
+//! expression or whose mesh doesn't match (a miss, made again, counted in REFUSED and said once).
 
 use crate::Tris;
 use std::path::PathBuf;
@@ -100,48 +104,90 @@ fn made_by() -> Vec<u8> {
     format!("src:{}", env!("RAEA_SHAPE_SRC_HASH")).into_bytes()
 }
 
+/// The key a kept solid is named and checked by: a blake3 over the length-prefixed expression and the length-prefixed
+/// made_by() tag (security review: an FNV-1a 64 name could collide, by accident or by design, and serve the wrong mesh
+/// silently). The file is named by its first 16 bytes and carries all 32 in its header, which `read` checks.
+pub fn key(expr: &str) -> [u8; 32] {
+    let by = made_by();
+    let mut h = blake3::Hasher::new();
+    h.update(b"raea-tris-2\0");
+    h.update(&(expr.len() as u64).to_le_bytes());
+    h.update(expr.as_bytes());
+    h.update(&(by.len() as u64).to_le_bytes());
+    h.update(&by);
+    *h.finalize().as_bytes()
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// Where the mesh for `expr` is kept, or None when nothing is (off, or no caches folder here).
 pub fn place(expr: &str) -> Option<PathBuf> {
-    let root = root()?;
-    let mut key: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in expr.as_bytes().iter().chain(made_by().iter()) {
-        key = (key ^ *b as u64).wrapping_mul(0x100_0000_01b3);
-    }
-    Some(root.join(format!("{key:016x}-{:x}.tris", expr.len())))
+    Some(root()?.join(format!("{}.tris", hex(&key(expr)[..16]))))
 }
 
 /// Solids and bytes this process has written; past 4096 or 512 MB it writes no more (said once): a scene whose
 /// solids change every frame fills no folder.
 static WROTE: std::sync::Mutex<(usize, u64, bool)> = std::sync::Mutex::new((0, 0, false));
 
-const MAGIC: &[u8; 8] = b"raeatri1";
+/// "raeatri2", the expression's key (32 bytes, `key`), a blake3 of the mesh bytes (32), the vertex count (u64), then
+/// the positions and the normals (f32 x 3 each). raeatri1 files (no key) are never read: a miss, made again.
+const MAGIC: &[u8; 8] = b"raeatri2";
+const HEAD: usize = 8 + 32 + 32 + 8;
 
-/// The mesh kept at `p`: None when there is none or it isn't whole (a write that was cut short).
-pub fn read(p: &std::path::Path) -> Option<Tris> {
+/// Kept solids refused on read because their key or bytes didn't match (a name collision, a damaged or planted file):
+/// each a miss, made again; the first is said.
+pub static REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn refused(p: &std::path::Path, why: &str) {
+    if REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+        eprintln!("raea: kept solids: {} refused ({why}); made again (further refusals counted in raea_core_shape::kept::REFUSED)", p.display());
+    }
+}
+
+/// The mesh kept at `p` for `expr`: None when there is none, it isn't whole (a write that was cut short), or it was
+/// kept for another expression or its bytes don't match their hash (refused, counted).
+pub fn read(p: &std::path::Path, expr: &str) -> Option<Tris> {
     let b = std::fs::read(p).ok()?;
-    let n = u64::from_le_bytes(b.get(8..16)?.try_into().ok()?) as usize;
-    if &b[..8] != MAGIC || b.len() != 16 + n * 24 {
+    if b.len() < HEAD || &b[..8] != MAGIC {
+        return None;
+    }
+    if b[8..40] != key(expr) {
+        refused(p, "kept for another expression");
+        return None;
+    }
+    let n = u64::from_le_bytes(b[72..80].try_into().ok()?) as usize;
+    if n.checked_mul(24).and_then(|x| x.checked_add(HEAD)) != Some(b.len()) {
+        return None;
+    }
+    if b[40..72] != *blake3::hash(&b[HEAD..]).as_bytes() {
+        refused(p, "its mesh doesn't match its hash");
         return None;
     }
     let f = |at: usize| f32::from_le_bytes(b[at..at + 4].try_into().unwrap());
     let run = |from: usize| (0..n).map(|i| [f(from + i * 12), f(from + i * 12 + 4), f(from + i * 12 + 8)]).collect::<Vec<_>>();
-    Some(Tris { positions: run(16), normals: run(16 + n * 12) })
+    Some(Tris { positions: run(HEAD), normals: run(HEAD + n * 12) })
 }
 
-/// `t` kept at `p`, written beside it and moved into place so a reader never sees half of it. Failing is fine: the
-/// mesh is made again next time.
-pub fn write(p: &std::path::Path, t: &Tris) {
+/// `t`, the mesh of `expr`, kept at `p`: written beside it and moved into place so a reader never sees half of it.
+/// Failing is fine: the mesh is made again next time.
+pub fn write(p: &std::path::Path, expr: &str, t: &Tris) {
     if t.positions.len() != t.normals.len() {
         return;
     }
-    let mut b = Vec::with_capacity(16 + t.positions.len() * 24);
-    b.extend_from_slice(MAGIC);
-    b.extend_from_slice(&(t.positions.len() as u64).to_le_bytes());
+    let mut body = Vec::with_capacity(t.positions.len() * 24);
     for v in t.positions.iter().chain(&t.normals) {
         for x in v {
-            b.extend_from_slice(&x.to_le_bytes());
+            body.extend_from_slice(&x.to_le_bytes());
         }
     }
+    let mut b = Vec::with_capacity(HEAD + body.len());
+    b.extend_from_slice(MAGIC);
+    b.extend_from_slice(&key(expr));
+    b.extend_from_slice(blake3::hash(&body).as_bytes());
+    b.extend_from_slice(&(t.positions.len() as u64).to_le_bytes());
+    b.extend_from_slice(&body);
     {
         let mut w = WROTE.lock().unwrap();
         if w.0 >= 4096 || w.1 + b.len() as u64 > 512 << 20 {

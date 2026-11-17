@@ -16,6 +16,8 @@ serde_json = "1"
 # blended distance fields and generators (trees, lofts, terrain, rosettes), meshed then closed into solids
 raea-core-sdf = { path = "../sdf" }
 raea-core-grow = { path = "../grow" }
+# kept solids named and checked by a blake3 of their expression (kept.rs)
+blake3 = "1"
 
 [build-dependencies]
 # the kept-solid key's source hash (build.rs)
