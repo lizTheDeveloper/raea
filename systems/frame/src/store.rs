@@ -1,6 +1,6 @@
 //! The edit's store: its rows as entities in a Bevy World. A row is an entity with a
 //! RowKey (kind, id); each of its columns is a component registered at run time per (kind, column, type), numbers as
-//! f64 and text as String, so a kind's rows share tables and each column is contiguous there. The World keeps the
+//! f64 and text as Arc<str>, so a kind's rows share tables and each column is contiguous there. The World keeps the
 //! rows' insertion order (the edit's order) in the Schema resource. The evaluator reads the base through `gather`,
 //! which turns it into columns (eval::Cols); a frame's values are derived from the base and never written into it.
 
@@ -33,7 +33,7 @@ pub struct Schema {
 }
 
 unsafe fn drop_string(p: OwningPtr<'_>) {
-    unsafe { p.drop_as::<String>() };
+    unsafe { p.drop_as::<std::sync::Arc<str>>() };
 }
 
 fn schema(world: &mut World) -> &mut Schema {
@@ -49,8 +49,8 @@ fn column(world: &mut World, kind: &str, col: &str, ty: usize) -> ComponentId {
         return id;
     }
     let name = format!("{kind}.{col}{}", if ty == NUM { "" } else { ":text" });
-    let (layout, drop) = if ty == NUM { (Layout::new::<f64>(), None) } else { (Layout::new::<String>(), Some(drop_string as unsafe fn(OwningPtr<'_>))) };
-    // SAFETY: f64 and String are Send + Sync, and drop_string drops exactly a String
+    let (layout, drop) = if ty == NUM { (Layout::new::<f64>(), None) } else { (Layout::new::<std::sync::Arc<str>>(), Some(drop_string as unsafe fn(OwningPtr<'_>))) };
+    // SAFETY: f64 and Arc<str> are Send + Sync, and drop_string drops exactly an Arc<str> (V::S's text)
     let id = world.register_component_with_descriptor(unsafe { ComponentDescriptor::new_with_layout(name, StorageType::Table, layout, drop, true, false, ComponentCloneBehavior::Default, None) });
     schema(world).cols.entry(kind.to_string()).or_default().entry(col.to_string()).or_default()[ty] = Some(id);
     id
@@ -117,8 +117,8 @@ pub fn get(world: &World, e: Entity, col: &str) -> Option<V> {
         return Some(V::N(unsafe { *p.deref::<f64>() }));
     }
     let p = ids[STR].and_then(|id| er.get_by_id(id).ok())?;
-    // SAFETY: STR components are String
-    Some(V::s(unsafe { p.deref::<String>() }.clone()))
+    // SAFETY: STR components are Arc<str>
+    Some(V::S(unsafe { p.deref::<std::sync::Arc<str>>() }.clone()))
 }
 
 /// Set a row's column: the value goes in the component of its type (a column can hold numbers in one row and text in
@@ -134,7 +134,7 @@ pub fn set(world: &mut World, e: Entity, col: &str, v: V) {
             ew.remove_by_id(o);
         }
     }
-    // SAFETY: the component for `ty` has the layout of f64 (NUM) or String (STR), and the value moves into it
+    // SAFETY: the component for `ty` has the layout of f64 (NUM) or Arc<str> (STR), and the value moves into it
     match v {
         V::N(x) => OwningPtr::make(x, |p| unsafe {
             ew.insert_by_id(id, p);
@@ -176,7 +176,7 @@ pub fn gather(world: &World) -> Cols {
             let v = if let Some(p) = ids[NUM].and_then(|id| er.get_by_id(id).ok()) {
                 Some(V::N(unsafe { *p.deref::<f64>() }))
             } else {
-                ids[STR].and_then(|id| er.get_by_id(id).ok()).map(|p| V::s(unsafe { p.deref::<String>() }.clone()))
+                ids[STR].and_then(|id| er.get_by_id(id).ok()).map(|p| V::S(unsafe { p.deref::<std::sync::Arc<str>>() }.clone()))
             };
             if let Some(v) = v {
                 c.set(r, col, v);
