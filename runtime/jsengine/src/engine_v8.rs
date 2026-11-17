@@ -17,6 +17,10 @@ fn init() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         v8::V8::set_flags_from_string("--stack-size=32000");
+        // RAEA_V8_FLAGS: V8's own flags, for measuring (e.g. "--prof --logfile=/tmp/v8-%p.log --no-logfile-per-isolate")
+        if let Ok(f) = std::env::var("RAEA_V8_FLAGS") {
+            v8::V8::set_flags_from_string(&f);
+        }
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
