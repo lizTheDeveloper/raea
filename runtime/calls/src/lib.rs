@@ -32,6 +32,7 @@ pub mod ml;
 pub mod ecs;
 /// raea/blender's batches, to the Blender `raea blender run SCRIPT.ts` started (sdk/blender)
 pub mod blender;
+mod track;
 mod media;
 mod solid;
 
@@ -286,6 +287,14 @@ pub fn register() {
                 out["height"] = json!(h);
             }
             Ok(out)
+        });
+        // one frame of a shot's per-body tracks from an RTK1 sidecar (track.rs), so they never enter the JS bundle
+        raea_native::register("track.at", "{ path: string; frame: number; bodies?: string[] }", "{ fps: number; frame0: number; frames: number; frame: number; bodies: Record<string, number[]> }", "frame `frame` of an RTK1 per-body track file (from the edit's folder; read once and kept): each body's values, or the named ones; a frame past either end holds that end (design/engine-native-coverage.md 2b)", |v| {
+            let p = s(v, "path")?;
+            let f = v.get("frame").and_then(Value::as_f64).ok_or("frame: a number")?.floor() as i64;
+            let only: Option<Vec<String>> = v.get("bodies").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+            let t = track::load(&asset_path(&p)?)?;
+            Ok(track::at(&t, f, only.as_deref()))
         });
         // a file's bytes read now, for a loader that parses them in JS (three's FileLoader under R3F: useGLTF)
         raea_native::register("asset.read", "{ path: string }", "{ path: string; base64: string }", "a file's bytes (absolute, from the edit's folder, or an http(s) URL through raea's cache), read now, as base64 (R3F's loaders, docs/r3f.feature R3F13)", |v| {
