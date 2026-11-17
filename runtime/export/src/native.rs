@@ -777,7 +777,19 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         raea_runtime_react::startup_mark("native: the shot has no 3D or carries state; rendered the usual way");
         return Ok(None);
     };
-    let Some(prog) = shot.prog.as_ref() else { return Ok(None) };
+    // a shot with no 3D (a page alone: the making-of, titles, 2D demos) is drawn natively too, its page replayed and
+    // painted on the GPU (bevy_fed_gpu draws a page with no 3D under it); it needs that GPU path, so where it isn't
+    // taken (--alpha, --aov, a single PNG, RAEA_PAGE_DUMP, RAEA_NATIVE_GPU=0) it's rendered the usual way, and says so
+    // (it was silent, after a whole bake, and the coverage counted it native)
+    let prog = shot.prog.as_ref();
+    if prog.is_none() {
+        let gpu_ok = out_ext(out).is_empty() && !AOV.load(std::sync::atomic::Ordering::Relaxed) && !ALPHA.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("RAEA_PAGE_DUMP").is_none() && std::env::var("RAEA_NATIVE_GPU").as_deref() != Ok("0") && std::env::var("RAEA_NATIVE_PIPE").as_deref() != Ok("0") && std::env::var("RAEA_NATIVE_PAGE").as_deref() != Ok("0");
+        if !gpu_ok || raea_runtime_view::gpuview::paint_device().is_none() {
+            eprintln!("NATIVE  not native: the shot has no 3D and its page draws natively only on the GPU path (a folder of PNGs, no --alpha/--aov, RAEA_NATIVE_GPU on); rendered the usual way");
+            return Ok(None);
+        }
+        eprintln!("NATIVE  page only: the shot has no 3D; its page replayed and drawn on the GPU");
+    }
     let keep_dir = std::env::var_os("RAEA_KEEP").map(PathBuf::from).filter(|v| v.starts_with("/"));
     let work = keep_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("raea-cli-n{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&work);
@@ -790,15 +802,24 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     one_thread(&mut app);
     raea_gpu_device::check::mem_fits(w, h, None)?;
     // the 3D's rows, and their map files decoded and mipped beside the page's and the engine's opening
-    let inserted = raea_render::inserted_of(prog);
-    raea_sys_material::maps::prefetch_start(inserted.clone(), dir.to_path_buf());
+    let inserted = prog.map(raea_render::inserted_of).unwrap_or_default();
+    if prog.is_some() {
+        raea_sys_material::maps::prefetch_start(inserted.clone(), dir.to_path_buf());
+    }
     let mut page = raea_runtime_page::BevyPage::new(w, h, dir)?;
     let mut cx = Ctx { dir, work: &work, sounds: Vec::new(), scene: Vec::new(), clear: None, marker: None, mix: None, audible: HashMap::new(), brand: page_css(dir, w, js), manifest: MANIFEST.lock().unwrap().as_ref().map(|_| Vec::new()), now: 0, said: Default::default(), made: HashMap::new(), scene3d: None, live3d: None };
     let t_open = std::time::Instant::now();
     let aov = AOV.load(std::sync::atomic::Ordering::Relaxed);
     let kept = if keeping_engine() { KEPT_ENGINE.with(|k| k.borrow_mut().take()).filter(|k| (k.0, k.1, k.2) == (w, h, aov)) } else { None };
     let reused = kept.is_some();
-    cx.scene3d = Some(match kept {
+    cx.scene3d = match prog {
+    None => {
+        if let Some(k) = kept {
+            KEPT_ENGINE.with(|c| *c.borrow_mut() = Some(k));
+        }
+        None
+    }
+    Some(prog) => Some(match kept {
         Some((_, _, _, mut e)) => match e.reload(prog, &inserted) {
             Ok(()) => e,
             Err(why) => {
@@ -808,7 +829,8 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             }
         },
         None => aov_on(raea_render::engine::Engine::new_live(prog, &inserted, dir)?),
-    });
+    }),
+    };
     raea_runtime_react::startup_mark(&format!("native: the 3D's engine {} ({:.0} ms)", if reused { "reloaded" } else { "open" }, t_ms(t_open)));
     // its first frame warmed up as a live engine's is (Engine::warm)
     if let Some(e) = cx.scene3d.as_mut() {
@@ -860,8 +882,7 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             Ok(())
         })?;
         if black {
-            let e = cx.scene3d.as_ref().ok_or("no 3D")?;
-            raea_gpu_device::check::black_twice(f, pg.canary().and_then(|()| e.canary())).map_err(|err| format!("{err}; the {i} frames before it are in {}", out.display()))?;
+            raea_gpu_device::check::black_twice(f, pg.canary().and_then(|()| cx.scene3d.as_ref().map_or(Ok(()), |e| e.canary()))).map_err(|err| format!("{err}; the {i} frames before it are in {}", out.display()))?;
         }
         Ok(())
     };
