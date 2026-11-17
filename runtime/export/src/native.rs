@@ -68,7 +68,25 @@ fn trace() -> bool {
 fn mem_available_gb() -> Option<f64> {
     let t = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kb: f64 = t.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb / 1048576.0)
+    let host = kb / 1048576.0;
+    // in a container /proc/meminfo is the host's (vast 60948090: 381 GB free under a 196 GB cap): the cgroup's room
+    // (its limit less what it uses) caps it, cgroup v2 then v1
+    Some(cgroup_room_gb().map_or(host, |c| c.min(host)))
+}
+
+/// The memory this process's cgroup has left (limit - usage), in GB; None with no limit (or none readable).
+fn cgroup_room_gb() -> Option<f64> {
+    let num = |p: &str| std::fs::read_to_string(p).ok().and_then(|t| t.trim().parse::<f64>().ok());
+    // v2: memory.max ("max" when unlimited) and memory.current, at the process's own cgroup path (or the root)
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string())));
+    for dir in own.iter().map(|p| format!("/sys/fs/cgroup{p}")).chain(std::iter::once("/sys/fs/cgroup".to_string())) {
+        if let (Some(max), Some(cur)) = (num(&format!("{dir}/memory.max")), num(&format!("{dir}/memory.current"))) {
+            return Some(((max - cur) / 1073741824.0).max(0.0));
+        }
+    }
+    // v1: memory.limit_in_bytes (a huge number when unlimited) and memory.usage_in_bytes
+    let (max, cur) = (num("/sys/fs/cgroup/memory/memory.limit_in_bytes")?, num("/sys/fs/cgroup/memory/memory.usage_in_bytes")?);
+    (max < 1e15).then(|| ((max - cur) / 1073741824.0).max(0.0))
 }
 
 /// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and as many as its share of
@@ -635,8 +653,39 @@ impl<'a> Cur<'a> {
 }
 
 /// The Program from a native-4 header's meta and strings and its binary section.
+/// The most a kept bake may hold once unpacked (RAEA_BAKE_MAX_BYTES; 1 GiB: a heavy native-4 shot is ~30 MB, a native-3
+/// one up to ~230 MB). A larger one is refused before it's parsed (a zstd bomb can't make it allocate past this).
+fn bake_max_bytes() -> u64 {
+    std::env::var("RAEA_BAKE_MAX_BYTES").ok().and_then(|v| v.parse().ok()).filter(|n: &u64| *n > 0).unwrap_or(1 << 30)
+}
+
+/// A kept bake's bytes unpacked, refused past `max` (a bounded decoder: nothing past the limit is allocated).
+fn unzstd_capped(b: &[u8], max: u64) -> R<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    zstd::stream::read::Decoder::new(b).map_err(|e| e.to_string())?.take(max + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    if out.len() as u64 > max {
+        return Err(format!("unpacks past {max} bytes (RAEA_BAKE_MAX_BYTES)"));
+    }
+    Ok(out)
+}
+
+/// The most a native-4 reader copies out of the string table into the Program (2 GiB): each cell and ease naming a
+/// string takes its own copy (V::S holds a String here), so a crafted bake naming one big string from many cells would
+/// multiply it; past this it's refused. (On Arc<str> strings every cell shares one, and this only counts.)
+const STRING_COPY_BUDGET: usize = 2 << 30;
+
 fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
-    let s = |i: usize| strings.get(i).cloned().ok_or_else(|| format!("the bake's 3D names string {i} of {}", strings.len()));
+    prog_from_bin_capped(meta, strings, bin, STRING_COPY_BUDGET)
+}
+
+fn prog_from_bin_capped(meta: &Value, strings: &[String], bin: &[u8], budget: usize) -> R<Program> {
+    let left = std::cell::Cell::new(budget);
+    let s = |i: usize| -> R<String> {
+        let t = strings.get(i).ok_or_else(|| format!("the bake's 3D names string {i} of {}", strings.len()))?;
+        left.set(left.get().checked_sub(t.len()).ok_or("the bake's 3D copies more string bytes than a bake may hold")?);
+        Ok(t.clone())
+    };
     let mut c = Cur { b: bin, at: 0 };
     let mut p = Program {
         fps: meta["fps"].as_f64().ok_or("no fps")?,
@@ -673,7 +722,12 @@ fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
         let fs: Vec<i64> = (0..n).map(|_| c.u64().map(|x| x as i64)).collect::<R<_>>()?;
         let vs: Vec<f64> = (0..n).map(|_| c.u64().map(f64::from_bits)).collect::<R<_>>()?;
         let eases: Vec<String> = match c.u8()? {
-            0 => vec![s(c.u32()?)?; n],
+            0 => {
+                let e = s(c.u32()?)?;
+                // n copies of it: counted against the budget as copies
+                left.set(left.get().checked_sub(e.len().saturating_mul(n.saturating_sub(1))).ok_or("the bake's 3D copies more string bytes than a bake may hold")?);
+                vec![e; n]
+            }
             1 => (0..n).map(|_| c.u32().and_then(&s)).collect::<R<_>>()?,
             t => return Err(format!("the bake's 3D has an ease table of kind {t}")),
         };
@@ -1021,7 +1075,7 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
         let mut bin: Option<Vec<u8>> = None;
         let read = std::fs::read(p)
             .map_err(|e| e.to_string())
-            .and_then(|b| zstd::decode_all(&b[..]).map_err(|e| e.to_string()))
+            .and_then(|b| unzstd_capped(&b[..], bake_max_bytes()))
             .and_then(split_kept)
             .map(|(t, b)| {
                 mark("zstd");
@@ -1689,6 +1743,47 @@ mod bin_tests {
         let mut huge = bin.clone();
         huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(prog_from_bin(&meta, &st.list, &huge).is_err(), "a count past the bytes");
+    }
+
+    #[test]
+    fn a_big_string_named_many_times_is_refused() {
+        // one 1 MB string named by 2,000 cells: 2 GB of copies against a 64 MB budget
+        let mut p = Program { fps: 30.0, width: 8, height: 8, frames: 1, ..Default::default() };
+        let big = "x".repeat(1 << 20);
+        let rows: Vec<BTreeMap<String, V>> = (0..2000).map(|i| [("id".to_string(), V::S(format!("m{i}"))), ("shape".to_string(), V::S(big.clone()))].into_iter().collect()).collect();
+        p.spawns.push(("mesh".into(), rows));
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        let meta = json!({"fps": 30, "width": 8, "height": 8, "frames": 1});
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, 64 << 20).is_err(), "an oversized copy refused");
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, usize::MAX).is_ok());
+    }
+
+    #[test]
+    fn a_huge_ease_count_is_refused() {
+        // a track claiming 1e9 keys with one ease string for all: refused by the bytes it holds, never allocated
+        let mut b: Vec<u8> = Vec::new();
+        let u = |b: &mut Vec<u8>, x: u32| b.extend_from_slice(&x.to_le_bytes());
+        u(&mut b, 0); // no spawns
+        u(&mut b, 1); // one track
+        u(&mut b, 0); u(&mut b, 0); u(&mut b, 1_000_000_000);
+        let meta = json!({"fps": 30, "width": 8, "height": 8, "frames": 1});
+        assert!(prog_from_bin(&meta, &["a".to_string()], &b).is_err());
+        // an honest count whose one ease would be copied past the budget
+        let mut p = Program { fps: 30.0, width: 8, height: 8, frames: 1, ..Default::default() };
+        let ease = "e".repeat(1 << 16);
+        p.keys.insert(("a".into(), "x".into()), (0..4096).map(|f| (f as i64, 0.0, ease.clone())).collect());
+        let mut st = Strs::default();
+        let bin = prog_bin(&p, &mut st);
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, 64 << 20).is_err(), "4096 copies of a 64 KB ease past 64 MB");
+    }
+
+    #[test]
+    fn a_zstd_bomb_is_refused() {
+        let bomb = zstd::encode_all(&vec![0u8; 64 << 20][..], 19).unwrap();
+        assert!(bomb.len() < 1 << 16, "a small file");
+        assert!(unzstd_capped(&bomb, 8 << 20).is_err(), "unpacking past the cap refused");
+        assert_eq!(unzstd_capped(&bomb, 64 << 20).unwrap().len(), 64 << 20);
     }
 
     #[test]
