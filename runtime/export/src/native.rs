@@ -571,22 +571,65 @@ fn solids_dirs() -> Vec<String> {
     r
 }
 
-/// A read bake's solids written into this machine's solids folder (each named by its content's hash, so one already
-/// there is the same file and is left alone).
-fn unpack_solids(v: &Value) {
-    let Some(m) = v.get("solids").and_then(Value::as_object) else { return };
-    let d = std::env::temp_dir().join("raea-solids");
-    let _ = std::fs::create_dir_all(&d);
+/// This machine's solids folder (runtime/calls/src/solid.rs writes there).
+fn solids_dir() -> PathBuf {
+    std::env::temp_dir().join("raea-solids")
+}
+
+/// A solid's file name as a kept bake may name or carry one: 16 to 64 lowercase hex digits (raea-calls' mesh hash, or
+/// the blake3 of the OBJ text a bake carries) and `.obj`, a single plain path component. Nothing else is read or written
+/// (a crafted bake must not reach outside the solids folder: `..`, `\`, an absolute or prefixed path).
+fn solid_name_ok(name: &str) -> bool {
+    let Some(h) = name.strip_suffix(".obj") else { return false };
+    if !(16..=64).contains(&h.len()) || !h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return false;
+    }
+    let mut c = Path::new(name).components();
+    matches!((c.next(), c.next()), (Some(std::path::Component::Normal(_)), None))
+}
+
+/// The solid `name` in `dir`: a regular file (not a link), resolving inside `dir`; None otherwise.
+fn solid_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    if !solid_name_ok(name) {
+        return None;
+    }
+    let p = dir.join(name);
+    if !std::fs::symlink_metadata(&p).ok()?.file_type().is_file() {
+        return None;
+    }
+    let (d, f) = (dir.canonicalize().ok()?, p.canonicalize().ok()?);
+    f.starts_with(&d).then_some(f)
+}
+
+/// A read bake's solids written into `dir`, each only if its name is allowed and is the blake3 of its text (a carried
+/// solid is named by its content, so a tampered or mismatched one is refused, never written); one already there is the
+/// same content and is left alone. Called only once the bake has passed its checks (stale, its Program read). Returns
+/// how many were written.
+fn unpack_solids_into(v: &Value, dir: &Path) -> usize {
+    let Some(m) = v.get("solids").and_then(Value::as_object) else { return 0 };
+    if m.is_empty() || std::fs::create_dir_all(dir).is_err() || std::fs::symlink_metadata(dir).map_or(true, |md| !md.is_dir()) {
+        return 0;
+    }
+    let mut wrote = 0;
     for (name, body) in m {
-        let (Some(text), true) = (body.as_str(), !name.contains('/') && !name.contains("..")) else { continue };
-        let p = d.join(name);
-        if !p.exists() {
-            let tmp = d.join(format!("{name}.{}.tmp", std::process::id()));
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, &p);
-            }
+        let Some(text) = body.as_str() else { continue };
+        if !solid_name_ok(name) || blake3::hash(text.as_bytes()).to_hex().as_str() != &name[..name.len() - 4] {
+            eprintln!("raea native: a carried solid refused ({name:?}: not a blake3-named .obj matching its text)");
+            continue;
+        }
+        let p = dir.join(name);
+        if std::fs::symlink_metadata(&p).is_ok() {
+            continue;
+        }
+        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+        let made = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+        if made.is_ok() && std::fs::rename(&tmp, &p).is_ok() {
+            wrote += 1;
+        } else {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
+    wrote
 }
 
 /// The project's root as a bake's paths start: as given and as the files resolve (a link to a snapshot).
@@ -626,22 +669,30 @@ fn portable(doc: &Value, dir: &Path) -> String {
     named.sort();
     named.dedup();
     let assets: Map<String, Value> = hashes(dir, &named).into_iter().filter_map(|(k, h)| Some((k, Value::String(h?)))).collect();
-    // the generated solids it names, carried along (SOLIDS_MARK)
+    // the generated solids it names, carried along (SOLIDS_MARK), each renamed to the blake3 of its OBJ text so a reader
+    // can check what it writes (unpack_solids_into)
     for r in solids_dirs() {
         text = text.replace(&format!("{}/", escaped(&r)), &format!("{SOLIDS_MARK}/"));
     }
-    let mut solids = Map::new();
+    let mut found: Vec<String> = Vec::new();
     let mut at = 0;
     while let Some(i) = text[at..].find(SOLIDS_MARK) {
         let a = at + i + SOLIDS_MARK.len() + 1;
         let end = text[a..].find(|c: char| matches!(c, '"' | '\\' | ')' | '\'')).map_or(text.len(), |e| a + e);
-        let name = text[a..end].to_string();
-        if !solids.contains_key(&name) {
-            if let Ok(body) = std::fs::read_to_string(std::env::temp_dir().join("raea-solids").join(&name)) {
-                solids.insert(name, Value::String(body));
-            }
-        }
+        found.push(text[a.min(end)..end].to_string());
         at = end;
+    }
+    found.sort();
+    found.dedup();
+    let mut solids = Map::new();
+    let sd = solids_dir();
+    for name in found {
+        let Some(body) = solid_file(&sd, &name).and_then(|p| std::fs::read_to_string(p).ok()) else { continue };
+        let carried = format!("{}.obj", blake3::hash(body.as_bytes()).to_hex());
+        if carried != name {
+            text = text.replace(&format!("{SOLIDS_MARK}/{name}"), &format!("{SOLIDS_MARK}/{carried}"));
+        }
+        solids.insert(carried, Value::String(body));
     }
     let body = text.strip_prefix('{').unwrap_or(&text);
     format!("{{\"assets\":{},\"solids\":{},{body}", Value::Object(assets), Value::Object(solids))
@@ -649,7 +700,7 @@ fn portable(doc: &Value, dir: &Path) -> String {
 
 /// A kept bake's marked paths placed at this project's root.
 fn placed(text: &str, dir: &Path) -> String {
-    let solids = std::env::temp_dir().join("raea-solids");
+    let solids = solids_dir();
     text.replace(&format!("{ROOT_MARK}/"), &format!("{}/", escaped(roots(dir).last().map(String::as_str).unwrap_or("")))).replace(&format!("{SOLIDS_MARK}/"), &format!("{}/", escaped(solids.to_string_lossy().trim_end_matches('/'))))
 }
 
@@ -718,7 +769,6 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
             .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
             .and_then(|v| {
                 mark("parsed");
-                unpack_solids(&v);
                 let s = stale(&v, dir);
                 mark("files hashed");
                 match s {
@@ -731,6 +781,11 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
                 let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
                 let prog = if v["prog"].is_null() { None } else { prog_of(&v["prog"]) };
                 mark("Program made");
+                // its solids written out only now: the bake passed stale() and its Program read (a 3D that didn't read
+                // is drawn without them anyway)
+                if v["prog"].is_null() || prog.is_some() {
+                    unpack_solids_into(&v, &solids_dir());
+                }
                 if trace() {
                     eprintln!("raea native: bake read back: {}", laps.iter().map(|(w, ms)| format!("{w} {ms:.0} ms")).collect::<Vec<_>>().join(", "));
                 }
@@ -1213,4 +1268,63 @@ pub(crate) fn rows_dump(world: &mut World, f: i64) {
         out.insert(name, Value::Object(comps));
     }
     let _ = std::fs::write(dir.join(format!("{f}.json")), Value::Object(out).to_string());
+}
+
+#[cfg(test)]
+mod solid_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("raea-solid-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn names_allowlisted() {
+        let h = "0123456789abcdef";
+        assert!(solid_name_ok(&format!("{h}.obj")));
+        assert!(solid_name_ok(&format!("{}.obj", blake3::hash(b"x").to_hex())));
+        for bad in ["../0123456789abcdef.obj", "..\\0123456789abcdef.obj", "a\\0123456789abcdef.obj", "/etc/0123456789abcdef.obj", "/0123456789abcdef.obj",
+            "0123456789abcdef.obj/..", "0123456789ABCDEF.obj", "0123456789abcde.obj", "0123456789abcdef.OBJ", "0123456789abcdef", "", ".obj", "C:0123456789abcdef.obj"] {
+            assert!(!solid_name_ok(bad), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn unpack_refuses_crafted_names_and_mismatches() {
+        let d = scratch("unpack");
+        let good = "v 0 0 0\n";
+        let good_name = format!("{}.obj", blake3::hash(good.as_bytes()).to_hex());
+        let wrong_name = format!("{}.obj", blake3::hash(b"something else").to_hex());
+        let v = json!({"solids": {
+            "../escape.obj": good, "..\\escape.obj": good, "/tmp/abs.obj": good, (wrong_name.clone()): good, (good_name.clone()): good
+        }});
+        assert_eq!(unpack_solids_into(&v, &d), 1);
+        assert_eq!(std::fs::read_to_string(d.join(&good_name)).unwrap(), good);
+        assert!(!d.join(&wrong_name).exists(), "a hash mismatch must not be written");
+        assert!(!d.parent().unwrap().join("escape.obj").exists());
+        assert!(!Path::new("/tmp/abs.obj").exists() || std::fs::read_to_string("/tmp/abs.obj").map_or(true, |t| t != good));
+        // written once: a second read leaves the file alone
+        assert_eq!(unpack_solids_into(&v, &d), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn solid_file_refuses_links_and_traversal() {
+        let d = scratch("file");
+        let name = "0123456789abcdef.obj";
+        std::fs::write(d.join(name), "v 0 0 0\n").unwrap();
+        assert!(solid_file(&d, name).is_some());
+        assert!(solid_file(&d, "../0123456789abcdef.obj").is_none());
+        #[cfg(unix)]
+        {
+            let outside = scratch("outside").join("fedcba9876543210.obj");
+            std::fs::write(&outside, "v 1 1 1\n").unwrap();
+            std::os::unix::fs::symlink(&outside, d.join("fedcba9876543210.obj")).unwrap();
+            assert!(solid_file(&d, "fedcba9876543210.obj").is_none(), "a link must be refused");
+            let _ = std::fs::remove_dir_all(outside.parent().unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
