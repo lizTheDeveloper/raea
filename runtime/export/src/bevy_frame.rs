@@ -209,14 +209,21 @@ thread_local! {
 /// target put in the page's layered slot as live play puts it. Each <Screen>'s picture goes to the 3D's screen on the
 /// GPU too; read back only on a frame where a screen has no image in the 3D yet (its first).
 pub(crate) fn bevy_fed_gpu(world: &mut World, page: &mut raea_runtime_page::BevyPage, cx: &mut Ctx, buf: &wgpu::Buffer, fps: f64, device: &wgpu::Device, queue: &wgpu::Queue) -> R<()> {
+    let t = std::time::Instant::now();
     if let Some(ls) = cx.live3d.as_mut() {
         live_scene(world, ls, &mut cx.scene3d, (page.w, page.h), fps, cx.dir)?;
     }
+    crate::native::part(3, t);
+    let t = std::time::Instant::now();
     bevy_page_sync(world, page, cx)?;
+    crate::native::part(4, t);
+    let t = std::time::Instant::now();
     page.draw();
     if let Some(m) = cx.manifest.as_mut() {
         m.push(page.manifest_frame(cx.now));
     }
+    crate::native::part(5, t);
+    crate::native::serial_wait(13);
     let mut under = None;
     // a camera inside a page element (docs/sdk.feature S3a): its view drawn into that element's box of the frame, and
     // that box of the 3D's target the element's picture, as live play draws it; the page synced again, its holders
@@ -229,6 +236,7 @@ pub(crate) fn bevy_fed_gpu(world: &mut World, page: &mut raea_runtime_page::Bevy
     }
     if let Some(e) = cx.scene3d.as_mut() {
         e.set_view_box(view);
+        let t = std::time::Instant::now();
         let screens = page.screen_textures();
         if !screens.iter().all(|(name, t)| e.copy_screen(name, t)) {
             for (name, w, h, rgba) in page.frame_all()?.1 {
@@ -236,9 +244,13 @@ pub(crate) fn bevy_fed_gpu(world: &mut World, page: &mut raea_runtime_page::Bevy
             }
         }
         let mats = page.set_ui_materials(e.world_mut())?;
+        crate::native::part(6, t);
+        let t = std::time::Instant::now();
         e.draw(cx.now);
         crate::native::rows_dump(e.world_mut(), cx.now);
         raea_sys_frame::gpu::said(e.world_mut(), cx.now)?;
+        crate::native::part(7, t);
+        crate::native::serial_wait(14);
         if mats {
             page.place_ui_materials(e.world());
             page.draw();
@@ -257,7 +269,9 @@ pub(crate) fn bevy_fed_gpu(world: &mut World, page: &mut raea_runtime_page::Bevy
     }
     let tex = page.texture().ok_or("the page's picture isn't on the GPU yet")?;
     let opaque = cx.scene3d.is_some() || cx.live3d.is_some();
+    let t = std::time::Instant::now();
     FEED.with(|f| f.borrow_mut().get_or_insert_with(|| raea_page::feed::Feed::new(device)).run(device, queue, &tex, under.as_ref(), opaque, page.w, page.h, buf));
+    crate::native::part(12, t);
     Ok(())
 }
 

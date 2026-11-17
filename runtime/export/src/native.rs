@@ -52,7 +52,19 @@ fn t_ms(t: std::time::Instant) -> f64 {
 }
 
 /// RAEA_NATIVE_TRACE: a drawn frame's time by part (ms summed): the page synced and painted, the 3D drawn, its target read back
-static PARTS: std::sync::Mutex<[f64; 3]> = std::sync::Mutex::new([0.0; 3]);
+static PARTS: std::sync::Mutex<[f64; 16]> = std::sync::Mutex::new([0.0; 16]);
+
+/// RAEA_GS_SERIAL=1 (with RAEA_NATIVE_TRACE): the GPU waited for after each part of the GPU path, so each part's GPU
+/// time shows on its own (parts 12..15), at the cost of the overlap
+pub(crate) fn serial_wait(k: usize) {
+    if trace() && std::env::var_os("RAEA_GS_SERIAL").is_some() {
+        if let Some(g) = raea_runtime_view::gpuview::paint_device() {
+            let t = std::time::Instant::now();
+            let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(60)) });
+            part(k, t);
+        }
+    }
+}
 
 pub(crate) fn part(k: usize, t: std::time::Instant) {
     if trace() {
@@ -973,6 +985,14 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
             ring.made(),
             t_ms(tw)
         );
+        let pc = |i: usize| raea_sys_shader::own_live::PATCHED[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;
+        eprintln!("raea native: own:uniforms a frame: {:.1} applied, {:.1} changed, {:.1} storage buffers written", pc(0), pc(1), pc(2));
+        let fast = |i: usize| bevy::render::material_bind_groups::RAEA_FAST[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / n;
+        eprintln!("raea native: materials a frame: {:.1} updated in place, {:.1} made again", fast(0), fast(1));
+        for (k, ms, calls) in raea_sys_frame::sys_times() {
+            eprintln!("raea native: system {k}: {:.2} ms a frame ({calls} calls)", ms / n);
+        }
+        eprintln!("raea native: gpu path per frame (ms): live3d {:.2}, page sync {:.2}, page draw {:.2}, screens {:.2}, 3D update {:.2}, feed {:.2}, start copy {:.2}, finish copy {:.2}, black+send {:.2}, png encode (writer threads) {:.2}; serial GPU waits: page {:.2}, 3D {:.2}, feed+copy {:.2}", p[3] / n, p[4] / n, p[5] / n, p[6] / n, p[7] / n, p[12] / n, p[8] / n, p[9] / n, p[10] / n, p[11] / n, p[13] / n, p[14] / n, p[15] / n);
     }
     raea_runtime_react::startup_mark("native: frames written");
     let clipping = FED_CLIPPING.lock().unwrap().take().and_then(|t| t.join().ok()).unwrap_or_default();

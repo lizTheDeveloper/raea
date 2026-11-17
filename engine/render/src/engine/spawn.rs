@@ -28,11 +28,15 @@ pub(crate) fn relational(edit: Res<Edit>, clock: Res<Clock>, mut err: ResMut<Err
         return;
     }
     let t0 = bevy::platform::time::Instant::now();
-    frame.set_cols(edit.timeline.cols(clock.0));
-    if !frame.timeline.as_ref().is_some_and(|t| std::sync::Arc::ptr_eq(t, &edit.timeline)) {
-        frame.timeline = Some(edit.timeline.clone());
-    }
+    let t = std::time::Instant::now();
+    let cols = edit.timeline.cols(clock.0);
+    raea_sys_frame::sys_time("relational: cols", t);
+    let t = std::time::Instant::now();
+    frame.next_frame(cols, &edit.timeline);
+    raea_sys_frame::sys_time("relational: next_frame (last frame's moving rows freed)", t);
+    let t = std::time::Instant::now();
     frame.parse_looks();
+    raea_sys_frame::sys_time("relational: parse_looks", t);
     st.rules += t0.elapsed().as_nanos() as u64;
     let _ = &mut err;
 }

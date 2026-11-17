@@ -34,6 +34,139 @@ pub mod tables;
 /// the frames where another camera becomes the piece's (a cut between cameras, RR2)
 pub mod shots;
 
+/// RAEA_NATIVE_TRACE: per-system time (ns summed, calls) by name, read by the native draw's trace line (`sys_times`).
+static SYS_TIMES: std::sync::Mutex<Vec<(&'static str, u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether per-system times are kept (RAEA_NATIVE_TRACE).
+pub fn sys_timing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAEA_NATIVE_TRACE").is_some())
+}
+
+/// `k`'s time since `t` added to its total (when timing).
+pub fn sys_time(k: &'static str, t: std::time::Instant) {
+    if !sys_timing() {
+        return;
+    }
+    let ns = t.elapsed().as_nanos() as u64;
+    let mut v = SYS_TIMES.lock().unwrap();
+    match v.iter_mut().find(|(n, _, _)| *n == k) {
+        Some(e) => {
+            e.1 += ns;
+            e.2 += 1;
+        }
+        None => v.push((k, ns, 1)),
+    }
+}
+
+/// Each timed system's (name, ms summed, calls), taken.
+pub fn sys_times() -> Vec<(&'static str, f64, u64)> {
+    std::mem::take(&mut *SYS_TIMES.lock().unwrap()).into_iter().map(|(k, ns, n)| (k, ns as f64 / 1e6, n)).collect()
+}
+
+/// A row's values at a frame, as `FrameRows::row` lends them: in the frame's columns, or a map.
+pub enum Row<'a> {
+    Cols(&'a eval::Cols, usize),
+    Map(std::borrow::Cow<'a, BTreeMap<String, V>>),
+}
+
+impl Row<'_> {
+    pub fn get(&self, k: &str) -> Option<V> {
+        match self {
+            Row::Cols(c, r) => c.get(*r, k),
+            Row::Map(m) => m.get(k).cloned(),
+        }
+    }
+    pub fn contains_key(&self, k: &str) -> bool {
+        match self {
+            Row::Cols(c, r) => c.cols.get(k).is_some_and(|col| col.has(*r)),
+            Row::Map(m) => m.contains_key(k),
+        }
+    }
+    pub fn num(&self, k: &str, d: f32) -> f32 {
+        match self {
+            Row::Cols(c, r) => c.num(*r, k).map_or(d, |x| x as f32),
+            Row::Map(m) => num(m, k, d),
+        }
+    }
+    /// A number the row holds as a number (`Some(V::N(x))`; text or nothing: None), copying nothing.
+    pub fn number(&self, k: &str) -> Option<f64> {
+        match self {
+            Row::Cols(c, r) => match &**c.cols.get(k)? {
+                eval::Col::Num { v, has } => has[*r].then(|| v[*r]),
+                eval::Col::Any(x) => match x[*r].as_ref()? {
+                    V::N(n) => Some(*n),
+                    _ => None,
+                },
+            },
+            Row::Map(m) => match m.get(k)? {
+                V::N(n) => Some(*n),
+                _ => None,
+            },
+        }
+    }
+    /// Text the row holds (`Some(V::S(s))`), borrowed.
+    pub fn text(&self, k: &str) -> Option<&str> {
+        match self {
+            Row::Cols(c, r) => match &**c.cols.get(k)? {
+                eval::Col::Any(x) => match x[*r].as_ref()? {
+                    V::S(s) => Some(s.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Row::Map(m) => match m.get(k)? {
+                V::S(s) => Some(s.as_str()),
+                _ => None,
+            },
+        }
+    }
+    /// The row's transform (transform_of's).
+    pub fn transform(&self) -> Transform {
+        match self {
+            Row::Cols(c, r) => transform_by(|i| c.num(*r, PLACE[i]).map(|x| x as f32)),
+            Row::Map(m) => transform_of(m),
+        }
+    }
+    /// The row's emissive colour (emissive_colour's).
+    pub fn emissive_colour(&self) -> Color {
+        match self {
+            Row::Map(m) => emissive_colour(|k| m.get(k)),
+            Row::Cols(..) => {
+                if self.contains_key("em_r") {
+                    let n = |k: &str| match self.get(k) {
+                        Some(V::N(x)) => x as f32,
+                        _ => 0.0,
+                    };
+                    return Color::srgb(n("em_r"), n("em_g"), n("em_b"));
+                }
+                colour(self.get("emissive").as_ref(), [0.0, 0.0, 0.0, 1.0])
+            }
+        }
+    }
+}
+
+fn keep_moving_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAEA_KEEP_MOVING").as_deref() != Ok("0"))
+}
+
+fn keep_still_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAEA_KEEP_STILL").as_deref() != Ok("0"))
+}
+
+fn row_read_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAEA_ROW_READ").as_deref() != Ok("0"))
+}
+
+/// Whether a row's values are made from its own columns (on unless RAEA_ROW_COLS=0).
+fn row_cols_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAEA_ROW_COLS").as_deref() != Ok("0"))
+}
+
 /// A model row's entity (a glTF under it), whatever its loading stage.
 #[derive(Component, Default)]
 pub struct Model;
@@ -81,6 +214,49 @@ impl FrameRows {
     pub fn set_cols(&mut self, cols: eval::Cols) {
         self.made.clear();
         self.made.resize_with(cols.len(), Default::default);
+        self.cols = cols;
+    }
+
+    /// The next frame's columns from `timeline` (at the clock): a still row's values made on an earlier frame are kept,
+    /// being the same on every frame (each frame made and dropped thousands of rows' maps; RAEA_KEEP_STILL=0: not).
+    pub fn next_frame(&mut self, cols: eval::Cols, timeline: &std::sync::Arc<raea_core_program::timeline::Timeline>) {
+        let same = keep_still_on() && self.live.is_none() && self.made.len() == cols.len() && self.timeline.as_ref().is_some_and(|t| std::sync::Arc::ptr_eq(t, timeline));
+        if !same {
+            self.timeline = Some(timeline.clone());
+            self.set_cols(cols);
+            return;
+        }
+        // a moving row's values made on an earlier frame are brought to this frame in place: only the columns some frame
+        // changes of it are read again (its map, keys and other values kept), so a frame allocates next to nothing
+        // (RAEA_KEEP_MOVING=0: made again from scratch). A row with a table is made again (its sets are laid on).
+        let patch = keep_moving_on();
+        for (r, m) in self.made.iter_mut().enumerate() {
+            if timeline.still(r) && !self.looks.contains_key(&r) {
+                continue;
+            }
+            if !patch || self.looks.contains_key(&r) {
+                drop(m.take());
+                continue;
+            }
+            let Some(map) = m.get_mut() else { continue };
+            for c in timeline.moving(r) {
+                match cols.cols.get(c).and_then(|col| col.get(r)) {
+                    Some(v) => match map.get_mut(c) {
+                        Some(slot) => {
+                            if *slot != v {
+                                *slot = v;
+                            }
+                        }
+                        None => {
+                            map.insert(c.clone(), v);
+                        }
+                    },
+                    None => {
+                        map.remove(c);
+                    }
+                }
+            }
+        }
         self.cols = cols;
     }
 
@@ -137,6 +313,20 @@ impl FrameRows {
         }
     }
 
+    /// A row's values this frame read where they are, nothing copied but the values asked for (`Row`): a system
+    /// reading a few columns of thousands of rows each frame made each row's whole map and dropped it (RAEA_ROW_READ=0:
+    /// `vals` as before). A live row or one with a table is its `vals`.
+    pub fn row(&self, e: Entity) -> Option<Row<'_>> {
+        let r = *self.ix.get(&e)?;
+        if self.live.is_none() && !self.looks.contains_key(&r) && row_read_on() {
+            if r >= self.cols.len() {
+                return None;
+            }
+            return Some(Row::Cols(&self.cols, r));
+        }
+        self.vals(e).map(Row::Map)
+    }
+
     /// A row's values this frame.
     pub fn vals(&self, e: Entity) -> Option<std::borrow::Cow<'_, BTreeMap<String, V>>> {
         let r = *self.ix.get(&e)?;
@@ -155,7 +345,13 @@ impl FrameRows {
             }
             None => {
                 let make = || {
-                    let mut v = self.cols.tup(r).vals;
+                    // the row's own columns (the timeline's), not every column of the edit asked for this row: a
+                    // frame made thousands of rows' values by walking hundreds of columns each (RAEA_ROW_COLS=0: as before)
+                    let own = self.timeline.as_ref().filter(|_| row_cols_on()).and_then(|t| t.row_cols(r));
+                    let mut v = match own {
+                        Some(cs) => cs.iter().filter_map(|c| self.cols.cols.get(c).and_then(|col| col.get(r)).map(|x| (c.clone(), x))).collect(),
+                        None => self.cols.tup(r).vals,
+                    };
                     if let Some(t) = self.looks.get(&r) {
                         tables::onto(&mut v, t);
                     }
@@ -173,8 +369,17 @@ impl FrameRows {
     /// where it changed. True when a table came or went, a look changed, or a live row's set changed `structural`ly
     /// (its one set, raea-runtime-look as_table): a live engine warms its next frame up as at a cut (Engine::draw).
     pub fn parse_looks(&mut self) -> bool {
-        // a row's sets are laid on as `vals` makes it
-        self.made.iter_mut().for_each(|m| drop(m.take()));
+        // a row's sets are laid on as `vals` makes it: a live row's values made again, and on a timeline the rows with a
+        // table (still rows' made values are kept across frames: `next_frame`)
+        if self.live.is_some() || !keep_still_on() {
+            self.made.iter_mut().for_each(|m| drop(m.take()));
+        } else {
+            for r in self.looks.keys() {
+                if let Some(m) = self.made.get_mut(*r) {
+                    drop(m.take());
+                }
+            }
+        }
         let mut found: HashMap<usize, [Option<String>; 2]> = HashMap::new();
         for (i, (list, _)) in tables::TABLES.iter().enumerate() {
             match &self.live {
@@ -192,6 +397,13 @@ impl FrameRows {
                             found.entry(r).or_default()[i] = Some(s);
                         }
                     }
+                }
+            }
+        }
+        if self.live.is_none() {
+            for r in found.keys() {
+                if let Some(m) = self.made.get_mut(*r) {
+                    drop(m.take());
                 }
             }
         }
