@@ -72,10 +72,13 @@ pub fn patch(world: &mut World, e: Entity, v: &Value) -> Result<(), String> {
         let slots = layout::slots(&p.src, &p.uniforms, given, &p.defs)?;
         // written only when the values change: a write marks the Material changed, and Bevy prepares it again (its
         // uniform buffer and bind group made anew), every part every frame, for values that were the same
+        // (RAEA_OWN_SKIP=0: written every time, as before)
+        static SKIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let skip = *SKIP.get_or_init(|| std::env::var("RAEA_OWN_SKIP").as_deref() != Ok("0"));
         match (&h, &arr) {
             (Some(h), _) => {
                 PATCHED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if world.resource::<Assets<OwnMaterial>>().get(h).is_some_and(|m| m.slots() != slots) {
+                if world.resource::<Assets<OwnMaterial>>().get(h).is_some_and(|m| !skip || m.slots() != slots) {
                     PATCHED[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     world.resource_mut::<Assets<OwnMaterial>>().get_mut(h).map(|mut m| m.set_slots(slots));
                 }
