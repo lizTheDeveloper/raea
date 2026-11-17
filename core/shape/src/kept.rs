@@ -1,9 +1,15 @@
 //! Solids kept on disk between runs. An expression's mesh is the same every time this build makes it, and making it
 //! is the cost: the boolean cuts of a furnished set were a quarter of the seconds its scene took to open, every time
-//! it opened (a launch-film set, 11-10). A kept mesh is named by the expression and by this build (the running
-//! program's size and time: another build may cut differently), and read back as the bytes that were written, so
-//! what is drawn from it is what would have been made. RAEA_SHAPE_CACHE=0 turns it off, =DIR moves it from raea's
-//! caches folder (shapes/ in it).
+//! it opened (a launch-film set, 11-10). A kept mesh is named by the expression and by the source that makes meshes
+//! (build.rs RAEA_SHAPE_SRC_HASH over core/ and Cargo.lock; RAEA_SHAPE_KEY=binary: the running program's size and
+//! time, as before), and read back as the bytes that were written, so what is drawn from it is what would have been
+//! made. RAEA_SHAPE_CACHE=0 turns it off, =DIR moves it from raea's caches folder (shapes/ in it).
+//!
+//! Bounded (Lane E S50: keyed by the executable and never evicted, one bench member's folder grew 8.7 GB in 4 h, 42
+//! files a second, as each new binary wrote every solid again): the folder is held under RAEA_SHAPE_CACHE_MAX_MB
+//! (2048), oldest first, when a process first uses it; a process writes at most 4096 solids and 512 MB; lib.rs's
+//! `cached` writes a solid only once it's asked for twice, or took 50 ms or more to make (a one-off expression made
+//! every frame never reaches the disk).
 
 use crate::Tris;
 use std::path::PathBuf;
@@ -38,20 +44,75 @@ fn this_build() -> (u64, u128) {
     })
 }
 
+/// The kept-solids folder, or None when nothing is kept (off, or no caches folder here). Held under its size cap the
+/// first time a process asks (prune).
+fn root() -> Option<PathBuf> {
+    static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = match std::env::var("RAEA_SHAPE_CACHE") {
+            Ok(v) if v == "0" => return None,
+            Ok(v) if !v.is_empty() => PathBuf::from(v),
+            _ => caches()?.join("shapes"),
+        };
+        let cap = std::env::var("RAEA_SHAPE_CACHE_MAX_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2048) << 20;
+        prune(&root, cap);
+        Some(root)
+    })
+    .clone()
+}
+
+/// The folder's kept solids held under `cap` bytes: past it, the oldest go (by modification time; a read touches
+/// nothing, so a solid in use is the one written last) until it's under three quarters of the cap. Said once.
+pub fn prune(root: &std::path::Path, cap: u64) -> (usize, u64, usize) {
+    let Ok(rd) = std::fs::read_dir(root) else { return (0, 0, 0) };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tris"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    let (n, mut gone) = (files.len(), 0);
+    if total > cap {
+        files.sort_by_key(|f| f.0);
+        for (_, len, p) in &files {
+            if total <= cap / 4 * 3 {
+                break;
+            }
+            if std::fs::remove_file(p).is_ok() {
+                total = total.saturating_sub(*len);
+                gone += 1;
+            }
+        }
+        eprintln!("raea: kept solids: {n} in {} ({} MB over the {} MB cap): {gone} oldest let go, {} MB left", root.display(), (files.iter().map(|f| f.1).sum::<u64>()) >> 20, cap >> 20, total >> 20);
+    }
+    (n, total, gone)
+}
+
+/// What a kept solid is named by besides its expression: the source that makes meshes, or the executable.
+fn made_by() -> Vec<u8> {
+    if std::env::var("RAEA_SHAPE_KEY").as_deref() == Ok("binary") {
+        let (len, time) = this_build();
+        return [len.to_le_bytes().as_slice(), time.to_le_bytes().as_slice()].concat();
+    }
+    format!("src:{}", env!("RAEA_SHAPE_SRC_HASH")).into_bytes()
+}
+
 /// Where the mesh for `expr` is kept, or None when nothing is (off, or no caches folder here).
 pub fn place(expr: &str) -> Option<PathBuf> {
-    let root = match std::env::var("RAEA_SHAPE_CACHE") {
-        Ok(v) if v == "0" => return None,
-        Ok(v) if !v.is_empty() => PathBuf::from(v),
-        _ => caches()?.join("shapes"),
-    };
-    let (len, time) = this_build();
+    let root = root()?;
     let mut key: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in expr.as_bytes().iter().chain(&len.to_le_bytes()).chain(&time.to_le_bytes()) {
+    for b in expr.as_bytes().iter().chain(made_by().iter()) {
         key = (key ^ *b as u64).wrapping_mul(0x100_0000_01b3);
     }
     Some(root.join(format!("{key:016x}-{:x}.tris", expr.len())))
 }
+
+/// Solids and bytes this process has written; past 4096 or 512 MB it writes no more (said once): a scene whose
+/// solids change every frame fills no folder.
+static WROTE: std::sync::Mutex<(usize, u64, bool)> = std::sync::Mutex::new((0, 0, false));
 
 const MAGIC: &[u8; 8] = b"raeatri1";
 
@@ -80,6 +141,18 @@ pub fn write(p: &std::path::Path, t: &Tris) {
         for x in v {
             b.extend_from_slice(&x.to_le_bytes());
         }
+    }
+    {
+        let mut w = WROTE.lock().unwrap();
+        if w.0 >= 4096 || w.1 + b.len() as u64 > 512 << 20 {
+            if !w.2 {
+                w.2 = true;
+                eprintln!("raea: kept solids: this process wrote {} ({} MB); no more this run", w.0, w.1 >> 20);
+            }
+            return;
+        }
+        w.0 += 1;
+        w.1 += b.len() as u64;
     }
     let Some(dir) = p.parent() else { return };
     let part = dir.join(format!(".{}.{}.part", p.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));

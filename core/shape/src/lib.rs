@@ -199,31 +199,72 @@ pub fn tris(m: &Manifold) -> Tris {
 }
 
 /// The mesh for an expression, built once per expression (a re-cut or a key that doesn't change the shape costs nothing).
+/// Kept on disk (kept.rs) once it's asked for a second time or took 50 ms or more to make: an expression made once,
+/// as a shape that changes every frame makes each of its, never reaches the disk. The map holds 8192 expressions,
+/// then starts again (it grew without end: Lane E S50).
 pub fn cached(expr: &str) -> Result<std::sync::Arc<Tris>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<String, std::sync::Arc<Tris>>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, (std::sync::Arc<Tris>, bool)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(t) = cache.lock().unwrap().get(expr) {
+    if let Some((t, kept)) = cache.lock().unwrap().get_mut(expr) {
+        // its second time: kept now, if it wasn't
+        if !*kept {
+            *kept = true;
+            if let Some(p) = kept::place(expr).filter(|p| !p.exists()) {
+                kept::write(&p, t);
+            }
+        }
         return Ok(t.clone());
     }
     // made by this build before, on disk (kept.rs): read back as it was written
     let kept = kept::place(expr);
-    let t = match kept.as_deref().and_then(kept::read) {
-        Some(t) => std::sync::Arc::new(t),
+    let (t, on_disk) = match kept.as_deref().and_then(kept::read) {
+        Some(t) => (std::sync::Arc::new(t), true),
         None => {
+            let t0 = std::time::Instant::now();
             let t = std::sync::Arc::new(tris(&solid(expr)?));
-            if let Some(p) = &kept {
+            let dear = t0.elapsed() >= std::time::Duration::from_millis(50);
+            if let (Some(p), true) = (&kept, dear) {
                 kept::write(p, &t);
             }
-            t
+            (t, dear)
         }
     };
-    cache.lock().unwrap().insert(expr.to_string(), t.clone());
+    let mut c = cache.lock().unwrap();
+    if c.len() >= 8192 {
+        c.clear();
+    }
+    c.insert(expr.to_string(), (t.clone(), on_disk || kept.is_none()));
     Ok(t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kept_solids_are_held_under_their_cap_oldest_first() {
+        let dir = std::env::temp_dir().join(format!("raea-shape-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // ten 1 KB solids, each a second older than the next
+        let now = std::time::SystemTime::now();
+        for i in 0..10u64 {
+            let p = dir.join(format!("{i:016x}-1.tris"));
+            std::fs::write(&p, vec![0u8; 1024]).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(now - std::time::Duration::from_secs(100 - i)).unwrap();
+        }
+        std::fs::write(dir.join("other.txt"), vec![0u8; 5000]).unwrap();
+        // under the cap: nothing goes
+        assert_eq!(kept::prune(&dir, 20 * 1024), (10, 10 * 1024, 0));
+        // an 8 KB cap: down to 6 KB, the four oldest gone
+        let (n, left, gone) = kept::prune(&dir, 8 * 1024);
+        assert_eq!((n, left, gone), (10, 6 * 1024, 4));
+        for i in 0..4u64 {
+            assert!(!dir.join(format!("{i:016x}-1.tris")).exists());
+        }
+        assert!(dir.join(format!("{:016x}-1.tris", 9)).exists() && dir.join("other.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_kept_mesh_reads_back_as_it_was_written() {
