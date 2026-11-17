@@ -52,13 +52,17 @@ pub fn sync_pictures(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut mats: R
 pub struct StillSynced;
 
 /// A mesh row the same on every frame whose values are on its entity (StillSynced): sync_meshes leaves it out of its
-/// query altogether, not visiting it each frame to skip it (Ch1's 7,000 still meshes; RAEA_STILL_DONE=0: visited)
+/// query altogether, not visiting it each frame to skip it (Ch1's 7,000 still meshes). OFF unless RAEA_STILL_DONE=1:
+/// the mark is never taken off, so a row that is "still" on one frame (a live player's first frames, before its cast's
+/// live rows are set) is frozen for good: aliens-live's walkers stood 0.4 m back along their paths at f120 (lane a,
+/// 2026-11-17, f1e89c51 vs 6d739b8b; RAEA_STILL_DONE=0 byte-identical to 6d739b8b). Needs clearing when the frame's
+/// timeline or live rows change before it can be on by default.
 #[derive(Component)]
 pub struct StillDone;
 
 fn still_done_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAEA_STILL_DONE").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("RAEA_STILL_DONE").as_deref() == Ok("1"))
 }
 
 /// The columns sync_meshes applies to a part's material.
