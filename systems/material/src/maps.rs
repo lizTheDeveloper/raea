@@ -8,6 +8,11 @@ use bevy::render::render_resource::TextureFormat;
 #[derive(Resource, Default)]
 pub struct Maps(pub HashMap<String, Handle<Image>>);
 
+/// The last program's maps while a kept engine loads the next (Engine::reload): a map the next shot names again is
+/// taken from here, decoded, mipped and uploaded once, not again at every shot change; the rest go after the load.
+#[derive(Resource, Default)]
+pub struct PrevMaps(pub HashMap<String, Handle<Image>>);
+
 /// An image a texture source names instead of a file, by whoever draws it (raea-sys-screen's named_image: a UiTexture's
 /// `raea-screen:name@WxH`, render_ui_to_texture); None for any other source.
 #[derive(Resource)]
@@ -219,22 +224,52 @@ static PREFETCHED: std::sync::Mutex<Option<HashMap<(String, bool), std::sync::Ar
 /// Every file map the rows name (a mesh row's map columns, a model's `surfaces` specs) decoded and mipped across the
 /// cores, as map_picture and mips_rgba8 make them, so the images are the same. A source that doesn't decode is left
 /// for the load to report as it always has.
-pub fn prefetch_maps(inserted: &[Tup], dir: &Path) {
+pub fn prefetch_maps(inserted: &[Tup], dir: &Path, have: &std::collections::HashSet<(String, bool)>) {
     // started early (prefetch_start) for these rows: wait for it
     if let Some(h) = STARTED.lock().unwrap().take() {
         let _ = h.join();
-        if PREFETCHED.lock().unwrap().is_some() {
-            return;
-        }
     }
-    prefetch_maps_now(inserted, dir);
+    // made ahead (prefetch_start, or a Prepared shot's maps installed by prefetch_install)
+    if PREFETCHED.lock().unwrap().is_some() {
+        return;
+    }
+    *PREFETCHED.lock().unwrap() = Some(decode_maps(inserted, dir, have));
 }
 
-fn prefetch_maps_now(inserted: &[Tup], dir: &Path) {
+/// Maps decoded and mipped ahead, by source and colour (sRGB) or data: what prefetch_maps makes for a load.
+pub type Prefetched = HashMap<(String, bool), std::sync::Arc<(Vec<u8>, u32, u32, u32)>>;
+
+/// A shot's maps made off the load's thread (a Prepared shot, Engine::prepare) handed to the next load, which takes
+/// them as it takes prefetch_start's.
+pub fn prefetch_install(p: Prefetched) {
+    if let Some(h) = STARTED.lock().unwrap().take() {
+        let _ = h.join();
+    }
+    *PREFETCHED.lock().unwrap() = Some(p);
+}
+
+/// The sources (and colour or data) of the maps a World holds now (Maps, and PrevMaps while a kept engine reloads):
+/// a map already made isn't decoded again for the next shot.
+pub fn held_sources(world: &World) -> std::collections::HashSet<(String, bool)> {
+    let mut out = std::collections::HashSet::new();
+    let keys = world.get_resource::<Maps>().into_iter().flat_map(|m| m.0.keys()).chain(world.get_resource::<PrevMaps>().into_iter().flat_map(|m| m.0.keys()));
+    for k in keys {
+        // cached_map's key: "{src}|{colour}|{repeat}|{sampling}"
+        let mut parts = k.rsplitn(4, '|');
+        let (_, _, colour, src) = (parts.next(), parts.next(), parts.next(), parts.next());
+        if let (Some(c), Some(s)) = (colour, src) {
+            out.insert((s.to_string(), c == "true"));
+        }
+    }
+    out
+}
+
+/// Every file map the rows name decoded and mipped across the cores, but those in `have` (made already).
+pub fn decode_maps(inserted: &[Tup], dir: &Path, have: &std::collections::HashSet<(String, bool)>) -> Prefetched {
     const KEYS: [(&str, bool); 5] = [("map", true), ("emissive_map", true), ("normal_map", false), ("mr_map", false), ("ao_map", false)];
     let mut want: Vec<(String, bool)> = Vec::new();
     let mut add = |s: &str, srgb: bool| {
-        if !s.is_empty() && !s.starts_with("data:") && !s.starts_with("raea-screen:") && !want.iter().any(|w| w.0 == s && w.1 == srgb) {
+        if !s.is_empty() && !s.starts_with("data:") && !s.starts_with("raea-screen:") && !want.iter().any(|w| w.0 == s && w.1 == srgb) && !have.contains(&(s.to_string(), srgb)) {
             want.push((s.to_string(), srgb));
         }
     };
@@ -276,7 +311,7 @@ fn prefetch_maps_now(inserted: &[Tup], dir: &Path) {
             eprintln!("mem_mark   map not prefetched: {k}");
         }
     }
-    *PREFETCHED.lock().unwrap() = Some(out);
+    out
 }
 
 static STARTED: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
@@ -287,7 +322,8 @@ static STARTED: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::syn
 pub fn prefetch_start(inserted: Vec<Tup>, dir: std::path::PathBuf) {
     *PREFETCHED.lock().unwrap() = None;
     let h = std::thread::Builder::new().name("raea map prefetch".into()).spawn(move || {
-        prefetch_maps_now(&inserted, &dir);
+        let p = decode_maps(&inserted, &dir, &Default::default());
+        *PREFETCHED.lock().unwrap() = Some(p);
     });
     *STARTED.lock().unwrap() = h.ok();
 }
@@ -304,6 +340,10 @@ pub fn cached_map(world: &mut World, key: String, kind: MapKind, repeat: bool, s
     let key = format!("{key}|{}|{}|{}", kind == MapKind::Colour, repeat, sampling.map_or("", |s| s.key.as_str()));
     if let Some(h) = world.get_resource::<Maps>().and_then(|m| m.0.get(&key)) {
         return Ok(h.clone());
+    }
+    if let Some(h) = world.get_resource_mut::<PrevMaps>().and_then(|mut m| m.0.remove(&key)) {
+        world.resource_mut::<Maps>().0.insert(key, h.clone());
+        return Ok(h);
     }
     // taken, not copied (a 4K map's chain is ~90 MB): a second use with another sampler makes its own, as before
     let ahead = PREFETCHED.lock().unwrap().as_mut().and_then(|p| p.remove(&(src, kind == MapKind::Colour)));

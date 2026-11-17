@@ -13,6 +13,24 @@ impl Engine {
     /// (load_shared) and warmed up by the same 8 updates (finish_build), its device, pipelines, models and textures
     /// kept. A served process's next native shot (docs/native-shots.md).
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
+        self.reload_with(&std::sync::Arc::new(prog.clone()), inserted, None)
+    }
+
+    /// As reload, the program shared with the caller rather than copied (a Ch5 Program is hundreds of MB): the live
+    /// player's shot switch (`play --shots`) and a served native shot.
+    pub fn reload_arc(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup]) -> Result<(), String> {
+        self.reload_with(prog, inserted, None)
+    }
+
+    /// As reload, with what Engine::prepare made ahead (off this thread): its timeline and maps are taken, not made
+    /// here. The shot's frames are the same as reload's (and a fresh engine's) for the same program.
+    pub fn reload_prepared(&mut self, p: super::prepare::Prepared) -> Result<(), String> {
+        let super::prepare::Prepared { prog, inserted, timeline, maps, .. } = p;
+        raea_sys_material::maps::prefetch_install(maps);
+        self.reload_with(&prog, &inserted, Some(timeline))
+    }
+
+    fn reload_with(&mut self, prog: &std::sync::Arc<Program>, inserted: &[Tup], timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>) -> Result<(), String> {
         // the clocks and physics as a fresh engine's, before the new program's rows set any of them
         let t = std::time::Instant::now();
         pristine_restore(self.app.world_mut());
@@ -20,7 +38,13 @@ impl Engine {
         // spawn, the new text was never drawn into it: a kept engine's repeat of Ch5 lost its clock's numerals)
         text3d::reset_atlas(self.app.world_mut());
         let t_reset = t.elapsed().as_secs_f64() * 1e3;
-        self.load_shared(prog, inserted, None)?;
+        // what the last shot loaded, kept for the next one's load (its models' glTFs, its maps), then let go
+        let held = scene3d::model_handles(self.app.world_mut());
+        let prev: std::collections::HashMap<String, Handle<Image>> = self.app.world_mut().get_resource_mut::<scene3d::Maps>().map(|mut m| std::mem::take(&mut m.0)).unwrap_or_default();
+        self.app.world_mut().insert_resource(raea_sys_material::maps::PrevMaps(prev));
+        let r = self.load_shared_arc(prog, inserted, timeline);
+        self.app.world_mut().remove_resource::<raea_sys_material::maps::PrevMaps>();
+        r?;
         let t_load = t.elapsed().as_secs_f64() * 1e3;
         let mut ups = Vec::new();
         for _ in 0..8 {
@@ -28,6 +52,7 @@ impl Engine {
             self.app.update();
             ups.push(u.elapsed().as_secs_f64() * 1e3);
         }
+        drop(held);
         if std::env::var_os("RAEA_NATIVE_TRACE").is_some() {
             eprintln!("raea native: reload {:.0} ms: restore {t_reset:.0}, load {:.0}, warm-up updates {}", t.elapsed().as_secs_f64() * 1e3, t_load - t_reset, ups.iter().map(|u| format!("{u:.0}")).collect::<Vec<_>>().join(" "));
         }
@@ -76,7 +101,9 @@ impl Engine {
         let has_3d = has_3d(inserted) || raea_sys_sprite::has_2d(inserted);
         // cameras first, so UI can target them; otherwise insertion order
         // the rows' map files decoded and mipped across the cores before the spawn takes them one by one
-        raea_sys_material::maps::prefetch_maps(inserted, &self.dir);
+        // (but those a kept engine holds from its last shot: Engine::reload's PrevMaps)
+        let have = raea_sys_material::maps::held_sources(world);
+        raea_sys_material::maps::prefetch_maps(inserted, &self.dir, &have);
         mem_mark("load: maps prefetched");
         let mut order: Vec<(&Tup, Entity)> = inserted.iter().zip(ents.iter().copied()).collect();
         // RAEA_MEM_MARKS: each 3D kind's spawn time, summed
@@ -175,12 +202,19 @@ impl Engine {
             world.remove_non_send::<Rows2d>();
         }
         mem_mark("load: shaders and 2D rows");
-        let base = store::gather(world);
         let ix: bevy::ecs::entity::EntityHashMap<usize> = store::rows(world).iter().enumerate().map(|(r, &e)| (e, r)).collect();
         let media = inserted.iter().filter(|t| t.kind == "media").cloned().collect();
+        // the timeline from the rows as the World holds them; one made ahead (a Prepared shot) is made from the same
+        // rows in a store of its own (RAEA_PREPARE_CHECK=1: the two bases compared)
         let timeline = match timeline {
-            Some(t) => t,
-            None => std::sync::Arc::new(raea_core_program::timeline::Timeline::from_cols(prog, base)?),
+            Some(t) => {
+                if std::env::var_os("RAEA_PREPARE_CHECK").is_some() {
+                    let same = store::gather(world) == t.base;
+                    eprintln!("raea prepare check: the prepared timeline's base {} the World's", if same { "equals" } else { "DIFFERS FROM" });
+                }
+                t
+            }
+            None => std::sync::Arc::new(raea_core_program::timeline::Timeline::from_cols(prog, store::gather(world))?),
         };
         world.insert_resource(Edit { prog: prog.clone(), timeline, media });
         world.insert_resource(raea_sys_frame::tables::Cuts::of(prog));

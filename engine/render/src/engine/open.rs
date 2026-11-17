@@ -9,7 +9,7 @@ pub struct Opening {
     prog: std::sync::Arc<Program>,
     inserted: Vec<Tup>,
     dir: PathBuf,
-    timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>,
+    pub(crate) timeline: Option<std::sync::Arc<raea_core_program::timeline::Timeline>>,
     live: bool,
 }
 

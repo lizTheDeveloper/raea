@@ -1161,19 +1161,47 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     app.add_plugins(MinimalPlugins).add_plugins(raea_runtime_react::ReplayPlugin);
     one_thread(&mut app);
     raea_gpu_device::check::mem_fits(w, h, None)?;
-    // the 3D's rows, and their map files decoded and mipped beside the page's and the engine's opening
+    // the 3D's rows; then the shot made ready on a thread (its timeline, its map files decoded and mipped:
+    // raea_render::engine::Prepared) beside the page's and the engine's opening. RAEA_PREPARE=0: the maps alone ahead
+    // and the timeline made in the load, as before
     let inserted = prog.map(|p| raea_render::inserted_of(p)).unwrap_or_default();
-    if prog.is_some() {
-        raea_sys_material::maps::prefetch_start(inserted.clone(), dir.to_path_buf());
-    }
-    let mut page = raea_runtime_page::BevyPage::new(w, h, dir)?;
-    let mut cx = Ctx { dir, work: &work, sounds: Vec::new(), scene: Vec::new(), clear: None, marker: None, mix: None, audible: HashMap::new(), brand: page_css(dir, w, js), manifest: MANIFEST.lock().unwrap().as_ref().map(|_| Vec::new()), now: 0, said: Default::default(), made: HashMap::new(), scene3d: None, live3d: None };
-    let t_open = std::time::Instant::now();
     let aov = AOV.load(std::sync::atomic::Ordering::Relaxed);
     let kept = if keeping_engine() { KEPT_ENGINE.with(|k| k.borrow_mut().take()).filter(|k| (k.0, k.1, k.2) == (w, h, aov)) } else { None };
     let reused = kept.is_some();
+    let ahead = std::env::var("RAEA_PREPARE").as_deref() != Ok("0");
+    let prep = match prog {
+        Some(p) if ahead => {
+            let (p, rows, d) = (p.clone(), inserted.clone(), dir.to_path_buf());
+            let have = kept.as_ref().map(|k| k.3.map_sources()).unwrap_or_default();
+            std::thread::Builder::new().name("raea shot prepare".into()).spawn(move || raea_render::engine::Prepared::with_rows(p, rows, &d, &have)).ok()
+        }
+        Some(_) => {
+            raea_sys_material::maps::prefetch_start(inserted.clone(), dir.to_path_buf());
+            None
+        }
+        None => None,
+    };
+    let mut page = raea_runtime_page::BevyPage::new(w, h, dir)?;
+    let mut cx = Ctx { dir, work: &work, sounds: Vec::new(), scene: Vec::new(), clear: None, marker: None, mix: None, audible: HashMap::new(), brand: page_css(dir, w, js), manifest: MANIFEST.lock().unwrap().as_ref().map(|_| Vec::new()), now: 0, said: Default::default(), made: HashMap::new(), scene3d: None, live3d: None };
+    let t_open = std::time::Instant::now();
     // a film shot's engine without the plugins its rows don't use (raea_runtime_plugins::install_lean)
     raea_render::engine::plugins::LEAN.store(true, std::sync::atomic::Ordering::Relaxed);
+    let join = |h: std::thread::JoinHandle<R<raea_render::engine::Prepared>>| -> R<raea_render::engine::Prepared> {
+        let t = std::time::Instant::now();
+        let p = h.join().map_err(|_| "the shot's prepare panicked".to_string())??;
+        raea_runtime_react::startup_mark(&format!("native: the shot prepared ({:.0} ms, waited {:.0} ms)", p.ms, t_ms(t)));
+        Ok(p)
+    };
+    let fresh = |prep: Option<std::thread::JoinHandle<R<raea_render::engine::Prepared>>>, prog: &std::sync::Arc<Program>| -> R<raea_render::engine::Engine> {
+        Ok(aov_on(match prep {
+            Some(h) => {
+                let mut o = raea_render::engine::Engine::begin_arc(prog.clone(), &inserted, dir, None, true)?;
+                o.prepared(join(h)?);
+                o.finish()?
+            }
+            None => raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, dir)?,
+        }))
+    };
     cx.scene3d = match prog {
     None => {
         if let Some(k) = kept {
@@ -1182,15 +1210,21 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
         None
     }
     Some(prog) => Some(match kept {
-        Some((_, _, _, mut e)) => match e.reload(prog, &inserted) {
-            Ok(()) => e,
-            Err(why) => {
-                eprintln!("raea native: the kept engine didn't take this shot ({why}); a fresh one");
-                drop(e);
-                aov_on(raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, dir)?)
+        Some((_, _, _, mut e)) => {
+            let r = match prep {
+                Some(h) => join(h).and_then(|p| e.reload_prepared(p)),
+                None => e.reload_arc(prog, &inserted),
+            };
+            match r {
+                Ok(()) => e,
+                Err(why) => {
+                    eprintln!("raea native: the kept engine didn't take this shot ({why}); a fresh one");
+                    drop(e);
+                    fresh(None, prog)?
+                }
             }
-        },
-        None => aov_on(raea_render::engine::Engine::new_live_arc(prog.clone(), &inserted, dir)?),
+        }
+        None => fresh(prep, prog)?,
     }),
     };
     raea_runtime_react::startup_mark(&format!("native: the 3D's engine {} ({:.0} ms)", if reused { "reloaded" } else { "open" }, t_ms(t_open)));
