@@ -43,7 +43,7 @@ pub(crate) fn install(app: &mut App) {
         eprintln!("raea: RAEA_SCENE_STATS: can't open {}", path.to_string_lossy());
     }
     let s = Stats(Arc::new(Mutex::new(Shared { out, ..Default::default() })));
-    app.insert_resource(s.clone()).init_resource::<MainStart>().add_systems(First, main_start).add_systems(Last, (main_stats, census));
+    app.insert_resource(s.clone()).init_resource::<MainStart>().add_systems(First, main_start).add_systems(Last, (main_stats, census, pick));
     fn mark(name: &'static str) -> impl FnMut(Res<Stats>) {
         move |s: Res<Stats>| {
             let mut g = s.0.lock().unwrap();
@@ -101,6 +101,150 @@ fn census(world: &mut World, mut n: Local<u32>) {
     }
 }
 
+/// RAEA_PICK="x,y;x,y..." (frame pixels): once, at the 12th update, every mesh triangle under each pixel, nearest
+/// first, from the camera drawing the engine's target (its rest pose for a skinned mesh): two hits at one distance
+/// are a coplanar pair, whose winner is whichever is drawn first. A `pick` line per pixel.
+fn pick(world: &mut World, mut n: Local<u32>) {
+    *n += 1;
+    let Some(spec) = std::env::var("RAEA_PICK").ok() else { return };
+    if *n != 12 {
+        return;
+    }
+    let target = world.get_resource::<super::TagRowTarget>().map(|t| t.0.id());
+    let mut cams = world.query::<(&Camera, &GlobalTransform, &bevy::camera::RenderTarget)>();
+    // every active camera (the one drawing the engine's target first): a pixel is looked up in each, scaled to its
+    // target's size, so a camera into a texture (a pocket-world window) is searched too
+    let mut all: Vec<(Camera, GlobalTransform, bool)> = cams.iter(world).filter(|(c, _, _)| c.is_active).map(|(c, g, t)| (c.clone(), *g, matches!(t, bevy::camera::RenderTarget::Image(i) if Some(i.handle.id()) == target))).collect();
+    all.sort_by_key(|(c, _, main)| (!*main, -c.order));
+    let frame = all.iter().find(|(_, _, m)| *m).and_then(|(c, _, _)| c.logical_viewport_size()).unwrap_or(Vec2::new(1920.0, 1080.0));
+    let mut meshes_q = world.query::<(Entity, &Mesh3d, &GlobalTransform, &ViewVisibility)>();
+    let items: Vec<(Entity, AssetId<Mesh>, GlobalTransform)> = meshes_q.iter(world).filter(|(_, _, _, v)| v.get()).map(|(e, m, g, _)| (e, m.0.id(), *g)).collect();
+    let mut keys = world.query::<&raea_sys_frame::store::RowKey>();
+    let mut names = world.query::<&Name>();
+    let mut parents = world.query::<&ChildOf>();
+    let mut lines = Vec::new();
+    for (ci, (cam, cam_t, main)) in all.iter().enumerate() {
+    let (cam, cam_t) = (cam, *cam_t);
+    let scale = cam.logical_viewport_size().map_or(Vec2::ONE, |v| v / frame);
+    for p in spec.split(';') {
+        let mut it = p.split(',').filter_map(|v| v.trim().parse::<f32>().ok());
+        let (Some(fx), Some(fy)) = (it.next(), it.next()) else { continue };
+        let (x, y) = (fx * scale.x, fy * scale.y);
+        let Ok(ray) = cam.viewport_to_world(&cam_t, Vec2::new(x + 0.5, y + 0.5)) else { continue };
+        let mut hits: Vec<(f32, Entity, usize)> = Vec::new();
+        let meshes = world.resource::<Assets<Mesh>>();
+        for (e, id, g) in &items {
+            let Some(m) = meshes.get(*id) else { continue };
+            let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) = m.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
+            let mat = g.to_matrix();
+            let idx: Vec<usize> = match m.indices() {
+                Some(i) => i.iter().collect(),
+                None => (0..pos.len()).collect(),
+            };
+            let dir: Vec3 = *ray.direction;
+            for (ti, t) in idx.chunks_exact(3).enumerate() {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| mat.transform_point3(Vec3::from(pos[i])));
+                // Moller-Trumbore, both faces
+                let (e1, e2) = (b - a, c - a);
+                let pv = dir.cross(e2);
+                let det = e1.dot(pv);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let inv = 1.0 / det;
+                let tv = ray.origin - a;
+                let u = tv.dot(pv) * inv;
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let qv = tv.cross(e1);
+                let v = dir.dot(qv) * inv;
+                if v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let d = e2.dot(qv) * inv;
+                if d > 0.0 {
+                    hits.push((d, *e, ti));
+                }
+            }
+        }
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut list = Vec::new();
+        for (d, e, ti) in hits.iter().take(8) {
+            let mut up = *e;
+            let mut path = Vec::new();
+            for _ in 0..10 {
+                if let Ok(n) = names.get(world, up) {
+                    path.push(n.as_str().to_string());
+                }
+                if let Ok(k) = keys.get(world, up) {
+                    path.push(format!("{}/{}", k.kind, k.id));
+                    break;
+                }
+                match parents.get(world, up) {
+                    Ok(p) => up = p.parent(),
+                    Err(_) => break,
+                }
+            }
+            list.push(serde_json::json!({"dist": d, "entity": format!("{e}"), "tri": ti, "who": path.join(" < ")}));
+        }
+        // and every drawn mesh whose box, projected by this camera, covers the pixel: its depth range
+        let mut boxes = world.query::<(Entity, &bevy::camera::primitives::Aabb, &GlobalTransform, &ViewVisibility)>();
+        let mut cover: Vec<(f32, f32, Entity)> = Vec::new();
+        for (e, bb, g, v) in boxes.iter(world) {
+            if !v.get() {
+                continue;
+            }
+            let (c, h) = (Vec3::from(bb.center), Vec3::from(bb.half_extents));
+            let (mut lo, mut hi, mut dmin, mut dmax, mut ok) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN), f32::MAX, f32::MIN, true);
+            for i in 0..8 {
+                let k = Vec3::new(if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -1.0 } else { 1.0 }, if i & 4 == 0 { -1.0 } else { 1.0 });
+                let w = g.transform_point(c + h * k);
+                match cam.world_to_viewport(&cam_t, w) {
+                    Ok(s) => {
+                        lo = lo.min(s);
+                        hi = hi.max(s);
+                    }
+                    Err(_) => ok = false,
+                }
+                let d = (w - cam_t.translation()).length();
+                dmin = dmin.min(d);
+                dmax = dmax.max(d);
+            }
+            if ok && x + 0.5 >= lo.x && x + 0.5 <= hi.x && y + 0.5 >= lo.y && y + 0.5 <= hi.y {
+                cover.push((dmin, dmax, e));
+            }
+        }
+        cover.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut cov = Vec::new();
+        for (dmin, dmax, e) in cover.iter().take(12) {
+            let mut up = *e;
+            let mut path = Vec::new();
+            for _ in 0..10 {
+                if let Ok(n) = names.get(world, up) {
+                    path.push(n.as_str().to_string());
+                }
+                if let Ok(k) = keys.get(world, up) {
+                    path.push(format!("{}/{}", k.kind, k.id));
+                    break;
+                }
+                match parents.get(world, up) {
+                    Ok(p) => up = p.parent(),
+                    Err(_) => break,
+                }
+            }
+            cov.push(serde_json::json!({"depth": [dmin, dmax], "entity": format!("{e}"), "who": path.join(" < ")}));
+        }
+        lines.push(serde_json::json!({"pick": [fx, fy], "camera": ci, "main": main, "order": cam.order, "hits": list, "boxes": cov}));
+    }
+    }
+    if let Some(f) = world.resource::<Stats>().0.lock().unwrap().out.as_mut() {
+        for l in lines {
+            let _ = writeln!(f, "{l}");
+        }
+    }
+}
+
 fn main_start(mut m: ResMut<MainStart>) {
     m.0 = Some(Instant::now());
 }
@@ -135,6 +279,8 @@ struct Ph {
     bins: usize,
     draws: usize,
     instances: usize,
+    /// each view's (draws, instances)
+    per_view: Vec<(usize, usize)>,
 }
 
 fn binned<B: BinnedPhaseItem>(p: &ViewBinnedRenderPhases<B>) -> Ph {
@@ -144,6 +290,7 @@ fn binned<B: BinnedPhaseItem>(p: &ViewBinnedRenderPhases<B>) -> Ph {
             continue;
         }
         o.views += 1;
+        let (d0, i0) = (o.draws, o.instances);
         // NoIndirectDrawing (open.rs): each batchable bin (one mesh and material) is one draw of its instances
         o.bins += ph.batchable_meshes.len() + ph.unbatchable_meshes.len() + ph.multidrawable_meshes.len();
         for b in ph.batchable_meshes.values() {
@@ -160,7 +307,9 @@ fn binned<B: BinnedPhaseItem>(p: &ViewBinnedRenderPhases<B>) -> Ph {
         }
         // (multidraw only with GPU culling, RAEA_GPU_CULLING=1: counted as one draw a batch set)
         o.draws += ph.multidrawable_meshes.len();
+        o.per_view.push((o.draws - d0, o.instances - i0));
     }
+    o.per_view.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     o
 }
 
@@ -201,7 +350,7 @@ fn phase_counts(
     let mut shadow_keys = None;
     let mut put = |k: &str, p: Ph| {
         if p.views > 0 {
-            m.insert(k.into(), serde_json::json!({"views": p.views, "bins": p.bins, "draws": p.draws, "instances": p.instances}));
+            m.insert(k.into(), serde_json::json!({"views": p.views, "bins": p.bins, "draws": p.draws, "instances": p.instances, "per_view": p.per_view}));
         }
     };
     if let Some(p) = opaque { put("opaque", binned(&p)); }
