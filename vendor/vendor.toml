@@ -158,6 +158,13 @@ kind = "patch"
 reason = "linear-light blending in fine.wgsl (Config.blend_linear, set by vello_encoding's set_blend_linear): every colour, ramp and texel decoded from sRGB, blended, and encoded once, the blend stack kept sRGB-encoded, so raea-page blends a bevy_ui page as Bevy's UI does on an sRGB target; area coverage summed in fixed point (i32, 2^20 a pixel) so a scene draws the same whatever order its segments arrive in (raea #20); flatten.wgsl holds a bevy_ui page's curves to a 0.02 px chord tolerance, not 0.25 (flatten_tol), as Bevy draws a rounded node from its exact distance field"
 exit = "a Vello release that blends in linear light on request"
 
+[vello]
+path = "vendor/vello"
+upstream = "crates.io:0.11.0"
+kind = "patch"
+reason = "a raw output (set_raw_output): fine_area_raw (vello_shaders' `raw` permutation) writes each pixel's f32 blend state to an Rgba32Float target (ImageFormat::Rgba32Float), so a page's pieces are cached exactly and the layered 3D is blended between them per frame without a Vello render (systems/page slot cache)"
+exit = "none: upstream has no raw output; drop it if the slot cache goes"
+
 [rune-taffy]
 path = "vendor/rune-taffy"
 upstream = "git:github.com/anomalyco/rune@7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b:crates/rune-taffy"

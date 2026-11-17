@@ -17,6 +17,8 @@
 //! raea-runtime-input (pointer and keys) and raea-page (a composition's page).
 
 mod draw;
+// a page with its 3D in a layered slot, drawn each frame without Vello
+mod slot_cache;
 mod skipped;
 pub use skipped::wait_drawn;
 /// a page's loads (raea-sys-page-net: FileNet, FrameNet, the page's fetch, the image decoder)
@@ -153,8 +155,9 @@ pub struct Painted(pub Arc<Mutex<Vec<Drawn>>>);
 
 /// A page's paint: its image, its size in device px, its scene, its filtered layers (inner ones first), its print
 /// (`raea_sys_filters::Painter::print`: the same as last frame's, the same picture), whether its image is straight alpha,
-/// and whether it blends in linear light (a bevy_ui page, `data-raea-blend="linear"`: Vello's set_blend_linear).
-pub type Drawn = (Handle<Image>, UVec2, vello::Scene, Vec<raea_sys_filters::Filtered>, u64, bool, bool);
+/// whether it blends in linear light (a bevy_ui page, `data-raea-blend="linear"`: Vello's set_blend_linear), and the
+/// page cut at its layered slot when the cut holds (slot_cache.rs).
+pub type Drawn = (Handle<Image>, UVec2, vello::Scene, Vec<raea_sys_filters::Filtered>, u64, bool, bool, Option<raea_sys_filters::split::Split>);
 
 /// Each page restyled and laid out (what changed).
 pub fn resolve(mut docs: NonSendMut<Docs>, pages: Query<(Entity, &Page)>, time: Res<Time>, clock: Res<PageClock>, mut scanned: Local<HashMap<Entity, usize>>) {
@@ -202,14 +205,31 @@ pub fn paint(mut docs: NonSendMut<Docs>, pages: Query<(Entity, &Page, &PageImage
         let mut scene = SPARE.lock().unwrap().pop().unwrap_or_default();
         scene.reset();
         let mut painter = raea_sys_filters::Painter::new(&mut scene, px.x, px.y);
+        // the textures placed on the page (draw.rs `view_at`: the layered 3D): the page is cut at one (slot_cache.rs)
+        if slot_cache::enabled() {
+            painter.split_at(draw::slot_blobs());
+        }
         let t1 = std::time::Instant::now();
         blitz_paint::paint_scene(&mut painter, doc, page.scale as f64, px.x, px.y, 0, 0);
         let (layers, print) = (std::mem::take(&mut painter.layers), painter.print());
+        if let Some(s) = painter.split.as_ref().filter(|s| !s.trace.is_empty()) {
+            eprintln!("raea-page: slot cache trace (slots {:?}):\n  {}", draw::slot_blobs(), s.trace.join("\n  "));
+        }
+        let print_now = painter.print();
+        if let Some(s) = painter.split.as_mut() {
+            s.finish(print_now);
+        }
+        let split = painter.split.take().filter(|s| {
+            if !s.usable() && std::env::var_os("RAEA_SLOT_CACHE_WHY").is_some() {
+                eprintln!("raea-page: slot cache: page not cut: {}", s.why.unwrap_or(if s.slot.is_none() { "no slot image painted" } else { "a layer left open" }));
+            }
+            s.usable() && layers.is_empty()
+        });
         TIMES.add_encode(t1.elapsed());
         // a page with a bevy_ui node (sdk/render bevy3d/ui.tsx marks each root Node) blends in linear light, as
         // Bevy's UI does on its sRGB target; the rest blend the encoded values, as Chrome does
         let linear = doc.query_selector("[data-raea-blend=linear]").ok().flatten().is_some();
-        out.push((image.0.clone(), px, scene, layers, print ^ ((linear as u64) << 63), straight, linear));
+        out.push((image.0.clone(), px, scene, layers, print ^ ((linear as u64) << 63), straight, linear, split));
     }
     *painted.0.lock().unwrap() = out;
     commands.insert_resource(painted.clone());

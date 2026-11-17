@@ -24,11 +24,34 @@ pub struct Painter<'s> {
     page: Rect,
     /// every call's arguments hashed: the same print as the last frame's draws the same picture (`print`)
     hash: rustc_hash::FxHasher,
+    /// the page cut at its layered slot (split.rs; `split_at`): its top-level calls also recorded into the pieces
+    pub split: Option<crate::split::Split>,
 }
 
 impl<'s> Painter<'s> {
     pub fn new(root: &'s mut vello::Scene, width: u32, height: u32) -> Self {
-        Painter { root, open: vec![], layers: vec![], depth: 0, page: Rect::new(0.0, 0.0, width as f64, height as f64), hash: Default::default() }
+        Painter { root, open: vec![], layers: vec![], depth: 0, page: Rect::new(0.0, 0.0, width as f64, height as f64), hash: Default::default(), split: None }
+    }
+
+    /// Record the page's pieces around the image whose blob is one of `slots` (a texture placed on the page: the
+    /// layered 3D), for raea-page's slot cache (split.rs). Nothing is recorded when `slots` is empty.
+    pub fn split_at(&mut self, slots: Vec<u64>) {
+        self.split = (!slots.is_empty()).then(|| crate::split::Split::new(slots));
+    }
+
+    fn note(&mut self, what: impl FnOnce() -> String) {
+        if crate::split::tracing()
+            && let Some(s) = self.split.as_mut()
+        {
+            let line = format!("depth {} open {}: {}", self.depth, self.open.len(), what());
+            s.trace.push(line);
+        }
+    }
+
+    fn unsplit(&mut self, why: &'static str) {
+        if let Some(s) = self.split.as_mut() {
+            s.unusable(why);
+        }
     }
 
     /// What was painted, as a number: the same as the last frame's, the page's picture hasn't changed (what's in a
@@ -162,8 +185,17 @@ impl<'s> Painter<'s> {
         self.layers.push(Filtered { scene, filter, scale: s as f32, origin: (0, 0), size: (tw as u32, th as u32), image, user: tile_at, linear, warp: None });
     }
 
-    /// Paint into the scene being painted, at its pixels.
-    fn with<R>(&mut self, f: impl FnOnce(&mut VelloScenePainter<'static, '_>, Affine) -> R) -> R {
+    /// Paint into the scene being painted, at its pixels; a top-level call into the split's current piece too.
+    fn with<R>(&mut self, f: impl Fn(&mut VelloScenePainter<'static, '_>, Affine) -> R) -> R {
+        let running = self.hash.finish();
+        if let Some(s) = self.split.as_mut() {
+            s.at(running);
+        }
+        if self.open.is_empty()
+            && let Some(s) = self.split.as_mut().and_then(|s| s.scene())
+        {
+            f(&mut VelloScenePainter::new(s), Affine::IDENTITY);
+        }
         let (scene, at) = self.top();
         f(&mut VelloScenePainter::new(scene), at)
     }
@@ -176,6 +208,9 @@ impl PaintScene for Painter<'_> {
         self.root.reset();
         self.open.clear();
         self.layers.clear();
+        if let Some(s) = self.split.take() {
+            self.split = Some(crate::split::Split::new(s.slots));
+        }
     }
 
     fn push_layer(
@@ -200,13 +235,23 @@ impl PaintScene for Painter<'_> {
             self.hash.write(format!("{filter:?}{backdrop_filter:?}").as_bytes());
         }
         if let Some(bd) = backdrop_filter.filter(|f| !f.nodes().is_empty()) {
+            self.unsplit("a backdrop filter");
             self.backdrop(fill, transform, clip, bd);
         }
         // a filter of no primitives (blitz-paint's mark of a backdrop root) still paints the layer apart
         let Some(filter) = filter else {
+            self.note(|| format!("push_layer blend {blend:?} alpha {alpha} at {:?} clip {:?}", transform.as_coeffs(), clip.bounding_box()));
+            if self.open.is_empty() {
+                let (depth, running) = (self.depth, self.hash.finish());
+                if let Some(s) = self.split.as_mut() {
+                    s.at(running);
+                    s.push(depth, blend, fill, transform, clip);
+                }
+            }
             self.deeper(1);
             return self.with(|p, at| p.push_layer(fill, blend, alpha, at * transform, clip, None, None));
         };
+        self.unsplit("a filtered layer");
         // the layer's box in device px: blitz-paint's clip is the border box already grown by the filter's reach
         let reach = reach(&filter, transform);
         let ((x0, y0), (w, h)) = self.region(transform.transform_rect_bbox(clip.bounding_box()), Rect::ZERO, reach);
@@ -223,6 +268,7 @@ impl PaintScene for Painter<'_> {
     /// A CSS 3D transform's perspective (B3 H5): the content drawn in its own space into a scene of its own, which the
     /// filter passes warp onto the box its corners land in (`Passes::run`, the warp pass).
     fn push_warp_layer(&mut self, h: [f64; 9], bounds: Rect) {
+        self.unsplit("a perspective layer");
         self.hash.write_u8(14);
         self.f64s(&h);
         self.f64s(&[bounds.x0, bounds.y0, bounds.x1, bounds.y1]);
@@ -284,6 +330,20 @@ impl PaintScene for Painter<'_> {
         self.hash.write_u8(fill as u8);
         self.affine(transform);
         self.shape(clip);
+        self.note(|| format!("push_clip_layer at {:?} clip {:?} rect {}", transform.as_coeffs(), clip.bounding_box(), clip.as_rect().is_some()));
+        if self.open.is_empty() {
+            let (depth, running) = (self.depth, self.hash.finish());
+            if let Some(s) = self.split.as_mut() {
+                s.at(running);
+                // before the slot, held back: it may be the slot's own clip (split.rs)
+                if s.defer_clip(depth, fill, transform, clip.as_rect()) {
+                    self.deeper(1);
+                    let (scene, at) = self.top();
+                    return VelloScenePainter::new(scene).push_clip_layer(fill, at * transform, clip);
+                }
+                s.push(depth, BlendMode::default(), fill, transform, clip);
+            }
+        }
         self.deeper(1);
         self.with(|p, at| p.push_clip_layer(fill, at * transform, clip));
     }
@@ -316,7 +376,17 @@ impl PaintScene for Painter<'_> {
             }
             None => self.depth = self.depth.saturating_sub(1),
         }
+        self.note(|| "pop_layer".into());
+        let top = self.open.is_empty();
+        // the slot's own clip closed: in no piece (split.rs)
+        if top && self.split.as_mut().is_some_and(|s| s.pop_is_slot_clip()) {
+            let (scene, _) = self.top();
+            return VelloScenePainter::new(scene).pop_layer();
+        }
         self.with(|p, _| p.pop_layer());
+        if top && let Some(s) = self.split.as_mut() {
+            s.pop();
+        }
     }
 
     fn stroke<'a>(&mut self, style: &Stroke, transform: Affine, brush: impl Into<PaintRef<'a>>, brush_transform: Option<Affine>, shape: &impl Shape) {
@@ -329,7 +399,7 @@ impl PaintScene for Painter<'_> {
         self.affine(brush_transform.unwrap_or(Affine::IDENTITY));
         self.shape(shape);
         let brush_transform = centred(&brush, transform, brush_transform);
-        self.with(|p, at| p.stroke(style, at * transform, brush, brush_transform, shape));
+        self.with(|p, at| p.stroke(style, at * transform, brush.clone(), brush_transform, shape));
     }
 
     fn fill<'a>(&mut self, style: Fill, transform: Affine, brush: impl Into<PaintRef<'a>>, brush_transform: Option<Affine>, shape: &impl Shape) {
@@ -343,10 +413,22 @@ impl PaintScene for Painter<'_> {
         if let Paint::Custom(c) = &brush
             && let Some(t) = c.downcast_ref::<blitz_paint::TilePattern>()
         {
+            self.unsplit("a tiled pattern");
             return self.pattern(style, transform, t, shape);
         }
         let brush_transform = centred(&brush, transform, brush_transform);
-        self.with(|p, at| p.fill(style, at * transform, brush, brush_transform, shape));
+        self.note(|| format!("fill {} at {:?} bt {:?} shape {:?}", match &brush { Paint::Image(i) => format!("image {} {}x{} q {:?} a {}", i.image.data.id(), i.image.width, i.image.height, i.sampler.quality, i.sampler.alpha), Paint::Solid(_) => "solid".into(), Paint::Gradient(_) => "gradient".into(), _ => "other".into() }, transform.as_coeffs(), brush_transform.map(|b| b.as_coeffs()), shape.bounding_box()));
+        // the layered slot's image: the cut (split.rs), painted into the page only
+        let running = self.hash.finish();
+        if self.open.is_empty() && let Some(s) = self.split.as_mut() && let Paint::Image(i) = &brush {
+            s.at(running);
+            let ok = i.sampler.alpha == 1.0 && i.sampler.quality != ImageQuality::High;
+            if s.fill_is_slot(Some(i.image.data.id()), transform, brush_transform, shape.as_rect(), self.depth, (i.image.width, i.image.height), ok, true) {
+                let (scene, at) = self.top();
+                return VelloScenePainter::new(scene).fill(style, at * transform, brush, brush_transform, shape);
+            }
+        }
+        self.with(|p, at| p.fill(style, at * transform, brush.clone(), brush_transform, shape));
     }
 
     fn draw_glyphs<'a, 's: 'a>(
@@ -385,6 +467,15 @@ impl PaintScene for Painter<'_> {
             self.hash.write_u32(g.id);
             self.hash.write_u32(g.x.to_bits());
             self.hash.write_u32(g.y.to_bits());
+        }
+        let running = self.hash.finish();
+        if let Some(s) = self.split.as_mut() {
+            s.at(running);
+        }
+        if self.open.is_empty()
+            && let Some(s) = self.split.as_mut().and_then(|s| s.scene())
+        {
+            VelloScenePainter::new(s).draw_glyphs(font, font_size, hint, normalized_coords, embolden, style, brush.clone(), brush_alpha, transform, glyph_transform, glyphs.clone());
         }
         let (scene, at) = self.top();
         VelloScenePainter::new(scene).draw_glyphs(font, font_size, hint, normalized_coords, embolden, style, brush, brush_alpha, at * transform, glyph_transform, glyphs);
