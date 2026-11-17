@@ -161,6 +161,9 @@ impl Live {
         self.step_cast(f);
         // the open's transients (the bundle, its first settle, the first rows) handed back (shots.rs trim)
         super::shots::trim();
+        if let Some(e) = self.scene.as_ref() {
+            e.asset_census("cast set");
+        }
         eprintln!("raea play --cast: after its open, {}", super::shots::mem());
         Ok(())
     }

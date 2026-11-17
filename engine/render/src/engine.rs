@@ -358,6 +358,14 @@ impl Engine {
         self.set_rows(rows)
     }
 
+    /// RAEA_ASSET_CENSUS=1: the main World's meshes and images now, said on stderr with `at` (the live player's cast:
+    /// after its first rows, which load its models into this engine after the open's own census)
+    pub fn asset_census(&self, at: &str) {
+        if std::env::var_os("RAEA_ASSET_CENSUS").is_some() {
+            open::asset_census(self.app.world(), at);
+        }
+    }
+
     /// Whether the engine holds row (`kind`, `id`) as its timeline's (not a live row): a live layer over a shot passes
     /// such a row by (set_rows_over refuses it)
     pub fn timeline_row(&self, kind: &str, id: &str) -> bool {
