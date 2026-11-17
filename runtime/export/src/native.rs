@@ -709,7 +709,8 @@ fn unzstd_capped(b: &[u8], max: u64) -> R<Vec<u8>> {
 
 /// The most a native-4 reader copies out of the string table into the Program (2 GiB): each cell and ease naming a
 /// string takes its own copy (V::S holds a String here), so a crafted bake naming one big string from many cells would
-/// multiply it; past this it's refused. (On Arc<str> strings every cell shares one, and this only counts.)
+/// multiply it; past this it's refused. String values (V::S, an Arc<str>) are copied once each, however many cells
+/// name them; column names, kinds, ids and eases are still copied per use.
 const STRING_COPY_BUDGET: usize = 2 << 30;
 
 fn prog_from_bin(meta: &Value, strings: &[String], bin: &[u8]) -> R<Program> {
@@ -722,6 +723,18 @@ fn prog_from_bin_capped(meta: &Value, strings: &[String], bin: &[u8], budget: us
         let t = strings.get(i).ok_or_else(|| format!("the bake's 3D names string {i} of {}", strings.len()))?;
         left.set(left.get().checked_sub(t.len()).ok_or("the bake's 3D copies more string bytes than a bake may hold")?);
         Ok(t.clone())
+    };
+    // a string value is held once however many cells name it (V::S is an Arc<str>): its first naming copies it out of
+    // the table, counted against the budget once, and every later one shares that copy (a shape 300 mesh rows carry
+    // was 300 copies, made by the stop-gap .into())
+    let shared: std::cell::RefCell<Vec<Option<std::sync::Arc<str>>>> = std::cell::RefCell::new(vec![None; strings.len()]);
+    let sv = |i: usize| -> R<std::sync::Arc<str>> {
+        if let Some(a) = shared.borrow().get(i).and_then(|a| a.clone()) {
+            return Ok(a);
+        }
+        let a: std::sync::Arc<str> = s(i)?.into();
+        shared.borrow_mut()[i] = Some(a.clone());
+        Ok(a)
     };
     let mut c = Cur { b: bin, at: 0 };
     let mut p = Program {
@@ -741,7 +754,7 @@ fn prog_from_bin_capped(meta: &Value, strings: &[String], bin: &[u8], budget: us
                 let col = s(c.u32()?)?;
                 let v = match c.u8()? {
                     0 => V::N(f64::from_bits(c.u64()?)),
-                    1 => V::S(s(c.u32()?)?.into()),
+                    1 => V::S(sv(c.u32()?)?),
                     t => return Err(format!("the bake's 3D has a value of kind {t}")),
                 };
                 r.insert(col, v);
@@ -1814,7 +1827,7 @@ mod bin_tests {
         let mut p = Program { fps: 30.0, width: 1920, height: 1080, frames: 150, ..Default::default() };
         let shape = "mesh(1 2 3; 4 5 6)".repeat(50);
         let row = |id: &str| -> BTreeMap<String, V> {
-            [("id".to_string(), V::S(id.into())), ("shape".to_string(), V::S(shape.clone())), ("x".to_string(), V::N(-0.0)), ("y".to_string(), V::N(f64::NAN)), ("z".to_string(), V::N(f64::INFINITY))].into_iter().collect()
+            [("id".to_string(), V::S(id.into())), ("shape".to_string(), V::S(shape.clone().into())), ("x".to_string(), V::N(-0.0)), ("y".to_string(), V::N(f64::NAN)), ("z".to_string(), V::N(f64::INFINITY))].into_iter().collect()
         };
         p.spawns.push(("mesh".into(), vec![row("mesh0"), row("mesh1")]));
         p.spawns.push(("light".into(), vec![[("id".to_string(), V::S("light0".into())), ("k".to_string(), V::N(1e-300))].into_iter().collect()]));
@@ -1881,17 +1894,20 @@ mod bin_tests {
     }
 
     #[test]
-    fn a_big_string_named_many_times_is_refused() {
-        // one 1 MB string named by 2,000 cells: 2 GB of copies against a 64 MB budget
+    fn a_big_string_named_many_times_is_held_once() {
+        // one 1 MB string named by 2,000 cells: one copy (2 GB if copied per cell), so a 64 MB budget holds it and a
+        // budget under 1 MB still refuses it
         let mut p = Program { fps: 30.0, width: 8, height: 8, frames: 1, ..Default::default() };
         let big = "x".repeat(1 << 20);
-        let rows: Vec<BTreeMap<String, V>> = (0..2000).map(|i| [("id".to_string(), V::S(format!("m{i}"))), ("shape".to_string(), V::S(big.clone()))].into_iter().collect()).collect();
+        let rows: Vec<BTreeMap<String, V>> = (0..2000).map(|i| [("id".to_string(), V::S(format!("m{i}").into())), ("shape".to_string(), V::S(big.clone().into()))].into_iter().collect()).collect();
         p.spawns.push(("mesh".into(), rows));
         let mut st = Strs::default();
         let bin = prog_bin(&p, &mut st);
         let meta = json!({"fps": 30, "width": 8, "height": 8, "frames": 1});
-        assert!(prog_from_bin_capped(&meta, &st.list, &bin, 64 << 20).is_err(), "an oversized copy refused");
-        assert!(prog_from_bin_capped(&meta, &st.list, &bin, usize::MAX).is_ok());
+        let q = prog_from_bin_capped(&meta, &st.list, &bin, 64 << 20).expect("one copy fits");
+        let (V::S(a), V::S(b)) = (&q.spawns[0].1[0]["shape"], &q.spawns[0].1[1999]["shape"]) else { panic!("shapes are strings") };
+        assert!(std::sync::Arc::ptr_eq(a, b), "two rows naming one shape hold it once");
+        assert!(prog_from_bin_capped(&meta, &st.list, &bin, 512 << 10).is_err(), "a string past the budget refused");
     }
 
     #[test]
