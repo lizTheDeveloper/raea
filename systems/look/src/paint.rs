@@ -61,6 +61,11 @@ fn paint_lights(frame: &FrameRows, lights: &Query<Entity, Or<(With<PointLight>, 
         return PaintLights::default();
     }
     at.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // past 8, the ones kept are the first by position, not the brightest or nearest: said once, the picture as it was
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if at.len() > 8 && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("raea: paint: {} lights ask for paint; the first 8 by position are kept (paint looks take at most 8)", at.len());
+    }
     at.truncate(8);
     let mut l = PaintLights { k: Vec4::new(at.len() as f32, LIGHT_BAND_LUX, 4.0, 1.25), ..default() };
     for (i, p) in at.iter().enumerate() {
