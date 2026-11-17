@@ -62,7 +62,7 @@ fn a_verb_refuses_what_it_doesnt_take() {
         &["render", "e.tsx", "-o", "o.mp4", "--kbps", "-6"],
         &["render", "--bundle", "a.comp.js", "-o", "o.png", "--dir", "d", "--frame", "3"],
         &["play", "g.tsx", "--input-script", "k.json", "--input-log", "l.json", "--offscreen", "--seconds", "end", "--size", "540x960", "--snapshot", "1.5", "a.png", "--seek", "30", "b.png", "--json", "p.json"],
-        &["play", "g.tsx", "--input", "--baked", "--scrub", "8", "--autoplay", "--no-vsync", "--master", "--3d"],
+        &["play", "g.tsx", "--input", "--baked", "--scrub", "8", "--autoplay", "--no-vsync", "--master", "--3d", "--watch"],
         &["export-game", "g.tsx", "--keys", "arrows", "-o", "G.app"],
         &["sounds", "get", "vsco/piano", "--all", "-o", "d"],
         &["song", "s.wav", "--plot", "p.png", "--backend", "x"],

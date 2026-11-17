@@ -12,6 +12,35 @@ concurrency:
   group: mac-live
   cancel-in-progress: true
 jobs:
+  # the play crate checked and its watch test run on Linux first: a compile error shows in minutes, not after the Mac's build
+  check:
+    if: github.ref == 'refs/heads/live'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: false
+      - name: Linux libraries
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build nasm libxkbcommon-dev libxkbcommon-x11-dev libasound2-dev libfontconfig1-dev libvulkan-dev libudev-dev
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: The runtime's packages
+        run: for d in sdk/react/js sdk/react/tw; do (cd "$d" && bun install --frozen-lockfile); done
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: live-check-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: live-check-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Check and test play's watch
+        run: |
+          cargo check --locked -p raea-app-play -p raea-cli
+          cargo test --locked -p raea-app-play watch
   build:
     if: github.ref == 'refs/heads/live'
     runs-on: macos-15

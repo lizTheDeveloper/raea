@@ -42,6 +42,36 @@ impl Run {
 
     pub(crate) fn frame(&mut self, el: &ActiveEventLoop) -> R<()> {
         self.apply_window();
+        // --watch: a saved file reloads the composition in place (watch.rs). The new one opens while the old one's last
+        // frame stays on screen; the film's frame is kept and the clock moved so it carries on from there. A
+        // composition that doesn't open keeps the old one playing, and the error is said.
+        if let Some(saved) = self.watch.as_mut().map(|w| w.changed()).filter(|s| !s.is_empty()) {
+            let t = Instant::now();
+            let names: Vec<String> = saved.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
+            let size = self.live.as_ref().map(|l| (l.w, l.h)).unwrap_or(self.size);
+            let fps = self.live.as_ref().map(|l| l.fps).unwrap_or(30.0);
+            // the new one opens beside the old (a save that doesn't bundle, mid-edit, leaves the old one playing);
+            // the old one is released as soon as the new one is in
+            match Live::open(&self.tsx, size) {
+                Ok(mut l) => {
+                    drop(self.live.take());
+                    if self.frame >= 0 {
+                        l.step(self.frame, &self.keys, self.pointer)?;
+                    }
+                    self.live = Some(l);
+                    self.start = Some(Instant::now() - Duration::from_secs_f64(self.frame.max(0) as f64 / fps.max(1.0)));
+                    raea_io_trace::event("reload", serde_json::json!({"files": names, "ms": t.elapsed().as_secs_f64() * 1e3, "frame": self.frame}));
+                    eprintln!("raea play: reloaded ({}) in {:.0} ms, at frame {}", names.join(", "), t.elapsed().as_secs_f64() * 1e3, self.frame);
+                }
+                Err(e) => {
+                    eprintln!("raea play: {} didn't reload ({e}); the last good one plays on: fix and save again", names.join(", "));
+                    raea_io_trace::event("reload_failed", serde_json::json!({"files": names, "error": e}));
+                }
+            }
+            if let Some(w) = self.watch.as_mut() {
+                w.refresh();
+            }
+        }
         let (Some(live), Some(stage)) = (self.live.as_mut(), self.stage.as_mut()) else { return Ok(()) };
         let start = *self.start.get_or_insert_with(Instant::now);
         let t0 = Instant::now();

@@ -25,6 +25,7 @@ use raea_runtime_live::Live;
 
 mod run;
 mod offscreen;
+mod watch;
 use offscreen::*;
 #[cfg(test)]
 mod tests;
@@ -82,6 +83,8 @@ struct Run {
     reusable: Vec<u64>,
     last_rss: Option<Instant>,
     error: Option<String>,
+    /// --watch: the composition's files, reloaded in place when one is saved (watch.rs)
+    watch: Option<watch::Watch>,
 }
 
 fn rss_kb() -> u64 {
@@ -169,7 +172,11 @@ pub fn play(args: &[String]) -> R<String> {
         reusable: Vec::new(),
         last_rss: None,
         error: None,
+        watch: args.iter().any(|a| a == "--watch").then(|| watch::Watch::new(&PathBuf::from(&args[1]))),
     };
+    if let Some(w) = &run.watch {
+        eprintln!("raea play: watching {} files of {} (--watch: a save reloads it in place)", w.len(), run.tsx.display());
+    }
     if args.iter().any(|a| a == "--offscreen") {
         // --snapshot S OUT.png (repeatable): the page read back at S seconds
         let snaps: Vec<(f64, String)> = args.windows(3).filter(|w| w[0] == "--snapshot").filter_map(|w| Some((w[1].parse().ok()?, w[2].clone()))).collect();
