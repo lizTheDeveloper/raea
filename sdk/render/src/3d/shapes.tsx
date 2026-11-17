@@ -483,5 +483,20 @@ export function Mesh(props: MeshProps) {
   const id = useId();
   const m = usePlace3d(position, rotation, scale, props.quaternion);
   usePointer3d(props.name ?? id, m, () => (shape === undefined ? boundsFromChildren(props.children) : undefined), props as Record<string, unknown>);
-  return node3d("Mesh", { ...props, animate: undefined, shape: undefined, position, rotation, scale, attributes: props.attributes && JSON.stringify(props.attributes) }, <Place3d.Provider value={m}>{props.children}</Place3d.Provider>, Object.keys(extra).length ? extra : undefined);
+  const attrs = props.attributes && attributesJson(props.attributes);
+  return node3d("Mesh", { ...props, animate: undefined, shape: undefined, position, rotation, scale, attributes: undefined }, <Place3d.Provider value={m}>{props.children}</Place3d.Provider>, Object.keys(extra).length ? extra : undefined, attrs ? { attributes: attrs } : undefined);
+}
+
+/** A mesh's own attributes as the renderer reads them (their JSON, as a JSON string), made once per set of attribute
+ * and value arrays: React draws a <Mesh> every frame with the same arrays (a 24-crane flock's are 45 KB), and writing
+ * them twice a frame took ~3 ms of a live frame in QuickJS. Kept by the first values array; remade when any part is new. */
+const attributesMade = new WeakMap<object, { of: unknown[]; json: string }>();
+function attributesJson(a: MeshAttribute[]): string {
+  const of = a.flatMap((e) => (Array.isArray(e) ? [e[0], e[1]] : [e]));
+  const key = Array.isArray(a[0]) && a[0][1] !== null && typeof a[0][1] === "object" ? (a[0][1] as object) : null;
+  const had = key ? attributesMade.get(key) : undefined;
+  if (had && had.of.length === of.length && had.of.every((x, i) => x === of[i])) return had.json;
+  const json = JSON.stringify(JSON.stringify(a));
+  if (key) attributesMade.set(key, { of, json });
+  return json;
 }

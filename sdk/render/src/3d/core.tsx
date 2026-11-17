@@ -13,9 +13,12 @@ export function serialisable(props: Record<string, unknown>): Record<string, unk
   return out;
 }
 
-export function node3d(kind: string, props: Record<string, unknown>, children?: ReactNode, extra?: Record<string, string>) {
+/** `raw`: props already as JSON text (a large value kept serialised by its owner), added to the props' JSON as they are */
+export function node3d(kind: string, props: Record<string, unknown>, children?: ReactNode, extra?: Record<string, string>, raw?: Record<string, string>) {
+  let json = JSON.stringify(serialisable(props));
+  if (raw) for (const [k, v] of Object.entries(raw)) json = json === "{}" ? `{${JSON.stringify(k)}:${v}}` : `${json.slice(0, -1)},${JSON.stringify(k)}:${v}}`;
   return (
-    <div data-3d={kind} data-props={JSON.stringify(serialisable(props))} {...extra}>
+    <div data-3d={kind} data-props={json} {...extra}>
       {children}
     </div>
   );
