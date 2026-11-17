@@ -124,6 +124,10 @@ impl Engine {
         if std::env::var("RAEA_BEVY_PASSES").as_deref() == Ok("1") {
             app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin).add_systems(Last, forward_render_diagnostics);
         }
+        // RAEA_SCENE_STATS=FILE: a line a frame of what the GPU is given (stats.rs); with RAEA_BEVY_PASSES=1, each pass's GPU time
+        if stats::wanted() {
+            stats::install(&mut app);
+        }
         // raea's modules as Bevy plugins, in the order they were installed one by one (raea_plugins.rs), then the
         // registered Bevy plugins and the frame clock they step by (plugins.rs; nothing when none are)
         app.add_plugins((raea_plugins::RaeaPlugins, raea_plugins::RegisteredPlugins { fps: prog.fps }));
