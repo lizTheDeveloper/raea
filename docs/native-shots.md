@@ -288,6 +288,53 @@ line), so none fell back.
 
 ---
 
+## Shot switch: a kept engine that draws exactly as a fresh one (pc230, branch `switch`)
+
+A cut in the live player, and a served batch's next shot, reload a kept engine (`Engine::reload*`) instead of opening
+a new one. Two problems: the switch stalled for seconds, and a kept engine's frames weren't the fresh engine's.
+
+**Where a switch went (combined2, 3090 dev box, render-serve with RAEA_KEEP_ENGINE=1, 60-frame shots):**
+
+| | Ch5 2400 -> 2460 | Ch5 -> Ch2 14189 | Ch2 14189 -> 14249 |
+|---|---|---|---|
+| reload | 2079 ms | 6319 ms | 2801 ms |
+| of which: the timeline (Timeline::from_cols) | 956 | 973 | 1001 |
+| the map files decoded again | 137 | 16 (+ spawn 651) | 192 |
+| glTF files | 0.1 (still held) | 898 | 1.6 |
+| model updates (scene spawn, toon, uploads, pipelines) | 447 | 3728 | 866 |
+| 8 warm-up updates | 250 | 340 | 255 |
+
+An engine open (Ch5, 7.4 s): device 0.5, finish and cleanup 0.5, rows 0.2, spawn 0.2, timeline 0.7, glTF files one at
+a time 1.5, the first model updates 3.3 (1.4 of it the main world's first update), warm-up 0.3.
+
+**What a kept engine carried that a fresh one didn't** (found with RAEA_STATE_DUMP and RAEA_ROWS_DUMP +
+tools/native-diff.py, each fixed and gated):
+1. **Fonts.** The plugin's font system held the faces earlier shots loaded, so the same text laid out with other
+   matches: Ch5 2460 after 2400, 176 glyphs up to 1.7 mm off, the clock's numerals 44 dB on frames 0-1.
+   `text3d::fonts_take` (before an engine's first load) and `fonts_restore` (each reload).
+2. **Clock stepping.** A shot's last frame left Time advancing a frame per update (plugins::arm), so a reload's
+   warm-ups ran Bevy's clocks 11 frames on where a fresh engine's held them; raea's frame clock was the last shot's last
+   frame, not 0. Pristine now keeps the Clock, TimeUpdateStrategy and the plugin clock's steps.
+3. **Draw order.** Bevy sorts binned phases by pipeline id, material slot, slab and mesh asset id, all handed out in
+   the engine's history; a tie between two surfaces at one depth went to the later draw. `dsort.rs`: a SceneKey per
+   mesh (its row and child path), and the opaque, alpha-mask, prepass and shadow bins re-sorted by it after PhaseSort
+   (a batch set's bins together). Transparent ties past the name, and Transmissive3d, go by it too.
+   RAEA_DRAW_ORDER=bevy: Bevy's.
+4. **Light order.** The shader sums lights in prepare_lights' order (type, shadows, then render Entity) and in each
+   cluster's list as the main world's query met them: sub-1/255 on a few pixels whenever entity ids differed, even
+   between two fresh engines whose worlds made one more resource first. Vendored bevy_pbr (`raea:`): LightOrderKeys
+   from the lights' SceneKeys, each cluster's run in that order.
+
+Once the order is the scene's, the order things load in no longer matters for the picture, so a shot's glTFs are
+asked ahead and together (`Prepared.models`, `Engine::preload`, `Opening::preload`; RAEA_PRELOAD=0: one at a time).
+
+**Prepare-ahead (the live player's cut).** `Prepared::new(Arc<Program>, dir, &engine.map_sources())` is Send: on a
+thread it makes the rows, the timeline (its base gathered from the rows in a store of their own, as the load gathers
+it; RAEA_PREPARE_CHECK=1 compares) and the shot's map files decoded and mipped, skipping maps the engine holds.
+`engine.preload(&p)` between frames starts its glTFs loading. At the cut, `engine.reload_prepared(p)`.
+`reload_arc(&Arc<Program>, rows)` is the plain switch without the copy. A served native shot prepares on a thread
+beside its page's opening (RAEA_PREPARE=0: as before).
+
 ## HANDOFF (2026-11-16): read this first
 
 ### Current build and pin
