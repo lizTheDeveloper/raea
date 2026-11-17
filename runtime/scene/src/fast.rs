@@ -69,7 +69,7 @@ impl LiveScene {
                 // an <Instances> placed elsewhere (`current` sent its list): the full path, which sends the new one (#85)
                 if let Some(at) = &it.at && self.panel_srcs.get(key.as_str()).is_none_or(|s| !std::sync::Arc::ptr_eq(s, at) && s != at) { return None }
                 // a mesh glowing in another colour than sent (none is black): the full path, which keys it (#106)
-                if it.kind == "mesh" && it.material.as_ref().and_then(|m| m.props.get("emissive")).and_then(Value::as_str).and_then(hex_cow).filter(|e| e != "#000000").as_deref() != self.rows[id].sent.get("emissive").and_then(|v| if let V::S(s) = v { Some(s.as_str()) } else { None }) { return None }
+                if it.kind == "mesh" && it.material.as_ref().and_then(|m| m.props.get("emissive")).and_then(Value::as_str).and_then(hex_cow).filter(|e| e != "#000000").as_deref() != self.rows[id].sent.get("emissive").and_then(|v| if let V::S(s) = v { Some(s.as_ref()) } else { None }) { return None }
                 parts.push((i, id));
             }
         }
@@ -243,7 +243,7 @@ impl LiveScene {
             };
             if kind == "mesh" {
                 let c = color.as_deref().unwrap_or("#cccccc");
-                if !matches!(r.first.get("color"), Some(V::S(s)) if s == c) {
+                if !matches!(r.first.get("color"), Some(V::S(s)) if &**s == c) {
                     r.recoloured = true;
                 }
                 if r.recoloured {

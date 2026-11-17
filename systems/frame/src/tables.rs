@@ -35,7 +35,7 @@ impl Table {
                             o.iter()
                                 .filter_map(|(k, v)| match v {
                                     serde_json::Value::Number(n) => Some((k.clone(), V::N(n.as_f64().unwrap_or(0.0)))),
-                                    serde_json::Value::String(x) => Some((k.clone(), V::S(x.clone()))),
+                                    serde_json::Value::String(x) => Some((k.clone(), V::s(x.clone()))),
                                     _ => None,
                                 })
                                 .collect()
@@ -127,7 +127,7 @@ impl Cuts {
             .iter()
             .flat_map(|(_, rows)| rows)
             .filter_map(|r| match (r.get("id"), r.get(TABLES[1].0)) {
-                (Some(V::S(id)), Some(V::S(list))) => Some((id.as_str(), Table::parse(list))),
+                (Some(V::S(id)), Some(V::S(list))) => Some((&**id, Table::parse(list))),
                 _ => None,
             })
             .collect();

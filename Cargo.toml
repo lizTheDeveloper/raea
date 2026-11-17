@@ -304,6 +304,9 @@ bevy_seedling = { path = "vendor/bevy_seedling" }
 bevy_text = { path = "vendor/bevy_text" }
 # bevy_ui 0.20.0 on Taffy 0.15, Blitz's, so one Taffy builds (changes marked "raea:", docs/bevy-upgrade.md)
 bevy_ui = { path = "vendor/bevy_ui" }
+# bevy_render 0.20.0 with a fast path for non-bindless materials whose uniform data alone changed: written into the bind
+# group's own buffers, not freed and made again (changes marked "raea:"; Bevy's TODO in material_bind_groups.rs)
+bevy_render = { path = "vendor/bevy_render" }
 # bevy_solari 0.20.0 with alpha-tested and alpha-blended materials traced by their alpha, StandardMaterial's
 # uv_transform, and a panorama's sun sampled as a light rather than found by reflection rays alone (changes marked
 # "raea:", docs/raytracing.feature RT6). Back to upstream once Solari has these.

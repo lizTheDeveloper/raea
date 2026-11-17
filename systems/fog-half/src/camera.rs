@@ -40,7 +40,7 @@ pub fn vfog(world: &mut World, e: Entity, vals: &Vals) {
     // film's plot and curia, Mean Streets), in SSIM, PSNR, ms a frame and bitrate, so it's the default;
     // RAEA_FOG_MODE=froxel forces it over a march row
     let env_mode = std::env::var("RAEA_FOG_MODE");
-    let march = vals.get("vfog_mode").is_some_and(|m| matches!(m, V::S(s) if s == "march")) && env_mode.as_deref() != Ok("froxel");
+    let march = vals.get("vfog_mode").is_some_and(|m| matches!(m, V::S(s) if &**s == "march")) && env_mode.as_deref() != Ok("froxel");
     let grid = !reference && !march && env_mode.as_deref() != Ok("march");
     if grid {
         let lin = fog.ambient_color.to_linear();

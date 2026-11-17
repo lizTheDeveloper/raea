@@ -19,7 +19,7 @@ pub fn inserted_of(p: &Program) -> Vec<Tup> {
     for (kind, rows) in &p.spawns {
         for r in rows {
             let id = match r.get("id") {
-                Some(V::S(s)) => s.clone(),
+                Some(V::S(s)) => s.to_string(),
                 _ => format!("{kind}{}", out.len()),
             };
             out.push(Tup { kind: kind.clone(), id, vals: r.iter().filter(|(k, _)| *k != "id").map(|(k, v)| (k.clone(), v.clone())).collect() });

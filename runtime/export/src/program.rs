@@ -19,7 +19,7 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
     // resource (srgb 43, 44, 47 unless a <BevyResource type="bevy_camera::clear_color::ClearColor"> sets it), as a Bevy
     // scene does (docs/control conventions C17)
     let clear = if ALPHA.load(std::sync::atomic::Ordering::Relaxed) { Some("#00000000".into()) } else { frames.first().and_then(|(_, f)| f.clear.clone()).and_then(|c| hex_of(&c)).or_else(|| (!has3d).then(|| "#000000".into())) };
-    let mut cam = row("cam", clear.map(|c| ("bg", V::S(c))).into_iter().collect());
+    let mut cam = row("cam", clear.map(|c| ("bg", V::s(c))).into_iter().collect());
     // a holder's background that changes over the frames: the clear keyed frame by frame (bg_r, bg_g, bg_b, bg_a, sRGB),
     // as the page over it changes. Before, the first frame's clear held for the whole render.
     if has3d && !ALPHA.load(std::sync::atomic::Ordering::Relaxed) {
@@ -48,7 +48,7 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
         }
     }
     for (k, (hash, a, b)) in runs.iter().enumerate() {
-        p.spawns.push(("image".into(), vec![row(&format!("page{k}"), vec![("src", V::S(format!("asset:{hash}"))), ("x", V::N(0.0)), ("y", V::N(0.0)), ("w", V::N(w as f64)), ("h", V::N(h as f64)), ("from", V::N(*a as f64)), ("to", V::N(*b as f64)), ("z", V::N(10.0))])]));
+        p.spawns.push(("image".into(), vec![row(&format!("page{k}"), vec![("src", V::s(format!("asset:{hash}"))), ("x", V::N(0.0)), ("y", V::N(0.0)), ("w", V::N(w as f64)), ("h", V::N(h as f64)), ("from", V::N(*a as f64)), ("to", V::N(*b as f64)), ("z", V::N(10.0))])]));
     }
     // each <Screen>'s pictures on the bevy_ui page: a row per run of frames showing the same one, which raea-render's engine
     // draws into the screen's image (engine/render/src/engine/screen_page.rs)
@@ -64,7 +64,7 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
     }
     for (name, runs) in &shown {
         for (k, (hash, a, b)) in runs.iter().enumerate() {
-            p.spawns.push(("screenpage".into(), vec![row(&format!("screenpage-{name}-{k}"), vec![("name", V::S(name.clone())), ("src", V::S(format!("asset:{hash}"))), ("from", V::N(*a as f64)), ("to", V::N(*b as f64))])]));
+            p.spawns.push(("screenpage".into(), vec![row(&format!("screenpage-{name}-{k}"), vec![("name", V::s(name.clone())), ("src", V::s(format!("asset:{hash}"))), ("from", V::N(*a as f64)), ("to", V::N(*b as f64))])]));
         }
     }
     // sound: per element, the stretches its source time runs on frame to frame
@@ -88,7 +88,7 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
             let (f0, s0) = (list[k].0, &list[k].1);
             let id = format!("sound{n}");
             let vols: Vec<f64> = list[k..=j].iter().map(|(_, s)| s.volume).collect();
-            let mut cols = vec![("src", V::S(s0.src.clone())), ("from", V::N(f0 as f64)), ("to", V::N((list[j].0 + 1) as f64)), ("src_in", V::N(r6(s0.at)))];
+            let mut cols = vec![("src", V::s(s0.src.clone())), ("from", V::N(f0 as f64)), ("to", V::N((list[j].0 + 1) as f64)), ("src_in", V::N(r6(s0.at)))];
             if vols.iter().all(|v| (*v - vols[0]).abs() < 1e-9) {
                 cols.push(("gain", V::N(r3(db(vols[0])))));
             } else {
@@ -99,12 +99,12 @@ pub(crate) fn program(frames: &[(i64, Frame)], w: u32, h: u32, fps: f64) -> raea
             }
             // what the mixer core needs to play these rows exactly as the frames played: the element's key, its exact
             // first volume, source time, rate and bus (snd_*: raea-render's lanes read src_in and gain; the core reads these)
-            cols.push(("snd_key", V::S(s0.key.clone())));
+            cols.push(("snd_key", V::s(s0.key.clone())));
             cols.push(("snd_vol", V::N(s0.volume)));
             cols.push(("snd_at", V::N(s0.at)));
             cols.push(("snd_rate", V::N(s0.rate)));
             if let Some(b) = &s0.bus {
-                cols.push(("snd_bus", V::S(b.clone())));
+                cols.push(("snd_bus", V::s(b.clone())));
             }
             if let Some(v) = s0.fade_in.filter(|v| *v > 0.0 && k == 0) {
                 cols.push(("fade_in", V::N(r6(v))));
@@ -146,20 +146,20 @@ pub(crate) fn sound_lint(p: &raea_core_program::ir::Program, fps: f64) {
             };
             let (Some(V::S(src)), Some(from), Some(to)) = (r.get("src"), n("from"), n("to")) else { continue };
             let (rate, src_in) = (n("snd_rate").unwrap_or(1.0), n("src_in").unwrap_or(0.0));
-            let Some(have) = *len.entry(src.clone()).or_insert_with(|| raea_io_media::probe_seconds(Path::new(src))) else { continue };
+            let Some(have) = *len.entry(src.to_string()).or_insert_with(|| raea_io_media::probe_seconds(Path::new(&**src))) else { continue };
             // seconds of the stretch left when the source ends
             let short = (src_in + (to - from) / fps * rate - have) / rate.max(1e-6);
             // a take that has gone quiet by its end (a line said, its room after) ends as it would have; one still
             // sounding, or whose fade-out was asked for, is cut
             let fades = n("fade_out").is_some_and(|v| v > 0.0);
             let sounding = || {
-                raea_io_media::decode_audio_window(Path::new(src), (have - 0.1).max(0.0), 0.1).is_ok_and(|a| {
+                raea_io_media::decode_audio_window(Path::new(&**src), (have - 0.1).max(0.0), 0.1).is_ok_and(|a| {
                     let (sum, k) = a.channels.iter().flatten().fold((0.0f64, 0usize), |(s, k), x| (s + (*x as f64).powi(2), k + 1));
                     k > 0 && 10.0 * (sum / k as f64).log10() > -50.0
                 })
             };
             if short > 1.5 / fps && (fades || sounding()) {
-                let name = Path::new(src).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| src.clone());
+                let name = Path::new(&**src).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| src.to_string());
                 eprintln!("WARN  sound {name} runs out {short:.2} s before its stretch ends (at {:.2} s of {:.2}-{:.2} s): it stops dead there and its fade-out never plays. Make the source as long as the Sequence, or loop it: loop with endAt repeats startFrom to endAt (without endAt nothing loops)", to / fps - short, from / fps, to / fps);
             }
         }

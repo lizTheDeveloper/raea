@@ -160,7 +160,7 @@ fn params(spec: &serde_json::Value, map_a: Vec4, map_b: Vec4) -> CrtParams {
         Some("shadow") => 2.0,
         _ => 1.0,
     };
-    let glass = c.get("glass").and_then(serde_json::Value::as_str).map(|h| colour(Some(&V::S(h.to_string())), [0.1, 0.11, 0.1, 1.0])).unwrap_or(Color::srgb(0.10, 0.115, 0.105)).to_linear();
+    let glass = c.get("glass").and_then(serde_json::Value::as_str).map(|h| colour(Some(&V::s(h.to_string())), [0.1, 0.11, 0.1, 1.0])).unwrap_or(Color::srgb(0.10, 0.115, 0.105)).to_linear();
     let z = |k: &str, d: f32| if flat { 0.0 } else { f(c, k, d) };
     CrtParams {
         map_a,
@@ -241,28 +241,55 @@ pub fn spawn_panel(world: &mut World, e: Entity, t: &Tup) -> Result<(), String> 
 /// Each model's `hide` nodes hidden, once it's loaded.
 /// Each model's <Model nodes> local transforms set on its glTF nodes, by name, every frame (what a row doesn't give
 /// stays as the node has it).
-fn pose_nodes(frame: Res<FrameRows>, models: Query<Entity, With<ModelReady>>, kids: Query<&Children>, mut nodes: Query<(&Name, &mut Transform)>) {
+/// A model's nodes posed by its row's `node{i}` columns (name, then x y z, q_x..q_w, s_x s_y s_z). Each model's
+/// descendants are found by name once (they were walked again for every node, every frame), and the column names are
+/// made once, not formatted per node per column per frame.
+#[allow(clippy::type_complexity)]
+fn pose_nodes(frame: Res<FrameRows>, models: Query<Entity, With<ModelReady>>, kids: Query<&Children>, mut nodes: Query<(&Name, &mut Transform)>, mut keys: Local<Vec<[String; 11]>>, mut by_name: Local<HashMap<Entity, (usize, HashMap<String, Vec<Entity>>)>>) {
+    const KS: [&str; 10] = ["x", "y", "z", "q_x", "q_y", "q_z", "q_w", "s_x", "s_y", "s_z"];
+    if !frame.may_have("node0") {
+        return;
+    }
     for e in &models {
-        if !frame.may_have("node0") {
-            return;
+        let Some(v) = frame.row(e) else { continue };
+        if v.text("node0").is_none() {
+            continue;
         }
-        let Some(v) = frame.vals(e) else { continue };
+        let desc = descendants(e, &kids);
+        if by_name.get(&e).is_none_or(|(n, _)| *n != desc.len()) {
+            let mut m: HashMap<String, Vec<Entity>> = HashMap::new();
+            for d in &desc {
+                if let Ok((n, _)) = nodes.get(*d) {
+                    m.entry(n.as_str().to_string()).or_default().push(*d);
+                }
+            }
+            by_name.insert(e, (desc.len(), m));
+        }
+        let names = &by_name[&e].1;
         let mut i = 0;
-        while let Some(V::S(name)) = v.get(&format!("node{i}")) {
-            let col = |c: &str| { let k = format!("node{i}_{c}"); v.contains_key(&k).then(|| num(&v, &k, 0.0)) };
-            for d in descendants(e, &kids) {
-                let Ok((n, mut t)) = nodes.get_mut(d) else { continue };
-                if n.as_str() != name {
-                    continue;
-                }
-                if let (Some(x), Some(y), Some(z)) = (col("x"), col("y"), col("z")) {
-                    t.translation = Vec3::new(x, y, z);
-                }
-                if let (Some(x), Some(y), Some(z), Some(w)) = (col("q_x"), col("q_y"), col("q_z"), col("q_w")) {
-                    t.rotation = Quat::from_xyzw(x, y, z, w);
-                }
-                if let (Some(x), Some(y), Some(z)) = (col("s_x"), col("s_y"), col("s_z")) {
-                    t.scale = Vec3::new(x, y, z);
+        loop {
+            while keys.len() <= i {
+                let k = keys.len();
+                keys.push(std::array::from_fn(|j| if j == 0 { format!("node{k}") } else { format!("node{k}_{}", KS[j - 1]) }));
+            }
+            let ks = &keys[i];
+            let Some(name) = v.text(&ks[0]) else { break };
+            let col = |j: usize| v.contains_key(&ks[j + 1]).then(|| v.num(&ks[j + 1], 0.0));
+            if let Some(ds) = names.get(name) {
+                let p = (col(0), col(1), col(2));
+                let q = (col(3), col(4), col(5), col(6));
+                let sc = (col(7), col(8), col(9));
+                for d in ds {
+                    let Ok((_, mut t)) = nodes.get_mut(*d) else { continue };
+                    if let (Some(x), Some(y), Some(z)) = p {
+                        t.translation = Vec3::new(x, y, z);
+                    }
+                    if let (Some(x), Some(y), Some(z), Some(w)) = q {
+                        t.rotation = Quat::from_xyzw(x, y, z, w);
+                    }
+                    if let (Some(x), Some(y), Some(z)) = sc {
+                        t.scale = Vec3::new(x, y, z);
+                    }
                 }
             }
             i += 1;

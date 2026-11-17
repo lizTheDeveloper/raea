@@ -13,7 +13,7 @@ pub const KINDS_2D: &[&str] = &["image"];
 pub fn row2d(t: &Tup, all: &[Tup]) -> (String, serde_json::Value) {
     let vals = &t.vals;
     let parent = match vals.get("parent") {
-        Some(V::S(p)) if !p.is_empty() => all.iter().find(|r| &r.id == p && is_2d(&r.kind) && r.id != t.id),
+        Some(V::S(p)) if !p.is_empty() => all.iter().find(|r| r.id.as_str() == &**p && is_2d(&r.kind) && r.id != t.id),
         _ => None,
     };
     let at = parent.and_then(|p| p.vals.get("from")).map(|f| f.num()).unwrap_or(0.0);
@@ -30,7 +30,7 @@ pub fn row2d(t: &Tup, all: &[Tup]) -> (String, serde_json::Value) {
             }
             // a picture's path as written (`image logo {src: "assets/logo.png"}`) was dropped and the row drew nothing
             if t.kind == "image" && !src.starts_with("media:") && !src.is_empty() {
-                props.insert("src".into(), serde_json::json!({"asset": src}));
+                props.insert("src".into(), serde_json::json!({"asset": &**src}));
                 continue;
             }
         }
@@ -68,7 +68,7 @@ pub fn prop_of(col: &str) -> &str {
 pub fn json_of(v: &V) -> serde_json::Value {
     match v {
         V::N(n) => serde_json::json!(n),
-        V::S(s) => serde_json::json!(s),
+        V::S(s) => serde_json::json!(&**s),
     }
 }
 

@@ -88,8 +88,9 @@ pub fn clips(
             err.0 = Some(format!("clip {}: no src", row.id));
             return;
         };
+        let src = &src.to_string();
         let slot = {
-            let s = slots.entry(src.clone()).or_insert(0);
+            let s = slots.entry(src.to_string()).or_insert(0);
             *s += 1;
             *s - 1
         };
@@ -97,7 +98,7 @@ pub fn clips(
         let key = (src.clone(), slot, (t * 1e6).round() as i64);
         if clip.last.as_ref() != Some(&key) {
             let m = &mut *media;
-            let dec = match m.decoders.entry((src.clone(), slot)) {
+            let dec = match m.decoders.entry((src.to_string(), slot)) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => match resolve_src(&edit.media, src, &m.dir).and_then(|p| m.backend.open_video(&p)) {
                     Ok(d) => e.insert(d),

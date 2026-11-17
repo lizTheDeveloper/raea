@@ -210,22 +210,22 @@ pub fn paint_fixed(row: &mut BTreeMap<String, V>, first: &Map<String, Value>) {
     }
     for (k, col) in [("shadow", "paint_shadow"), ("mid", "paint_mid"), ("ao", "paint_ao"), ("foamColor", "paint_foam_color"), ("calm", "paint_calm"), ("haze", "paint_haze"), ("hazeSun", "paint_haze_sun")] {
         if let Some(h) = hex(first.get(k)) {
-            row.insert(col.into(), V::S(h));
+            row.insert(col.into(), V::s(h));
         }
     }
     // the sky: one colour, or [top, bottom]
     match first.get("sky") {
         Some(Value::Array(a)) => {
             if let Some(h) = hex(a.first()) {
-                row.insert("paint_sky_top".into(), V::S(h));
+                row.insert("paint_sky_top".into(), V::s(h));
             }
             if let Some(h) = hex(a.get(1)) {
-                row.insert("paint_sky_bottom".into(), V::S(h));
+                row.insert("paint_sky_bottom".into(), V::s(h));
             }
         }
         Some(v) => {
             if let Some(h) = hex(Some(v)) {
-                row.insert("paint_sky_top".into(), V::S(h));
+                row.insert("paint_sky_top".into(), V::s(h));
             }
         }
         None => {}
@@ -233,7 +233,7 @@ pub fn paint_fixed(row: &mut BTreeMap<String, V>, first: &Map<String, Value>) {
     if let Some(Value::Array(a)) = first.get("palette") {
         let hs: Vec<String> = a.iter().filter_map(|c| hex(Some(c))).collect();
         if !hs.is_empty() {
-            row.insert("paint_palette".into(), V::S(hs.join(",")));
+            row.insert("paint_palette".into(), V::s(hs.join(",")));
         }
     }
 }
@@ -256,7 +256,7 @@ pub fn look_fixed(l: &Map<String, Value>) -> BTreeMap<String, V> {
     // the ink look's two colours and its line
     for (k, col) in [("ink", "frame_look_ink"), ("paper", "frame_look_paper")] {
         if let Some(h) = hex(l.get(k)) {
-            row.insert(col.into(), V::S(h));
+            row.insert(col.into(), V::s(h));
         }
     }
     row.insert("frame_look_line".into(), V::N(n(l, "line", 0.0)));
@@ -264,10 +264,10 @@ pub fn look_fixed(l: &Map<String, Value>) -> BTreeMap<String, V> {
     row.insert("frame_look_band".into(), V::N(n(l, "band", 1.0)));
     // composition passes: those it leaves as drawn, and each one's own settings (engine/look.rs, paint.rs)
     if let Some(s) = skip_list(l) {
-        row.insert("look_skip".into(), V::S(s));
+        row.insert("look_skip".into(), V::s(s));
     }
     if let Some(o) = l.get("passes").filter(|o| o.as_object().is_some_and(|o| !o.is_empty())) {
-        row.insert("look_passes".into(), V::S(o.to_string()));
+        row.insert("look_passes".into(), V::s(o.to_string()));
     }
     row
 }
@@ -275,7 +275,7 @@ pub fn look_fixed(l: &Map<String, Value>) -> BTreeMap<String, V> {
 /// An <Outline>'s columns.
 pub fn outline_fixed(o: &Map<String, Value>) -> BTreeMap<String, V> {
     let mut row = BTreeMap::new();
-    row.insert("outline".into(), V::S(hex(o.get("color")).unwrap_or("#000000".into())));
+    row.insert("outline".into(), V::s(hex(o.get("color")).unwrap_or("#000000".into())));
     row.insert("outline_depth".into(), V::N(n(o, "depth", 0.04)));
     row.insert("outline_normal".into(), V::N(n(o, "normal", 0.3)));
     if let Some(w) = num(o, "width") {
@@ -285,7 +285,7 @@ pub fn outline_fixed(o: &Map<String, Value>) -> BTreeMap<String, V> {
         row.insert("outline_far".into(), V::N(f));
     }
     if let Some(s) = skip_list(o) {
-        row.insert("outline_skip".into(), V::S(s));
+        row.insert("outline_skip".into(), V::s(s));
     }
     row
 }
@@ -328,11 +328,11 @@ pub fn frame_looks(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String
         .map(|k| {
             Value::Object(k.iter().map(|(c, v)| (c.clone(), match v {
                 V::N(x) => serde_json::json!(x),
-                V::S(s) => Value::String(s.clone()),
+                V::S(s) => Value::String(s.to_string()),
             })).collect())
         })
         .collect();
-    row.insert("frame_looks".into(), V::S(Value::Array(list).to_string()));
+    row.insert("frame_looks".into(), V::s(Value::Array(list).to_string()));
     row.insert("frame_look_i".into(), V::N(idx[0]));
     if !idx.iter().all(|i| *i == idx[0]) {
         p.keys.insert(("cam".to_string(), "frame_look_i".to_string()), idx.iter().enumerate().map(|(f, v)| (f as i64, *v, "step".to_string())).collect());
@@ -345,7 +345,7 @@ pub fn paint_columns(row: &mut BTreeMap<String, V>, props: &Map<String, Value>) 
     row.insert("paint_breakup".into(), V::N(n(g, "breakup", 0.5)));
     row.insert("paint_breakup_scale".into(), V::N(n(g, "scale", 1.0)));
     if let Some(h) = hex(g.get("color")) {
-        row.insert("paint_patch".into(), V::S(h));
+        row.insert("paint_patch".into(), V::s(h));
         row.insert("paint_patch_amount".into(), V::N(n(g, "amount", 0.6)));
     }
 }
@@ -371,7 +371,7 @@ pub fn grid_columns(row: &mut BTreeMap<String, V>, props: &Map<String, Value>) {
 pub fn layers_column(row: &mut BTreeMap<String, V>, props: &Map<String, Value>) {
     if let Some(Value::Array(l)) = props.get("layers") {
         let l: Vec<String> = l.iter().filter_map(Value::as_u64).map(|n| n.to_string()).collect();
-        row.insert("layers".into(), V::S(l.join(",")));
+        row.insert("layers".into(), V::s(l.join(",")));
     }
 }
 
@@ -484,12 +484,12 @@ fn keyed<'a>(p: &mut Program, kind: &str, target: Option<&str>, tag: &str, each:
         last.insert(ty.to_string(), value.clone());
         let from = c.get("from").and_then(Value::as_f64).unwrap_or((f as i64 + KEY_BASE.load(std::sync::atomic::Ordering::Relaxed)) as f64);
         let mut row = BTreeMap::new();
-        row.insert("id".into(), V::S(match target { Some(id) => format!("{id}-{tag}{n}"), None => format!("res{n}") }));
+        row.insert("id".into(), V::s(match target { Some(id) => format!("{id}-{tag}{n}"), None => format!("res{n}") }));
         if let Some(id) = target {
-            row.insert("target".into(), V::S(id.to_string()));
+            row.insert("target".into(), V::s(id.to_string()));
         }
-        row.insert("type".into(), V::S(ty.to_string()));
-        row.insert("value".into(), V::S(value));
+        row.insert("type".into(), V::s(ty.to_string()));
+        row.insert("value".into(), V::s(value));
         if from > 0.0 {
             row.insert("from".into(), V::N(from));
         }

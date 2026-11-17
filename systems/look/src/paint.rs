@@ -228,7 +228,7 @@ pub fn sync_paint(
 ) {
     let Ok(cam) = cams.single() else { return };
     let Some(v) = frame.vals(cam) else { return };
-    if !matches!(v.get("frame_look"), Some(V::S(s)) if s == "paint") {
+    if !matches!(v.get("frame_look"), Some(V::S(s)) if &**s == "paint") {
         // a scene without paint after one with it: each painted mesh back on its standard material
         if last.is_some() {
             for (e, pm) in &painted {

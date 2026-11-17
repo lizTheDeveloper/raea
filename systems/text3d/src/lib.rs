@@ -221,7 +221,7 @@ pub fn spawn_text(world: &mut World, e: Entity, vals: &BTreeMap<String, V>) -> R
     let surface: BTreeMap<String, V> = vals.iter().filter(|(k, _)| ["rough", "metal", "emissive", "emissive_k", "unlit", "shadow", "receive", "double"].contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
     world.entity_mut(e).insert((transform_of(vals), Visibility::default(), TextBlock { places, runs, em, surface }));
     if let Some(V::S(n)) = vals.get("name") {
-        world.entity_mut(e).insert(Name::new(n.clone()));
+        world.entity_mut(e).insert(Name::new(n.to_string()));
     }
     layers(world, e, vals);
     Ok(())
@@ -287,7 +287,7 @@ pub fn spawn_glyph(world: &mut World, e: Entity, id: &str, vals: &BTreeMap<Strin
     };
     world.entity_mut(e).insert((Text3d::new(ch), style, Mesh3d::default(), MeshMaterial3d(mat), transform_of(vals), Visibility::Inherited, ChildOf(slot)));
     if let Some(V::S(n)) = vals.get("name") {
-        world.entity_mut(e).insert(Name::new(n.clone()));
+        world.entity_mut(e).insert(Name::new(n.to_string()));
     }
     if surface.get("shadow").is_some_and(|v| !v.truthy()) {
         world.entity_mut(e).insert(bevy::light::NotShadowCaster);

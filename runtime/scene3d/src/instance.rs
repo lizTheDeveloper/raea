@@ -45,7 +45,7 @@ pub struct Placements {
 impl Placements {
     pub(crate) fn of(t: &Tup) -> Placements {
         let all = match t.vals.get("inst_all") { Some(V::S(s)) => s.split('|').map(str::to_string).collect(), _ => vec![] };
-        let live = match t.vals.get("inst") { Some(V::S(s)) => s.clone(), _ => String::new() };
+        let live = match t.vals.get("inst") { Some(V::S(s)) => s.to_string(), _ => String::new() };
         Placements { lists: all, shown: 0, live, parts: vec![] }
     }
 }
@@ -60,9 +60,9 @@ pub fn sync_instances(frame: Res<FrameRows>, mut q: Query<(Entity, &mut Placemen
         let Some(v) = frame.vals(e) else { continue };
         // a live row's own list first (a render's `inst` is its first frame's on every frame, so it never differs)
         let s = match (v.get("inst"), v.get("inst_k")) {
-            (Some(V::S(s)), _) if *s != pl.live => {
-                pl.live = s.clone();
-                s.clone()
+            (Some(V::S(s)), _) if **s != *pl.live => {
+                pl.live = s.to_string();
+                s.to_string()
             }
             (_, Some(k)) if !pl.lists.is_empty() => {
                 let k = (k.num().round().max(0.0) as usize).min(pl.lists.len() - 1);

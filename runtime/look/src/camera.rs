@@ -25,7 +25,7 @@ pub fn env_shown(sent: Option<&V>, cam: &mut BTreeMap<String, V>) {
         });
         cam.insert("env_i".into(), V::N(at as f64));
     }
-    cam.insert("env_srcs".into(), V::S(serde_json::to_string(&list).unwrap_or_default()));
+    cam.insert("env_srcs".into(), V::s(serde_json::to_string(&list).unwrap_or_default()));
 }
 
 /// The camera row (`row`, id "cam": the scene's first camera) and a row for each camera after it (cam1, cam2, ...), each
@@ -38,7 +38,7 @@ pub fn camera(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>)
         .map(|k| {
             let id = format!("cam{k}");
             let mut r: BTreeMap<String, V> = row.get("bg").map(|b| ("bg".to_string(), b.clone())).into_iter().collect();
-            r.insert("id".into(), V::S(id.clone()));
+            r.insert("id".into(), V::s(id.clone()));
             one(all, p, &mut r, k, &id);
             r
         })
@@ -134,7 +134,7 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
         column(p, row, id, "ambient", &amb);
         if let Some(c) = all.iter().flatten().find(|i| i.kind == "ambient").and_then(|i| hex(i.props.get("color"))) {
             if c != "#ffffff" {
-                row.insert("ambient_color".into(), V::S(c));
+                row.insert("ambient_color".into(), V::s(c));
             }
         }
         // and its colour keyed (amb_r..amb_b, sRGB): each frame's first AmbientLight's, the frame before's
@@ -161,7 +161,7 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
     let maps: Vec<Option<&Item>> = all.iter().map(|its| its.iter().find(|i| i.kind == "environment" && i.props.contains_key("diffuse_map"))).collect();
     if let Some(m) = maps.iter().flatten().next() {
         for k in ["diffuse_map", "specular_map"] {
-            row.insert(format!("envmap_{k}"), V::S(m.props.get(k).and_then(Value::as_str).unwrap_or_default().to_string()));
+            row.insert(format!("envmap_{k}"), V::s(m.props.get(k).and_then(Value::as_str).unwrap_or_default().to_string()));
         }
         // its intensity keyed (each frame's, the first's where a frame has none): it was the first frame's for a batch
         let k0 = n(&m.props, "intensity", 1.0);
@@ -171,7 +171,7 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
     }
     // a <Skybox>: Bevy's cubemap sky on the camera, its image as the first frame has it, its brightness and rotation keyed
     if let Some(s) = all.iter().flatten().find(|i| i.kind == "skybox") {
-        row.insert("skybox_image".into(), V::S(s.props.get("image").and_then(Value::as_str).unwrap_or_default().to_string()));
+        row.insert("skybox_image".into(), V::s(s.props.get("image").and_then(Value::as_str).unwrap_or_default().to_string()));
         let skies: Vec<Option<&Item>> = all.iter().map(|its| its.iter().find(|i| i.kind == "skybox")).collect();
         column(p, row, id, "skybox_k", &skies.iter().map(|s| s.map(|i| n(&i.props, "brightness", 0.0)).unwrap_or(0.0)).collect::<Vec<_>>());
         quat_columns(p, row, id, "skybox", &skies);
@@ -186,7 +186,7 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
             }
             None => -1.0,
         }).collect();
-        row.insert("env_srcs".into(), V::S(serde_json::to_string(&srcs).unwrap_or_default()));
+        row.insert("env_srcs".into(), V::s(serde_json::to_string(&srcs).unwrap_or_default()));
         column(p, row, id, "env_i", &idx);
         let k = |e: &Option<&Item>| e.map(|e| n(&e.props, "intensity", 1.0)).unwrap_or(0.0);
         column(p, row, id, "env_k", &envs.iter().map(|e| k(e) * ENV).collect::<Vec<_>>());
@@ -217,7 +217,7 @@ fn one(all: &[Vec<Item>], p: &mut Program, row: &mut BTreeMap<String, V>, k: usi
     // the composition passes the parts name (engine/compose.rs)
     let passes = pass_names(all);
     if !passes.is_empty() {
-        row.insert("passes".into(), V::S(passes.join(",")));
+        row.insert("passes".into(), V::s(passes.join(",")));
     }
     lens(all, p, row);
     motion_blur(all, p, row);

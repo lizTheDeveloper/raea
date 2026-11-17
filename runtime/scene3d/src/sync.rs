@@ -19,7 +19,7 @@ pub fn sync_pictures(frame: Res<FrameRows>, edit: Option<Res<Edit>>, mut mats: R
         let Some(v) = frame.vals(e) else { continue };
         let k = num(&v, "src_k", pics.shown as f32).round().max(0.0) as usize;
         let (src, dir) = match (&pics.live, v.get("src")) {
-            (Some((shown, dir)), Some(V::S(s))) if s != shown => (s.clone(), dir.clone()),
+            (Some((shown, dir)), Some(V::S(s))) if **s != **shown => (s.to_string(), dir.clone()),
             (None, _) if k != pics.shown => match pics.paths.get(k) {
                 Some(p) => (p.to_string_lossy().to_string(), PathBuf::new()),
                 None => continue,
@@ -98,6 +98,14 @@ pub struct ParkedCamera;
 /// Meshes and models where the frame's rows put them: transform, whether they show, and the material values a row
 /// animates. Only columns a row has are applied, so rows written before these columns draw as they did.
 #[allow(clippy::type_complexity)]
+/// A system's time, added when it's dropped (RAEA_NATIVE_TRACE).
+struct Timed(&'static str, std::time::Instant);
+impl Drop for Timed {
+    fn drop(&mut self) {
+        raea_sys_frame::sys_time(self.0, self.1);
+    }
+}
+
 pub fn sync_meshes(
     frame: Res<FrameRows>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -120,6 +128,8 @@ pub fn sync_meshes(
         Or<(With<Mesh3d>, With<Model3d>, With<Instanced>)>,
     >,
 ) {
+    let t_sys = std::time::Instant::now();
+    let _timed = Timed("sync_meshes", t_sys);
     let place = frame.placer();
     for (e, mut t, mut vis, mut mat, mut fogged, driven, mut painted, decal, shaded, shared, synced) in &mut q {
         // a row the same on every frame is applied once (10 000 still cubes made their values every frame); a live
@@ -137,10 +147,10 @@ pub fn sync_meshes(
             }
             continue;
         }
-        let Some(v) = frame.vals(e) else { continue };
+        let Some(v) = frame.row(e) else { continue };
         let v = &v;
         // a mesh a Bevy plugin moves (a rigid body) keeps the plugin's transform (engine/plugins.rs)
-        let nt = transform_of(v);
+        let nt = v.transform();
         if *t != nt && !driven {
             *t = nt;
         }
@@ -166,7 +176,7 @@ pub fn sync_meshes(
         let h = &h;
         // a sprite sheet's cell (an ImagePlane's `frame` of its `grid`)
         if let Some(fr) = v.get("sheet_frame") {
-            let want = sheet_uv(fr.num() as f32, num(v, "sheet_cols", 1.0), num(v, "sheet_rows", 1.0));
+            let want = sheet_uv(fr.num() as f32, v.num("sheet_cols", 1.0), v.num("sheet_rows", 1.0));
             if mats.get(h).is_some_and(|m| m.uv_transform != want) {
                 if let Some(mut m) = mats.get_mut(h) {
                     m.uv_transform = want;
@@ -180,17 +190,17 @@ pub fn sync_meshes(
         let Some(cur) = mats.get(h) else { continue };
         let mut base = cur.base_color;
         if v.contains_key("col_r") {
-            base = Color::srgb(num(v, "col_r", 0.8), num(v, "col_g", 0.8), num(v, "col_b", 0.8));
+            base = Color::srgb(v.num("col_r", 0.8), v.num("col_g", 0.8), v.num("col_b", 0.8));
         }
         if v.contains_key("opacity") {
-            base.set_alpha(num(v, "opacity", 1.0).clamp(0.0, 1.0));
+            base.set_alpha(v.num("opacity", 1.0).clamp(0.0, 1.0));
         } else {
             base.set_alpha(cur.base_color.alpha());
         }
-        let rough = if v.contains_key("rough") { num(v, "rough", 0.45) } else { cur.perceptual_roughness };
-        let metal = if v.contains_key("metal") { num(v, "metal", 0.0) } else { cur.metallic };
+        let rough = if v.contains_key("rough") { v.num("rough", 0.45) } else { cur.perceptual_roughness };
+        let metal = if v.contains_key("metal") { v.num("metal", 0.0) } else { cur.metallic };
         let emissive = if v.contains_key("emissive_k") {
-            let em = raea_sys_frame::emissive_colour(|k| v.get(k)).to_linear() * num(v, "emissive_k", 1.0);
+            let em = v.emissive_colour().to_linear() * v.num("emissive_k", 1.0);
             LinearRgba::rgb(em.red, em.green, em.blue)
         } else {
             cur.emissive
@@ -483,16 +493,17 @@ pub fn sync_attach(
         if done || !matches!(m.state, ModelState::Ready { .. }) {
             continue;
         }
-        let Some(v) = frame.vals(e) else { continue };
-        let Some(V::S(to)) = v.get("attach_to") else { continue };
-        let Some((target, tm, _)) = models.iter().find(|(_, o, _)| &o.id == to) else {
+        // (read where it is: most models attach to nothing, and each frame made every one's values to find out)
+        let Some(v) = frame.row(e) else { continue };
+        let Some(to) = v.text("attach_to") else { continue };
+        let Some((target, tm, _)) = models.iter().find(|(_, o, _)| o.id == to) else {
             err.0 = Some(format!("model {}: attached to {to}, which isn't a model", m.src));
             continue;
         };
         if !matches!(tm.state, ModelState::Ready { .. }) {
             continue;
         }
-        let bone = match v.get("attach_bone") { Some(V::S(b)) => b.clone(), _ => String::new() };
+        let bone = v.text("attach_bone").unwrap_or_default().to_string();
         match descendants(target, &kids).into_iter().find(|k| names.get(*k).is_ok_and(|n| n.as_str() == bone)) {
             Some(b) => {
                 commands.entity(e).insert((ChildOf(b), Attached));

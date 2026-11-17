@@ -70,21 +70,53 @@ pub fn patch(world: &mut World, e: Entity, v: &Value) -> Result<(), String> {
     let Some((p, bufs)) = got else { return Err("own:uniforms: its Material isn't made".into()) };
     if let Some(given) = v.get("uniforms").and_then(Value::as_object) {
         let slots = layout::slots(&p.src, &p.uniforms, given, &p.defs)?;
-        match (h, arr) {
-            (Some(h), _) => world.resource_mut::<Assets<OwnMaterial>>().get_mut(&h).map(|mut m| m.set_slots(slots)),
-            (None, Some(a)) => world.resource_mut::<Assets<OwnArrayMaterial>>().get_mut(&a).map(|mut m| m.own.set_slots(slots)),
-            (None, None) => None,
-        };
+        // written only when the values change: a write marks the Material changed, and Bevy prepares it again (its
+        // uniform buffer and bind group made anew), every part every frame, for values that were the same
+        // (RAEA_OWN_SKIP=0: written every time, as before)
+        static SKIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let skip = *SKIP.get_or_init(|| std::env::var("RAEA_OWN_SKIP").as_deref() != Ok("0"));
+        match (&h, &arr) {
+            (Some(h), _) => {
+                PATCHED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if world.resource::<Assets<OwnMaterial>>().get(h).is_some_and(|m| !skip || m.slots() != slots) {
+                    PATCHED[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    world.resource_mut::<Assets<OwnMaterial>>().get_mut(h).map(|mut m| m.set_slots(slots));
+                }
+            }
+            (None, Some(a)) => {
+                if world.resource::<Assets<OwnArrayMaterial>>().get(a).is_some_and(|m| m.own.slots() != slots) {
+                    world.resource_mut::<Assets<OwnArrayMaterial>>().get_mut(a).map(|mut m| m.own.set_slots(slots));
+                }
+            }
+            (None, None) => {}
+        }
     }
     let given = v.get("buffers").and_then(Value::as_object).cloned().unwrap_or_default();
     for ((name, ty), b) in p.storages.iter().zip(bufs) {
         let Some(x) = given.get(name) else { continue };
         let sb = storage(&p.src, &p.defs, name, ty, x)?;
+        // (likewise a storage buffer: uploaded again only when its words change)
+        if world.resource::<Assets<ShaderBuffer>>().get(&b).is_some_and(|cur| same_words(cur, &sb)) {
+            continue;
+        }
+        PATCHED[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(mut cur) = world.resource_mut::<Assets<ShaderBuffer>>().get_mut(&b) {
             *cur = sb;
         }
     }
     Ok(())
+}
+
+/// own:uniforms rows applied, and of them the Materials whose values changed (RAEA_NATIVE_TRACE's count).
+pub static PATCHED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// Whether two storage buffers hold the same words (both initialised, same size and bytes).
+fn same_words(a: &ShaderBuffer, b: &ShaderBuffer) -> bool {
+    use bevy::render::storage::ShaderBufferData::Initialized;
+    match (&a.data, &b.data) {
+        (Initialized { data: x, buffer_size: n }, Initialized { data: y, buffer_size: m }) => n == m && x[..] == y[..],
+        _ => false,
+    }
 }
 
 #[cfg(test)]

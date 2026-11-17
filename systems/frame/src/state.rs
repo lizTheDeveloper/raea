@@ -25,7 +25,7 @@ pub fn keyed(get: impl Fn(&str) -> Option<V>, col: &str) -> Option<String> {
         return list.split('\n').nth(k.num().round().max(0.0) as usize).map(str::to_string);
     }
     match get(col) {
-        Some(V::S(s)) => Some(s),
+        Some(V::S(s)) => Some(s.to_string()),
         _ => None,
     }
 }
@@ -34,7 +34,7 @@ pub fn keyed(get: impl Fn(&str) -> Option<V>, col: &str) -> Option<String> {
 pub fn keyed_all(vals: &BTreeMap<String, V>, col: &str) -> Vec<String> {
     match (vals.get(&format!("{col}s")), vals.get(col)) {
         (Some(V::S(list)), _) => list.split('\n').map(str::to_string).collect(),
-        (_, Some(V::S(s))) => vec![s.clone()],
+        (_, Some(V::S(s))) => vec![s.to_string()],
         _ => vec![],
     }
 }

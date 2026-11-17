@@ -281,14 +281,15 @@ pub fn clips_gpu(
             err.0 = Some(format!("clip {}: no src", row.id));
             return;
         };
+        let src = &src.to_string();
         let slot = {
-            let s = slots_of.entry(src.clone()).or_insert(0);
+            let s = slots_of.entry(src.to_string()).or_insert(0);
             *s += 1;
             *s - 1
         };
         let t = num(v, "src_in", 0.0) as f64 + (f - from) as f64 / fps;
         let m = &mut *media;
-        let dec = match m.decoders.entry((src.clone(), slot)) {
+        let dec = match m.decoders.entry((src.to_string(), slot)) {
             std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => match resolve_src(&edit.media, src, &m.dir).and_then(|p| m.backend.open_video(&p)) {
                 Ok(d) => e.insert(d),

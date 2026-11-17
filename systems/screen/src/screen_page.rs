@@ -88,12 +88,12 @@ pub fn spawn(world: &mut World, e: Entity, t: &Tup, dir: &Path) -> Result<(), St
     let file = match v.get("src") {
         Some(V::S(s)) => match s.strip_prefix("asset:") {
             Some(h) => dir.join("assets").join(format!("{h}.png")),
-            None => dir.join(s),
+            None => dir.join(&**s),
         },
         _ => return Err(format!("screenpage {}: needs src", t.id)),
     };
     let n = |k: &str| v.get(k).map(V::num).unwrap_or(0.0) as i64;
-    world.entity_mut(e).insert(ScreenPage { name, file, from: n("from"), to: n("to") });
+    world.entity_mut(e).insert(ScreenPage { name: name.to_string(), file, from: n("from"), to: n("to") });
     Ok(())
 }
 

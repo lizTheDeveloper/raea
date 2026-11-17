@@ -71,11 +71,11 @@ pub fn own_uniforms(p: &mut Program, id: &str, its: &[Item], spec: impl Fn(&Item
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&each.iter().map(|(f, v)| format!("{f}{v}")).collect::<String>(), &mut h);
     let track = format!("{:016x}", std::hash::Hasher::finish(&h));
-    let row = p.spawns.iter_mut().rev().flat_map(|(_, rows)| rows.iter_mut()).find(|r| r.get("id") == Some(&V::S(id.to_string())));
+    let row = p.spawns.iter_mut().rev().flat_map(|(_, rows)| rows.iter_mut()).find(|r| r.get("id") == Some(&V::s(id.to_string())));
     if let Some(V::S(s)) = row.and_then(|r| r.get_mut("shader")) {
         if let Ok(Value::Object(mut o)) = serde_json::from_str::<Value>(s) {
             o.insert("track".into(), Value::String(track));
-            *s = Value::Object(o).to_string();
+            *s = Value::Object(o).to_string().into();
         }
     }
     keyed(p, "component", Some(id), "o", each.iter().map(|(f, v)| (*f, v)));
@@ -86,7 +86,7 @@ pub fn own_uniforms(p: &mut Program, id: &str, its: &[Item], spec: impl Fn(&Item
 /// stepped); raea-sys-frame's `keyed` reads it back. A value with a line break in it is held from the first frame.
 pub fn keyed_strings(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, col: &str, vals: &[String]) {
     let Some(first) = vals.first() else { return };
-    row.insert(col.into(), V::S(first.clone()));
+    row.insert(col.into(), V::s(first.clone()));
     if vals.iter().all(|s| s == first) || vals.iter().any(|s| s.contains('\n')) {
         return;
     }
@@ -98,7 +98,7 @@ pub fn keyed_strings(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, c
             (list.len() - 1) as f64
         }
     }).collect();
-    row.insert(format!("{col}s"), V::S(list.join("\n")));
+    row.insert(format!("{col}s"), V::s(list.join("\n")));
     row.insert(format!("{col}_k"), V::N(ks[0]));
     p.keys.insert((id.to_string(), format!("{col}_k")), ks.iter().enumerate().map(|(f, k)| (f as i64, *k, "step".to_string())).collect());
 }
@@ -123,7 +123,7 @@ pub fn screen_columns(p: &mut Program, row: &mut BTreeMap<String, V>, id: &str, 
     let first = &its[0].props;
     for (k, col) in [("screen", "screen"), ("screens", "screens"), ("hide", "hide")] {
         if let Some(v) = first.get(k).filter(|v| !v.is_null()) {
-            row.insert(col.into(), V::S(v.to_string()));
+            row.insert(col.into(), V::s(v.to_string()));
         }
     }
     if its.iter().any(|i| i.props.contains_key("screenPower")) {
