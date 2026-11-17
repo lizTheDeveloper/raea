@@ -873,14 +873,25 @@ fn cache_dir() -> Option<PathBuf> {
 /// The bake's key: the bundle's bytes (the edit, everything it imports, its --input, the runtime bundled in), this
 /// build, the frames stepped, and the settings that change what a frame steps to.
 fn key_of(js: &Path, stepped: &[i64]) -> R<u64> {
-    let mut key: u64 = 0xcbf2_9ce4_8422_2325 ^ build_id();
+    // what made the bake: the source that can change it (build.rs RAEA_BAKE_SRC_HASH: drawing-, capture- and GPU-only
+    // pins keep every kept bake) and the JS engine it ran on; RAEA_BAKE_KEY=binary keys by the whole binary as before
+    let made = if std::env::var("RAEA_BAKE_KEY").as_deref() == Ok("binary") {
+        build_id()
+    } else {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(env!("RAEA_BAKE_SRC_HASH").as_bytes());
+        h.write(std::env::var("BEVY_TSX_ENGINE").unwrap_or_default().as_bytes());
+        h.finish()
+    };
+    let mut key: u64 = 0xcbf2_9ce4_8422_2325 ^ made;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
             key = (key ^ *b as u64).wrapping_mul(0x100_0000_01b3);
         }
     };
     eat(&std::fs::read(js).map_err(|e| format!("{}: {e}", js.display()))?);
-    eat(format!("native-4|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
+    eat(format!("native-4s|{stepped:?}|{}", ALPHA.load(std::sync::atomic::Ordering::Relaxed)).as_bytes());
     for v in ["RAEA_NATIVE_DROP3D", "RAEA_HIDE_LAYERS", "RAEA_CAMERA", "RAEA_ENGINE_READS", "RAEA_SOURCE_STAMPS", "RAEA_LAYERS"] {
         eat(format!("|{v}={:?}", std::env::var(v).ok()).as_bytes());
     }
@@ -1200,6 +1211,10 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
     let waited = std::time::Instant::now();
     while raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst) > 0 && waited.elapsed() < std::time::Duration::from_secs(3) {
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let left = raea_runtime_react::JS_LIVE.load(std::sync::atomic::Ordering::SeqCst);
+    if left > 0 {
+        eprintln!("WARN  native: {left} bake runtimes' JS threads still running 3 s after the bake; their memory is handed back as they end (later), not before the engine opens");
     }
     let trimmed = trim_heap();
     if trace() {
