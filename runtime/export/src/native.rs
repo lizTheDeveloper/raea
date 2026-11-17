@@ -460,6 +460,124 @@ fn prog_json(p: &Program) -> Value {
     json!({"fps": p.fps, "width": p.width, "height": p.height, "frames": p.frames, "spawns": spawns, "keys": keys})
 }
 
+/// A kept bake as read back: its Program and ops read straight from the text (serde), without the serde_json Value
+/// tree of the whole bake that `prog_of` read from, which held every row twice while the Program was made (a bake's
+/// read grew about 52 MB a baked frame: a Value is 32-80 bytes a number, a map entry more).
+#[derive(serde::Deserialize)]
+struct BakeDoc {
+    #[serde(default)]
+    w: f64,
+    #[serde(default)]
+    h: f64,
+    #[serde(default)]
+    fps: f64,
+    #[serde(default)]
+    total: f64,
+    #[serde(default)]
+    ops: Vec<(i64, Vec<String>)>,
+    #[serde(default)]
+    prog: Option<ProgDoc>,
+    assets: Option<BTreeMap<String, String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProgDoc {
+    fps: f64,
+    width: u64,
+    height: u64,
+    frames: i64,
+    spawns: Vec<(String, Vec<RowDoc>)>,
+    keys: Vec<(String, String, Vec<(i64, VDoc, String)>)>,
+}
+
+impl ProgDoc {
+    fn program(self) -> Program {
+        let mut p = Program { fps: self.fps, width: self.width as u32, height: self.height as u32, frames: self.frames, ..Default::default() };
+        p.spawns = self.spawns.into_iter().map(|(k, rows)| (k, rows.into_iter().map(|r| r.0).collect())).collect();
+        for (id, c, ks) in self.keys {
+            p.keys.insert((id, c), ks.into_iter().map(|(f, v, e)| (f, v.0.num(), e)).collect());
+        }
+        p
+    }
+}
+
+/// A row's columns, each read as `v_of` reads one.
+struct RowDoc(BTreeMap<String, V>);
+
+impl<'de> serde::Deserialize<'de> for RowDoc {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = RowDoc;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a row")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<RowDoc, A::Error> {
+                let mut row = BTreeMap::new();
+                while let Some((k, v)) = m.next_entry::<String, VDoc>()? {
+                    row.insert(k, v.0);
+                }
+                Ok(RowDoc(row))
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
+/// A value as `v_of` reads it: a string, a number, `{"nf": "NaN"}` for a number JSON can't write, 0 for anything else.
+struct VDoc(V);
+
+impl<'de> serde::Deserialize<'de> for VDoc {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = VDoc;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a value")
+            }
+            fn visit_str<E>(self, s: &str) -> Result<VDoc, E> {
+                Ok(VDoc(V::S(s.to_string())))
+            }
+            fn visit_string<E>(self, s: String) -> Result<VDoc, E> {
+                Ok(VDoc(V::S(s)))
+            }
+            fn visit_f64<E>(self, n: f64) -> Result<VDoc, E> {
+                Ok(VDoc(V::N(n)))
+            }
+            fn visit_i64<E>(self, n: i64) -> Result<VDoc, E> {
+                Ok(VDoc(V::N(n as f64)))
+            }
+            fn visit_u64<E>(self, n: u64) -> Result<VDoc, E> {
+                Ok(VDoc(V::N(n as f64)))
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<VDoc, E> {
+                Ok(VDoc(V::N(0.0)))
+            }
+            fn visit_unit<E>(self) -> Result<VDoc, E> {
+                Ok(VDoc(V::N(0.0)))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<VDoc, A::Error> {
+                while a.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(VDoc(V::N(0.0)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<VDoc, A::Error> {
+                let mut n = f64::NAN;
+                while let Some(k) = m.next_key::<String>()? {
+                    if k == "nf" {
+                        let s: serde_json::Value = m.next_value()?;
+                        n = s.as_str().and_then(|s| s.parse().ok()).unwrap_or(f64::NAN);
+                    } else {
+                        m.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(VDoc(V::N(n)))
+            }
+        }
+        d.deserialize_any(Vis)
+    }
+}
+
+#[allow(dead_code)]
 fn prog_of(j: &Value) -> Option<Program> {
     let mut p = Program { fps: j["fps"].as_f64()?, width: j["width"].as_u64()? as u32, height: j["height"].as_u64()? as u32, frames: j["frames"].as_i64()?, ..Default::default() };
     for s in j["spawns"].as_array()? {
@@ -599,11 +717,11 @@ fn placed(text: &str, dir: &Path) -> String {
 }
 
 /// Why a kept bake no longer matches the project's files: one it names changed or went (None when all match).
-fn stale(v: &Value, dir: &Path) -> Option<String> {
-    let Some(assets) = v.get("assets").and_then(Value::as_object) else { return Some("it lists no project files".into()) };
+fn stale_of(assets: Option<&BTreeMap<String, String>>, dir: &Path) -> Option<String> {
+    let Some(assets) = assets else { return Some("it lists no project files".into()) };
     let names: Vec<String> = assets.keys().cloned().collect();
     for (k, (_, h)) in names.iter().zip(hashes(dir, &names)) {
-        if h.as_deref() != assets[k].as_str() {
+        if h.as_deref() != Some(assets[k].as_str()) {
             return Some(format!("{k} {}", if h.is_none() { "is gone" } else { "changed" }));
         }
     }
@@ -660,10 +778,10 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
                 mark("root placed");
                 t
             })
-            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
+            .and_then(|t| serde_json::from_str::<BakeDoc>(&t).map_err(|e| e.to_string()))
             .and_then(|v| {
                 mark("parsed");
-                let s = stale(&v, dir);
+                let s = stale_of(v.assets.as_ref(), dir);
                 mark("files hashed");
                 match s {
                     Some(why) => Err(format!("stale: {why}")),
@@ -672,16 +790,14 @@ fn shot_of(js: &Path, dir: &Path, wanted: &[i64]) -> R<Option<Shot>> {
             });
         match read {
             Ok(v) => {
-                let ops = v["ops"].as_array().map(|a| a.iter().filter_map(|e| Some((e[0].as_i64()?, e[1].as_array()?.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()))).collect()).unwrap_or_default();
-                let prog = if v["prog"].is_null() { None } else { prog_of(&v["prog"]) };
+                let prog = v.prog.map(ProgDoc::program);
                 mark("Program made");
                 if trace() {
                     eprintln!("raea native: bake read back: {}", laps.iter().map(|(w, ms)| format!("{w} {ms:.0} ms")).collect::<Vec<_>>().join(", "));
                 }
-                let num = |k: &str| v[k].as_f64().unwrap_or(0.0);
                 let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
                 raea_runtime_react::startup_mark(&format!("the shot's bake read back ({:.0} ms)", t_ms(t0)));
-                return Ok(Some(Shot { w: num("w") as u32, h: num("h") as u32, fps: num("fps"), total: num("total") as i64, ops, prog }));
+                return Ok(Some(Shot { w: v.w as u32, h: v.h as u32, fps: v.fps, total: v.total as i64, ops: v.ops, prog }));
             }
             Err(e) => eprintln!("raea native: the kept bake {} can't be used ({e}); baking again", p.display()),
         }

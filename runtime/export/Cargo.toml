@@ -49,6 +49,8 @@ raea-sys-mix = { path = "../../systems/mix" }
 bevy = { version = "=0.20.0", default-features = false, features = ["std", "default_app"] }
 image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
 serde_json = "1"
+# a kept bake read straight into its Program (bake.rs BakeDoc), not through a serde_json Value tree
+serde = { version = "1", features = ["derive"] }
 # the frames' pages written as assets, on workers
 raea-runtime-pagestore = { path = "../../runtime/pagestore" }
 wgpu = "=30.0.1"
