@@ -38,24 +38,50 @@ impl Timeline {
         // only the frames some key changes from the frame before are evaluated: a still at frame 2448 of a scene keyed
         // on every frame held its frames before as copies of one, and evaluated and kept all 2449 (#77: 234 s, 7.1 GB)
         let fresh: Vec<i64> = changes(prog, frames).into_iter().enumerate().filter(|(_, c)| *c).map(|(f, _)| f as i64).collect();
-        let per: Vec<(HashMap<String, std::sync::Arc<Col>>, Vec<(usize, String)>)> = parallel(fresh.len(), |i| {
-            let raw = eval::frame_cols(prog, &base, fresh[i]);
-            let w: HashMap<String, std::sync::Arc<Col>> = raw.cols.into_iter().filter(|(c, v)| base.cols.get(c) != Some(v)).collect();
-            // the rows this frame moves and by which columns: a written column's value differing from the base's there
-            let moved = w.iter().flat_map(|(c, col)| (0..base.len()).filter(|r| !col.same_at(base.cols.get(c).map(|b| &**b), *r)).map(move |r| (r, c.clone()))).collect();
-            Ok((w, moved))
-        })?;
+        // evaluated a chunk of frames at a time across the cores, each chunk folded in before the next: a frame's moved
+        // (row, column) pairs counted into still/moving and dropped, and each written column that equals the frame
+        // before's shared with it (a column held off its base for the whole shot was kept once a frame: a Ch5 batch
+        // held every frame's whole columns and every moved pair with its column's name copied, about 55 MB a frame)
         let mut still = vec![true; base.len()];
         let mut moving: Vec<Vec<String>> = vec![Vec::new(); base.len()];
-        let evaluated: Vec<std::sync::Arc<HashMap<String, std::sync::Arc<Col>>>> = per.into_iter().map(|(w, moved)| {
-            for (r, c) in moved {
-                still[r] = false;
-                if !moving[r].contains(&c) {
-                    moving[r].push(c);
+        let mut evaluated: Vec<std::sync::Arc<HashMap<String, std::sync::Arc<Col>>>> = Vec::with_capacity(fresh.len());
+        const CHUNK: usize = 32;
+        for c0 in (0..fresh.len()).step_by(CHUNK) {
+            let n = CHUNK.min(fresh.len() - c0);
+            let per: Vec<(HashMap<String, std::sync::Arc<Col>>, Vec<String>, Vec<(u32, u32)>)> = parallel(n, |i| {
+                let raw = eval::frame_cols(prog, &base, fresh[c0 + i]);
+                let w: HashMap<String, std::sync::Arc<Col>> = raw.cols.into_iter().filter(|(c, v)| base.cols.get(c) != Some(v)).collect();
+                // the rows this frame moves and by which columns (a place in `names`): a written column's value differing
+                // from the base's there
+                let names: Vec<String> = w.keys().cloned().collect();
+                let base = &base;
+                let mut moved: Vec<(u32, u32)> = Vec::new();
+                for (k, c) in names.iter().enumerate() {
+                    let (col, b) = (&w[c], base.cols.get(c).map(|b| &**b));
+                    moved.extend((0..base.len()).filter(|r| !col.same_at(b, *r)).map(|r| (r as u32, k as u32)));
                 }
+                Ok((w, names, moved))
+            })?;
+            for (mut w, names, moved) in per {
+                for (r, k) in moved {
+                    let (r, c) = (r as usize, &names[k as usize]);
+                    still[r] = false;
+                    if !moving[r].contains(c) {
+                        moving[r].push(c.clone());
+                    }
+                }
+                if let Some(prev) = evaluated.last() {
+                    for (c, col) in w.iter_mut() {
+                        if let Some(pc) = prev.get(c) {
+                            if **pc == **col {
+                                *col = pc.clone();
+                            }
+                        }
+                    }
+                }
+                evaluated.push(std::sync::Arc::new(w));
             }
-            std::sync::Arc::new(w)
-        }).collect();
+        }
         let written = (0..frames).map(|f| evaluated[fresh.partition_point(|&e| e <= f) - 1].clone()).collect();
         let mut row_cols: Vec<Vec<String>> = moving.clone();
         for (c, col) in base.cols.iter() {
