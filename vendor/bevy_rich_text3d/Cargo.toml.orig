@@ -1,0 +1,48 @@
+[package]
+name = "bevy_rich_text3d"
+version = "0.8.0"
+edition = "2024"
+
+authors = ["Mincong Lu <mintlux667@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+readme = "README.md"
+repository = "https://github.com/mintlu8/bevy_rich_text3d"
+description = """
+Mesh based raster rich text implementation for bevy.
+"""
+keywords = ["bevy", "text", "font"]
+
+[features]
+default = ["a11y"]
+reflect = []
+a11y = []
+
+[dependencies]
+bevy = { version = "0.20.0", default-features = false, features = [
+  "bevy_log",
+  "bevy_image",
+  "bevy_render",
+  "bevy_asset",
+  "bevy_window",
+]}
+cosmic-text = { version = "0.19", default-features = false, features = ["fontconfig", "std"]}
+fastrand = { version = "2.3.0", default-features = false }
+rustc-hash = "2.1.1"
+sys-locale = "0.3.2"
+thiserror = "2.0.9"
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"]}
+ttf-parser = "0.25.1"
+write-fonts = { version = "0.46.0", features = ["read"] }
+
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+accesskit = "0.24.1"
+bevy = "0.20.0"
+bevy_rectray = "0.7.0"
+fastrand = "2.3.0"
