@@ -13,6 +13,8 @@ impl Engine {
     /// (load_shared) and warmed up by the same 8 updates (finish_build), its device, pipelines, models and textures
     /// kept. A served process's next native shot (docs/native-shots.md).
     pub fn reload(&mut self, prog: &Program, inserted: &[Tup]) -> Result<(), String> {
+        // the clocks and physics as a fresh engine's, before the new program's rows set any of them
+        pristine_restore(self.app.world_mut());
         self.load_shared(prog, inserted, None)?;
         // after the last program's text is gone and before the new one's is drawn into it
         text3d::reset_atlas(self.app.world_mut());
@@ -239,4 +241,47 @@ pub fn state_dump(app: &mut App, tag: &str) {
     let render = counts(app.sub_app(bevy::render::RenderApp).world());
     let out = serde_json::json!({"resources": res, "main_counts": main, "render_counts": render, "entities": world.entities().len()});
     let _ = std::fs::write(dir.join(format!("{tag}-{n}.json")), out.to_string());
+}
+
+/// The resources a fresh engine has that a kept one (Engine::reload, a served process's next shot) must have again:
+/// every Bevy clock (Time, Time<Virtual> whose max_delta a clock jump raises, Time<Fixed>, physics' and particles'),
+/// and the physics' own state. A kept engine began each shot 80 s into its clocks with the last shot's physics tick, so
+/// a shot served after another differed from it served first (Ch5 @2400 again: 27.8 dB).
+const PRISTINE: [&str; 3] = ["bevy_time::time::Time", "avian3d::", "bevy_hanabi::time::"];
+
+type Cast = fn(*mut ()) -> *mut dyn bevy::reflect::Reflect;
+
+/// Those resources' values as the engine's build left them (Engine::build), for `pristine_restore`.
+#[derive(Resource, Default)]
+pub(crate) struct Pristine(Vec<(bevy::ecs::component::ComponentId, Cast, Box<dyn bevy::reflect::PartialReflect>)>);
+
+pub(crate) fn pristine_take(world: &mut World) {
+    let reg = world.resource::<AppTypeRegistry>().clone();
+    let reg = reg.read();
+    let mut out = Vec::new();
+    for (cid, info, ptr) in world.iter_resources() {
+        if !PRISTINE.iter().any(|p| info.name().to_string().starts_with(p)) {
+            continue;
+        }
+        let Some(rfp) = info.type_id().and_then(|t| reg.get(t)).and_then(|r| r.data::<bevy::reflect::ReflectFromPtr>()) else { continue };
+        let cast = rfp.raw_pointer_cast();
+        // SAFETY: the pointer is this resource's, of the registered type rfp was made for, read only
+        let v: &dyn bevy::reflect::Reflect = unsafe { &*cast(ptr.as_ptr() as *mut ()) };
+        if let Ok(d) = v.as_partial_reflect().to_dynamic() {
+            out.push((cid, cast, d));
+        }
+    }
+    world.insert_resource(Pristine(out));
+}
+
+pub(crate) fn pristine_restore(world: &mut World) {
+    let Some(p) = world.remove_resource::<Pristine>() else { return };
+    for (cid, cast, v) in &p.0 {
+        if let Some(mut m) = world.get_resource_mut_by_id(*cid) {
+            // SAFETY: as pristine_take's, the same resource, written through its reflection
+            let r: &mut dyn bevy::reflect::Reflect = unsafe { &mut *cast(m.as_mut().as_ptr() as *mut ()) };
+            let _ = r.as_partial_reflect_mut().try_apply(v.as_ref());
+        }
+    }
+    world.insert_resource(p);
 }

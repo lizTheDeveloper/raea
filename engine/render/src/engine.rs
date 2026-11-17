@@ -40,6 +40,7 @@ pub(crate) use target::*;
 
 mod open;
 mod load;
+mod tsort;
 mod output;
 // RT1: each frame's motion vectors and depth, for a neural or denoising pass after the render
 mod aov;

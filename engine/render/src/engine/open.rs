@@ -131,6 +131,8 @@ impl Engine {
             bevy::render::Render,
             wait_pipelines.in_set(bevy::render::RenderSystems::Render).before(bevy::render::renderer::render_system),
         );
+        // transparent draws in one order, frame to frame and batch to batch (tsort.rs)
+        super::tsort::install(&mut app);
         // overlapping fog volumes composited in one order whatever frames came before (raea-sys-fog's FogRank)
         app.sub_app_mut(bevy::render::RenderApp)
             .init_resource::<scene3d::FogOrder>()
@@ -274,6 +276,8 @@ impl Engine {
         // updates pipelined from here on (raea_sys_frame::pipe), but for a live draw's own
         e.pipe = raea_sys_frame::pipe::Pipe::new();
         super::load::state_dump(&mut e.app, "fresh");
+        // what a kept engine's next shot starts from again (Engine::reload)
+        super::load::pristine_take(e.app.world_mut());
         // a live game's frame on one thread (lightspeed F2): its scene is small, and the multi-threaded executor's task
         // hand-offs cost more than its systems (arena3d's frame work p50 2.7-3.4 -> 1.9-2.6 ms, p99 3.9-4.6 -> 2.7-3.5,
         // paired). RAEA_BEVY_EXECUTOR=single|multi picks for every engine; renders stay multi-threaded otherwise
