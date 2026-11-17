@@ -891,7 +891,11 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
                 cx.now = f;
                 pg.at_frame(f, fps);
                 bevy_fed_gpu(app.world_mut(), pg, &mut cx, buf, fps, &g.device, &g.queue)?;
-                Ok(start_copy(&g.device, &g.queue, buf, &ring))
+                let t = std::time::Instant::now();
+                let c = start_copy(&g.device, &g.queue, buf, &ring);
+                crate::gpu_split::step("copy", t, &g.device, &g.queue);
+                crate::gpu_split::end(&g.device, &g.queue);
+                Ok(c)
             })
             .map_err(|e| if i == 0 { format!("{e}; no frame was written") } else { format!("{e}; the {i} frames before it are in {}", out.display()) })?;
             copying.push_back((i, f, c));
@@ -964,6 +968,7 @@ fn render_shot(js: &Path, dir: &Path, out: &Path, wanted: &[i64]) -> R<Option<St
     if trace() {
         let n = wanted.len().max(1) as f64;
         let p = *PARTS.lock().unwrap();
+        crate::gpu_split::report(wanted.len());
         eprintln!("raea native: per frame: replay {:.1} ms, draw {:.1} ms (page {:.1}, 3D {:.1}, read back {:.1}), png {:.1} ms", t_replay / n, t_draw / n, p[0] / n, p[1] / n, p[2] / n, t_png / n);
         eprintln!(
             "raea native: capture per frame: readback wait {:.2} ms, handed to the {} {:.2} ms (in the draw), staging buffers {}, writers' tail {:.0} ms",

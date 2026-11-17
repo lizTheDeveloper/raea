@@ -46,6 +46,8 @@ mod run;
 pub use run::*;
 pub use raea_sys_page::not_applied;
 mod native;
+// RAEA_GPU_SPLIT: a native frame's GPU path step by step
+mod gpu_split;
 pub use native::{SERVING, size_task_pools};
 mod scene;
 pub use scene::{USAGE as SCENE_USAGE, cli as scene_cli};
