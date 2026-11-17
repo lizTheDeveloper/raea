@@ -96,7 +96,7 @@ fn stat_key(path: &str, key: &str) -> f64 {
     std::fs::read_to_string(path).ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix(' ')).and_then(|v| v.trim().parse::<f64>().ok()))).unwrap_or(0.0)
 }
 
-/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else one a core (at most 32) and as many as its share of
+/// How many runtimes a shot's bake steps on: RAEA_BAKE_WORKERS, else 0.6 a core (RAEA_BAKE_PER_CORE; at most 32) and as many as its share of
 /// the free memory holds at what a runtime of this bundle measured (runtime_gb, plus a quarter), each with at least
 /// RAEA_BAKE_MIN frames (6: a runtime's opening and its whole first tree are paid once per piece).
 /// raea processes running on this machine now, this one included (a member's lanes, which start together): the
@@ -170,8 +170,13 @@ fn workers_for(frames: usize, gb_each: f64) -> usize {
     // this bundle measured (runtime_gb), with a quarter more kept free
     let lanes = raea_processes();
     let cores = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) / lanes).max(1);
+    // runtimes a core (RAEA_BAKE_PER_CORE, default 0.6): each runtime's JS thread shares its core with the engine's
+    // own threads (its GC and JIT helpers, the fold), so one a core oversubscribed them. Measured by the analyst
+    // (G2, 13.2-CPU quota): 7-10 runtimes beat 13 by 20-35% and cut the cold peak 30-55%; 0.6 a core is 8 there
+    let per_core = std::env::var("RAEA_BAKE_PER_CORE").ok().and_then(|v| v.parse::<f64>().ok()).filter(|f| *f > 0.0 && *f <= 4.0).unwrap_or(0.6);
+    let by_cpu = ((cores as f64 * per_core).round() as usize).max(1);
     let by_mem = mem_available_gb().map_or(usize::MAX, |g| (g / lanes as f64 / (gb_each * 1.25)).floor().max(1.0) as usize);
-    let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(cores.min(32).min(by_mem)).clamp(1, 64);
+    let want = std::env::var("RAEA_BAKE_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(by_cpu.min(32).min(by_mem)).clamp(1, 64);
     let min = std::env::var("RAEA_BAKE_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6).max(1);
     want.min(frames.div_ceil(min)).max(1)
 }
