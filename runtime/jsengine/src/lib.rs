@@ -5,8 +5,8 @@
 //! calls globals by name with strings and numbers, and installs its natives as Rust functions.
 //!
 //! Which engine a host gets: `Engine::default()`, JavaScriptCore on Apple unless the `portable` feature is on (it
-//! forces QuickJS, so the portable path is tested on a Mac), QuickJS elsewhere; `BEVY_TSX_ENGINE=jsc|quickjs` picks one
-//! of those compiled in at run time.
+//! forces QuickJS, so the portable path is tested on a Mac), QuickJS elsewhere; `BEVY_TSX_ENGINE=jsc|quickjs|v8` picks
+//! one of those compiled in at run time (V8: Linux, a bake's engine).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,6 +16,9 @@ use std::rc::Rc;
 pub mod jsc;
 #[cfg(any(feature = "portable", not(target_vendor = "apple")))]
 mod quickjs;
+// V8 (Linux; BEVY_TSX_ENGINE=v8): the bake's engine of choice where it's built in
+#[cfg(target_os = "linux")]
+mod engine_v8;
 
 /// An argument to a global function.
 pub enum Arg<'a> {
@@ -129,6 +132,8 @@ pub enum Engine {
     Jsc,
     /// QuickJS (rquickjs)
     QuickJs,
+    /// V8 (rusty_v8; Linux)
+    V8,
 }
 
 impl Default for Engine {
@@ -138,6 +143,7 @@ impl Default for Engine {
         match std::env::var("BEVY_TSX_ENGINE").as_deref() {
             Ok("jsc") => return Engine::Jsc,
             Ok("quickjs") => return Engine::QuickJs,
+            Ok("v8") => return Engine::V8,
             _ => {}
         }
         if cfg!(all(target_vendor = "apple", not(feature = "portable"))) { Engine::Jsc } else { Engine::QuickJs }
@@ -156,6 +162,8 @@ impl Engine {
             Engine::Jsc => Err("JavaScriptCore isn't installed here (apt install libjavascriptcoregtk-4.1-0)".into()),
             #[cfg(any(feature = "portable", not(target_vendor = "apple")))]
             Engine::QuickJs => Ok(Box::new(quickjs::Quick::new()?)),
+            #[cfg(target_os = "linux")]
+            Engine::V8 => Ok(Box::new(engine_v8::V8::new()?)),
             #[allow(unreachable_patterns)]
             other => Err(format!("this build has no {other:?} engine")),
         }
@@ -238,5 +246,12 @@ mod tests {
     fn quickjs() {
         same(Engine::QuickJs);
         modules(Engine::QuickJs);
+    }
+
+    /// V8 (Linux): the same answers; classic scripts only, so no modules test
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v8() {
+        same(Engine::V8);
     }
 }

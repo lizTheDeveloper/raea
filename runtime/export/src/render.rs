@@ -69,7 +69,7 @@ pub fn render(args: &[String]) -> R<String> {
     // installed; a native shot's bake is where all its JavaScript runs (docs/native-shots.md)
     // (--native brings it too, unless --no-jit: a shot's bake is the one place its JavaScript runs)
     let native_jit = args.iter().any(|a| a == "--native") && !args.iter().any(|a| a == "--no-jit");
-    if args.iter().any(|a| a == "--jit") || native_jit {
+    if args.iter().any(|a| a == "--jit" || a == "--jit=v8") || native_jit {
         // JavaScriptCore on the system's malloc (WebKit's `Malloc=1`), unless the environment says otherwise: its own
         // heap (libpas) maps small 16 KB regions it doesn't coalesce, and a bake's runtimes (up to 32 VMs) took Ch1's
         // 22800-22950 past vm.max_map_count (65530) in 30 s: mmap then failed everywhere ("failed to allocate an
@@ -80,7 +80,14 @@ pub fn render(args: &[String]) -> R<String> {
             // SAFETY: before any thread of the render starts (React's runtimes start below)
             unsafe { std::env::set_var("Malloc", "1") };
         }
-        if raea_runtime_react::jsengine_jsc_available() {
+        // --jit=v8 (or RAEA_JIT=v8): V8 instead (Linux builds; Lane E, 2026-11-17: a bake's React about 7x faster than
+        // on JavaScriptCore's DFG). JS transcendentals are V8's own (fdlibm) where JSC's are the system's libm, so a
+        // bake on V8 can differ from one on JSC in the last bits (measured, release notes)
+        let v8 = args.iter().any(|a| a == "--jit=v8") || std::env::var("RAEA_JIT").as_deref() == Ok("v8");
+        if v8 && cfg!(target_os = "linux") {
+            // SAFETY: before any thread of the render starts (React's runtimes start below)
+            unsafe { std::env::set_var("BEVY_TSX_ENGINE", "v8") };
+        } else if raea_runtime_react::jsengine_jsc_available() {
             // SAFETY: before any thread of the render starts (React's runtimes start below)
             unsafe { std::env::set_var("BEVY_TSX_ENGINE", "jsc") };
         } else {
