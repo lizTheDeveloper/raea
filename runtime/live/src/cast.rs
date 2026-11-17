@@ -159,6 +159,9 @@ impl Live {
         // the frame on screen now gets its characters
         let f = self.frame;
         self.step_cast(f);
+        // the open's transients (the bundle, its first settle, the first rows) handed back (shots.rs trim)
+        super::shots::trim();
+        eprintln!("raea play --cast: after its open, {}", super::shots::mem());
         Ok(())
     }
 
@@ -182,6 +185,7 @@ impl Live {
         self.cast = Some(new);
         let f = self.frame;
         self.step_cast(f);
+        super::shots::trim();
         self.dirty = true;
         Ok(())
     }

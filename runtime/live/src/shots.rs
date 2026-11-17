@@ -291,7 +291,7 @@ fn header_ok(w: u32, h: u32, fps: f64, total: i64, last_op: i64) -> R<()> {
 }
 
 /// The process's memory now: resident (Linux) or physical footprint (macOS)
-fn mem() -> String {
+pub(crate) fn mem() -> String {
     let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()));
     match rss {
         Some(kb) => format!("RSS {:.2} GB", kb as f64 / 1048576.0),
@@ -299,15 +299,26 @@ fn mem() -> String {
     }
 }
 
-/// glibc keeps freed memory in its arenas: a parsed bake's JSON tree (several GB) stays resident after it's dropped
-/// unless it's handed back. (macOS's allocator returns it on its own.)
-fn trim() {
+/// Freed memory handed back to the system. glibc keeps it in its arenas: a parsed bake's JSON tree (several GB) stays
+/// resident after it's dropped. macOS's allocator keeps it too, as freed large blocks still dirty in the footprint
+/// (vmmap "MALLOC_LARGE (empty)"): with --cast, 2.6 GB of a 7.1 GB footprint on Ch5 (M3 Max, 2026-11-17), the cast's
+/// open and each cut's transients. Called after a shot is read or switched and after the cast opens (not per frame:
+/// it walks the zones).
+pub(crate) fn trim() {
     #[cfg(target_os = "linux")]
     {
         unsafe extern "C" {
             fn malloc_trim(pad: usize) -> i32;
         }
         unsafe { malloc_trim(0) };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // every zone (null), as much as it can (goal 0)
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
     }
 }
 
