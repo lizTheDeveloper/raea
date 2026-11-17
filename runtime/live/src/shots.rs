@@ -84,7 +84,7 @@ impl Live {
         let page = raea_runtime_page::BevyPage::new(w, h, &dir)?;
         let brand = raea_runtime_react::scene::page_css(&dir, w, &js);
         let start = spans[0].0;
-        let mut live = Live { app, dir: dir.clone(), page, brand, dirty: true, mixer: None, mixer_failed: false, lag: (0.0, std::time::Instant::now()), w, h, fps, frames: total, responsive: false, js, master: None, master_wav: None, game_master: None, game_gain: None, scene_rx: None, scene: None, live3d: None, frame: 0, pads: Vec::new(), pointer: Default::default(), made: Default::default(), sound_buf: Vec::new(), holders: Vec::new(), baked: Some(Arc::new(baked)), applied: -1, session: new_session(), shots: Some(Shots { files: spans, progs: Default::default(), ahead: None, at: None }) };
+        let mut live = Live { app, dir: dir.clone(), page, brand, dirty: true, mixer: None, mixer_failed: false, lag: (0.0, std::time::Instant::now()), w, h, fps, frames: total, responsive: false, js, master: None, master_wav: None, game_master: None, game_gain: None, scene_rx: None, scene: None, live3d: None, frame: 0, pads: Vec::new(), pointer: Default::default(), made: Default::default(), sound_buf: Vec::new(), holders: Vec::new(), baked: Some(Arc::new(baked)), applied: -1, session: new_session(), shots: Some(Shots { files: spans, progs: Default::default(), ahead: None, at: None }), cast: None };
         live.take_shot(0, first);
         trim();
         live.frame = start;
@@ -142,8 +142,7 @@ impl Live {
             }
             trim();
             raea_io_trace::event("shot_read", serde_json::json!({"shot": i, "waited_ms": t.elapsed().as_secs_f64() * 1e3}));
-            let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0);
-            eprintln!("raea play --shots: shot {i} read (waited {:.0} ms), RSS {:.1} GB", t.elapsed().as_secs_f64() * 1e3, rss as f64 / 1048576.0);
+            eprintln!("raea play --shots: shot {i} read (waited {:.0} ms), {}", t.elapsed().as_secs_f64() * 1e3, mem());
         }
         // the next shot read ahead while this one plays
         let dir = self.dir.clone();
@@ -185,10 +184,13 @@ impl Live {
         if let Some(s) = self.shots.as_mut() {
             s.at = Some(i);
         }
+        // the engine holds only the new shot's rows now: the cast is set into it whole at its next step
+        if let Some(c) = self.cast.as_mut() {
+            c.reset();
+        }
         trim();
         raea_io_trace::event("shot", serde_json::json!({"shot": i, "ms": t.elapsed().as_secs_f64() * 1e3, "reloaded": kept}));
-        let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).map_or(String::new(), |kb| format!(", RSS {:.1} GB", kb as f64 / 1048576.0));
-        eprintln!("raea play --shots: shot {i} (from frame {}) in {:.0} ms ({}{rss})", self.shots.as_ref().map_or(0, |s| s.files[i].0), t.elapsed().as_secs_f64() * 1e3, if kept { "engine reloaded" } else { "engine opened" });
+        eprintln!("raea play --shots: shot {i} (from frame {}) in {:.0} ms ({}, {})", self.shots.as_ref().map_or(0, |s| s.files[i].0), t.elapsed().as_secs_f64() * 1e3, if kept { "engine reloaded" } else { "engine opened" }, mem());
     }
 }
 
@@ -212,6 +214,15 @@ fn header_ok(w: u32, h: u32, fps: f64, total: i64, last_op: i64) -> R<()> {
         return Err(format!("the bake's commits reach frame {last_op}, outside its {total} frames"));
     }
     Ok(())
+}
+
+/// The process's memory now: resident (Linux) or physical footprint (macOS)
+fn mem() -> String {
+    let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()));
+    match rss {
+        Some(kb) => format!("RSS {:.2} GB", kb as f64 / 1048576.0),
+        None => format!("footprint {:.2} GB", raea_io_trace::footprint_mb() / 1024.0),
+    }
 }
 
 /// glibc keeps freed memory in its arenas: a parsed bake's JSON tree (several GB) stays resident after it's dropped

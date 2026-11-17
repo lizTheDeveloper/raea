@@ -52,6 +52,18 @@ impl Run {
             let fps = self.live.as_ref().map(|l| l.fps).unwrap_or(30.0);
             // the new one opens beside the old (a save that doesn't bundle, mid-edit, leaves the old one playing);
             // the old one is released as soon as the new one is in
+            // --cast: the cast reopened in place, the scenery's bakes, engine and frame kept
+            if self.live.as_ref().is_some_and(|l| l.cast_file().is_some()) {
+                if let Some(l) = self.live.as_mut() {
+                    match l.reload_cast() {
+                        Ok(()) => eprintln!("raea play: the cast reloaded ({}) in {:.0} ms, at frame {}", names.join(", "), t.elapsed().as_secs_f64() * 1e3, self.frame),
+                        Err(e) => eprintln!("raea play: the cast ({}) didn't reload ({e}); the last good one plays on: fix and save again", names.join(", ")),
+                    }
+                }
+                if let Some(w) = self.watch.as_mut() {
+                    w.refresh();
+                }
+            } else {
             match Live::open(&self.tsx, size) {
                 Ok(mut l) => {
                     drop(self.live.take());
@@ -71,6 +83,7 @@ impl Run {
             if let Some(w) = self.watch.as_mut() {
                 w.refresh();
             }
+            }
         }
         let (Some(live), Some(stage)) = (self.live.as_mut(), self.stage.as_mut()) else { return Ok(()) };
         let start = *self.start.get_or_insert_with(Instant::now);
@@ -84,7 +97,8 @@ impl Run {
             self.keys = vec![if (elapsed * 1.5) as i64 % 2 == 0 { "ArrowLeft".into() } else { "ArrowRight".into() }];
         }
         // the composition's clock: every frame due by now, each with this moment's input (a few at most when behind)
-        let due = (elapsed * live.fps).floor() as i64;
+        // (--shots: from the first frame the bakes cover)
+        let due = live.shots_first().unwrap_or(0) + (elapsed * live.fps).floor() as i64;
         let mut n = 0;
         while self.frame < due && n < 4 {
             self.frame += 1;
@@ -200,9 +214,22 @@ impl ApplicationHandler for Run {
             }
         };
         let px = window.inner_size();
-        let made = raea_gpu_device::present::window(window.clone(), px.width, px.height, self.vsync).and_then(|stage| Live::open(&self.tsx, (px.width, px.height)).map(|live| (stage, live)));
+        // --shots DIR: a chapter from its native-shot bakes; --cast CAST.tsx: live characters over them
+        let arg = |k: &str| std::env::args().skip_while(|a| a != k).nth(1);
+        let open = |tsx: &std::path::Path, size: (u32, u32)| -> Result<Live, String> {
+            let Some(d) = arg("--shots") else { return Live::open(tsx, size) };
+            let mut l = Live::open_shots(tsx, std::path::Path::new(&d))?;
+            if let Some(c) = arg("--cast") {
+                l.add_cast(std::path::Path::new(&c))?;
+            }
+            Ok(l)
+        };
+        let made = raea_gpu_device::present::window(window.clone(), px.width, px.height, self.vsync).and_then(|stage| open(&self.tsx, (px.width, px.height)).map(|live| (stage, live)));
         match made {
             Ok((stage, live)) => {
+                if let Some(f0) = live.shots_first() {
+                    self.frame = f0 - 1;
+                }
                 self.stage = Some(stage);
                 self.live = Some(live);
             }

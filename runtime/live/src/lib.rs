@@ -20,6 +20,7 @@ pub use pick3d::want_wire;
 pub use sound::warm_audio;
 mod draw;
 mod shots;
+mod cast;
 
 type R<T> = Result<T, String>;
 
@@ -78,6 +79,8 @@ pub struct Live {
     session: (u32, f64),
     /// `--shots`: a chapter played from its native-shot bakes, the 3D engine following the shot (shots.rs)
     shots: Option<shots::Shots>,
+    /// `--cast CAST.tsx`: live characters set into the shots' 3D each frame (cast.rs)
+    cast: Option<cast::Cast>,
 }
 
 /// A live session's seed and start: RAEA_SEED when it's set (a test), else from the clock and the process
@@ -213,6 +216,8 @@ impl Live {
             // the frame's time (its CSS animations), as the render styled it
             self.page.at_frame(f, self.fps);
             self.replay(f);
+            // --cast: the live characters at this frame, into the shot's 3D
+            self.step_cast(f);
         } else if self.live3d.as_mut().is_some_and(|l| std::mem::take(&mut l.warm)) && f == 0 && keys.is_empty() && pointer.is_none() {
             // frame 0 with no input is on the page already (stepped when it opened): stepped again it commits nothing,
             // and the settle waited out its 0.5 s for a commit

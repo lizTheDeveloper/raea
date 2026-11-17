@@ -25,6 +25,10 @@ pub(crate) fn offscreen(mut run: Run, json: Option<String>, flat_out: bool, snap
     // --shots DIR: a chapter from its native-shot bakes (no JS per frame: raea-runtime-live shots.rs)
     let shots = std::env::args().skip_while(|a| a != "--shots").nth(1);
     let mut live = if let Some(d) = &shots { Live::open_shots(&run.tsx, std::path::Path::new(d))? } else if std::env::args().any(|a| a == "--baked") { Live::open_baked(&run.tsx)? } else { Live::open(&run.tsx, (w, h))? };
+    // --cast CAST.tsx: live characters over the shots (raea-runtime-live cast.rs)
+    if let Some(c) = std::env::args().skip_while(|a| a != "--cast").nth(1) {
+        live.add_cast(std::path::Path::new(&c))?;
+    }
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;
     raea_runtime_react::startup_mark("opened");
     // --master: a timeline's sound mastered as its render's (what the legacy app's stage does for an edit)

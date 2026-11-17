@@ -172,7 +172,8 @@ pub fn play(args: &[String]) -> R<String> {
         reusable: Vec::new(),
         last_rss: None,
         error: None,
-        watch: args.iter().any(|a| a == "--watch").then(|| watch::Watch::new(&PathBuf::from(&args[1]))),
+        // with --cast, the cast is what an edit reloads (the scenery is its bakes)
+        watch: args.iter().any(|a| a == "--watch").then(|| watch::Watch::new(&PathBuf::from(args.iter().skip_while(|a| *a != "--cast").nth(1).unwrap_or(&args[1])))),
     };
     if let Some(w) = &run.watch {
         eprintln!("raea play: watching {} files of {} (--watch: a save reloads it in place)", w.len(), run.tsx.display());

@@ -91,6 +91,18 @@ impl LiveScene {
         *self = LiveScene::default();
     }
 
+    /// A LiveScene whose new rows are numbered from `n` (`mesh{n}`, `model{n}`...): a live layer set into an engine that
+    /// holds another Program's rows (`raea play --shots DIR --cast CAST.tsx`: live characters over a baked shot), clear
+    /// of that Program's own ids, which count from 0.
+    pub fn numbered_from(n: usize) -> LiveScene {
+        LiveScene { made: [n; 5], ..Default::default() }
+    }
+
+    /// Every row this layer has set (kind, id): what to remove from the engine when the layer is replaced
+    pub fn row_ids(&self) -> Vec<(String, String)> {
+        self.rows.iter().map(|(id, r)| (r.kind.clone(), id.clone())).collect()
+    }
+
     /// The frame's camera row, as a render's program holds it at this frame (camera.rs), its spawns into `p`: a frame
     /// without a camera holds the one before.
     pub(crate) fn camera_row(&self, all: &[Vec<Item>], clear: Option<&str>, p: &mut Program) -> BTreeMap<String, V> {
@@ -424,6 +436,19 @@ mod tests {
         let id_of = |name: &str| set.iter().find(|t| t.vals.get("name") == Some(&V::S(name.into()))).map(|t| t.id.clone()).unwrap();
         let body = set.iter().find(|t| t.vals.get("name") == Some(&V::S("b-body".into()))).unwrap();
         assert_eq!(body.vals.get("bone_rows"), Some(&V::S(id_of("b-head"))));
+    }
+
+    /// A live layer's rows numbered clear of a baked Program's (mesh0.., model0..), its references following
+    #[test]
+    fn a_numbered_layer_keeps_clear_of_a_programs_ids() {
+        let mut ls = LiveScene::numbered_from(1_000_000);
+        let (set, _) = ls.frame(Shot { scene: &person("a"), clear: None });
+        let models: Vec<&str> = set.iter().filter(|t| t.kind == "model").map(|t| t.id.as_str()).collect();
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|id| id.strip_prefix("model").and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n >= 1_000_000)), "{models:?}");
+        let body = set.iter().find(|t| t.vals.get("name") == Some(&V::S("a-body".into()))).unwrap();
+        let head = set.iter().find(|t| t.vals.get("name") == Some(&V::S("a-head".into()))).unwrap();
+        assert_eq!(body.vals.get("bone_rows"), Some(&V::S(head.id.as_str().into())));
     }
 
     /// A glyph faded in (`reveal`: 0, 0.5, 1) is opaque once done, not left at its last fade (#38: bevy/text3d's tag).
